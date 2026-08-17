@@ -96,6 +96,7 @@
   font: inherit;
   color: inherit;
   box-sizing: border-box;
+  text-decoration: none;
   transition:
     border-color 0.18s ease,
     border-style 0.18s ease,
@@ -598,6 +599,21 @@
   font-size: 11px;
   line-height: 1.5;
   color: var(--td-text-color-secondary);
+}
+
+.landing-step-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--td-brand-color);
+
+  :deep(.t-icon) {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
 }
 
 .landing-step-action,

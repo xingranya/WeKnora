@@ -6027,7 +6027,7 @@ export default {
         },
         install: {
           title: 'Install the extension',
-          desc: 'Install “Knowledge Assistant” from the Chrome Web Store.'
+          desc: 'Download the CRX above, open chrome://extensions or edge://extensions, enable Developer mode, and drag the file onto the page.'
         },
         connect: {
           title: 'Connect in the extension',
@@ -6037,9 +6037,10 @@ export default {
       openApiSettings: 'Open API Info',
       copy: 'Copy',
       copySuccess: 'API URL copied',
-      installCta: 'Chrome Web Store',
-      installCtaHint: 'Official extension · opens in a new tab',
-      storeMeta: 'Chrome Web Store · v1.0.0'
+      installCta: 'Download extension',
+      installCtaHint: 'Internal CRX package · follow the steps after download',
+      storeMeta: 'Internal CRX package · v1.0.0',
+      installGuide: 'When prompted, confirm Add extension or Keep to finish the installation.'
     },
     claw: {
       title: '见外传媒知识库 Skill',

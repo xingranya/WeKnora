@@ -330,9 +330,10 @@ export default {
       openApiSettings: 'Открыть API-информацию',
       copy: 'Копировать',
       copySuccess: 'URL API скопирован',
-      installCta: 'Chrome Web Store',
-      installCtaHint: 'Официальное расширение · откроется в новой вкладке',
-      storeMeta: 'Chrome Web Store · v1.0.0',
+      installCta: 'Скачать расширение',
+      installCtaHint: 'Внутренний CRX-файл · после загрузки следуйте шагам',
+      storeMeta: 'Внутренний CRX-файл · v1.0.0',
+      installGuide: 'При появлении запроса подтвердите добавление расширения или сохранение файла.',
       steps: {
         connect: {
           title: 'Подключите в расширении',
@@ -340,7 +341,7 @@ export default {
         },
         install: {
           title: 'Установите расширение',
-          desc: 'Установите «Помощник по знаниям» из Chrome Web Store.'
+          desc: 'Скачайте CRX-файл выше, откройте chrome://extensions или edge://extensions, включите режим разработчика и перетащите файл на страницу.'
         },
         port: {
           title: 'Десктоп: фиксированный порт',

@@ -330,9 +330,10 @@ export default {
       openApiSettings: 'API 정보 열기',
       copy: '복사',
       copySuccess: 'API 주소가 복사되었습니다',
-      installCta: 'Chrome 웹 스토어',
-      installCtaHint: '공식 확장 · 새 탭에서 열림',
-      storeMeta: 'Chrome 웹 스토어 · v1.0.0',
+      installCta: '확장 프로그램 다운로드',
+      installCtaHint: '내부 CRX 파일 · 다운로드 후 아래 단계 진행',
+      storeMeta: '내부 CRX 설치 파일 · v1.0.0',
+      installGuide: '확인 창이 나타나면 “확장 프로그램 추가” 또는 “유지”를 선택하세요.',
       steps: {
         connect: {
           title: '확장에서 연결',
@@ -340,7 +341,7 @@ export default {
         },
         install: {
           title: 'Chrome 확장 설치',
-          desc: 'Chrome 웹 스토어에서 「지식 관리 어시스턴트」를 설치하세요.'
+          desc: '위의 CRX 파일을 다운로드한 뒤 chrome://extensions 또는 edge://extensions를 열고 개발자 모드를 켠 다음 파일을 페이지로 끌어다 놓으세요.'
         },
         port: {
           title: '데스크톱: 고정 포트(권장)',

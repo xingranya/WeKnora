@@ -15,7 +15,9 @@
         variant="chrome"
         :label="$t('integrations.chrome.installCta')"
         :hint="$t('integrations.chrome.installCtaHint')"
-        @click="openChromeStore"
+        :href="CHROME_EXTENSION_DOWNLOAD_URL"
+        download="weknora-knowledge-assistant-1.0.0.crx"
+        trailing-icon="download"
       >
         <template #icon>
           <t-icon name="extension" size="18px" />
@@ -53,6 +55,10 @@
               <div class="landing-step-body">
                 <div class="landing-step-title">{{ $t(`integrations.chrome.steps.${step}.title`) }}</div>
                 <p class="landing-step-desc">{{ $t(`integrations.chrome.steps.${step}.desc`) }}</p>
+                <p v-if="step === 'install'" class="landing-step-guide">
+                  <t-icon name="info-circle" />
+                  {{ $t('integrations.chrome.installGuide') }}
+                </p>
                 <t-button
                   v-if="step === 'api'"
                   size="small"
@@ -91,7 +97,7 @@
 <script setup lang="ts">
 import { copyWithToast } from '@/utils/clipboard'
 import { useRouter } from 'vue-router'
-import { CHROME_EXTENSION_URL } from '@/config/integrations'
+import { CHROME_EXTENSION_DOWNLOAD_URL } from '@/config/integrations'
 import { useApiBaseUrlDisplay } from '@/composables/useApiBaseUrlDisplay'
 import { useUIStore } from '@/stores/ui'
 import IntegrationLandingLayout from './IntegrationLandingLayout.vue'
@@ -110,10 +116,6 @@ const capabilityIcons: Record<(typeof capabilityKeys)[number], string> = {
   clip: 'file-copy',
   notes: 'edit',
   shortcuts: 'jump',
-}
-
-const openChromeStore = () => {
-  window.open(CHROME_EXTENSION_URL, '_blank', 'noopener,noreferrer')
 }
 
 const openApiSettings = () => {

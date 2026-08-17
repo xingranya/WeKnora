@@ -330,9 +330,10 @@ export default {
       openApiSettings: '打开 API 信息',
       copy: '复制',
       copySuccess: '已复制 API 地址',
-      installCta: '前往 Chrome 应用商店',
-      installCtaHint: '官方扩展 · 将在新标签页打开',
-      storeMeta: 'Chrome 应用商店 · v1.0.0',
+      installCta: '下载插件安装包',
+      installCtaHint: '内部 CRX 文件 · 下载后按步骤安装',
+      storeMeta: '内部 CRX 安装包 · v1.0.0',
+      installGuide: '浏览器弹出确认提示时，请选择“添加扩展”或“保留”。',
       steps: {
         connect: {
           title: '在插件中完成连接',
@@ -340,7 +341,7 @@ export default {
         },
         install: {
           title: '安装 Chrome 插件',
-          desc: '前往 Chrome 应用商店安装「知识管理助手」。'
+          desc: '先下载上方 CRX 安装包，再打开 chrome://extensions 或 edge://extensions，开启开发者模式并将文件拖入页面完成安装。'
         },
         port: {
           title: '桌面版配置固定端口（推荐）',

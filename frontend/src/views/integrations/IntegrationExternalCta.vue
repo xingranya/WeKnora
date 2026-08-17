@@ -1,8 +1,12 @@
 <template>
-  <button
-    type="button"
+  <component
+    :is="href ? 'a' : 'button'"
+    :type="href ? undefined : 'button'"
     class="ext-cta"
     :class="`ext-cta--${variant}`"
+    :href="href"
+    :download="download"
+    :rel="href ? 'noopener' : undefined"
     @click="emit('click')"
   >
     <span class="ext-cta__badge" aria-hidden="true">
@@ -13,9 +17,9 @@
       <span v-if="hint" class="ext-cta__hint">{{ hint }}</span>
     </span>
     <span class="ext-cta__arrow-wrap" aria-hidden="true">
-      <t-icon name="jump" class="ext-cta__arrow" />
+      <t-icon :name="trailingIcon" class="ext-cta__arrow" />
     </span>
-  </button>
+  </component>
 </template>
 
 <script setup lang="ts">
@@ -24,8 +28,11 @@ withDefaults(
     label: string
     hint?: string
     variant?: 'chrome' | 'claw'
+    href?: string
+    download?: string
+    trailingIcon?: string
   }>(),
-  { variant: 'chrome' },
+  { variant: 'chrome', trailingIcon: 'jump' },
 )
 
 const emit = defineEmits<{

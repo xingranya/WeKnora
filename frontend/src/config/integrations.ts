@@ -3,6 +3,8 @@ import type { DeploymentCapabilityKey } from './deploymentCapabilities'
 export const CHROME_EXTENSION_URL =
   'https://chromewebstore.google.com/detail/jpemjbopikggjlmikmclgbmkhhopjdgd?utm_source=item-share-cb'
 
+export const CHROME_EXTENSION_DOWNLOAD_URL = '/downloads/weknora-knowledge-assistant-1.0.0.crx'
+
 export const CLAWHUB_SKILL_URL = 'https://clawhub.ai/lyingbug/weknora'
 
 export type IntegrationTab = 'im' | 'embed' | 'api' | 'chrome' | 'claw'
