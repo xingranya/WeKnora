@@ -134,6 +134,27 @@ func TestResolveDataURIImages(t *testing.T) {
 	}
 }
 
+func TestResolveDataURIImages_AllowsMoreThanRemoteImageLimit(t *testing.T) {
+	png := createTestPNG(200, 150)
+	b64 := base64.StdEncoding.EncodeToString(png)
+	imageMarkdown := "![](data:image/png;base64," + b64 + ")\n"
+	want := maxRemoteImages + 16
+	svc := &captureSaveBytes{}
+	r := NewImageResolver()
+	out, imgs, err := r.ResolveDataURIImages(
+		context.Background(), strings.Repeat(imageMarkdown, want), svc, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != want || len(svc.saved) != want {
+		t.Fatalf("resolved=%d saved=%d, want=%d", len(imgs), len(svc.saved), want)
+	}
+	if strings.Contains(out, "data:image") {
+		t.Fatal("data URI remained after resolving embedded images")
+	}
+}
+
 func TestResolveDataURIImages_CaseInsensitive(t *testing.T) {
 	png := createTestPNG(200, 150)
 	b64 := base64.StdEncoding.EncodeToString(png)

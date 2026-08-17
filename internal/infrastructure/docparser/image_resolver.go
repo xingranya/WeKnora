@@ -624,6 +624,9 @@ const (
 	maxRemoteImageSize = 10 * 1024 * 1024 // 10 MB
 	// maxRemoteImages is the maximum number of remote images to process per document.
 	maxRemoteImages = 30
+	// maxEmbeddedDataURIImages is higher because manual Markdown requests have a
+	// separate 32 MB total-size limit and their inline images are already local bytes.
+	maxEmbeddedDataURIImages = 100
 	// remoteImageFetchTimeout is the per-image HTTP request timeout.
 	remoteImageFetchTimeout = 15 * time.Second
 )
@@ -697,7 +700,7 @@ func (r *ImageResolver) ResolveDataURIImages(
 
 	processed := 0
 	for i := len(matches) - 1; i >= 0; i-- {
-		if processed >= maxRemoteImages {
+		if processed >= maxEmbeddedDataURIImages {
 			break
 		}
 		m := matches[i]
