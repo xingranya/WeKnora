@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -41,7 +42,8 @@ type BuiltinModelEntry struct {
 }
 
 type builtinModelsFile struct {
-	BuiltinModels []BuiltinModelEntry `yaml:"builtin_models"`
+	BuiltinModels         []BuiltinModelEntry `yaml:"builtin_models"`
+	AdoptExistingModelIDs []string            `yaml:"adopt_existing_model_ids"`
 }
 
 // builtinModelEnvPattern matches ${NAME} placeholders. Mirrors the pattern in
@@ -121,6 +123,10 @@ func LoadBuiltinModelsConfig(ctx context.Context, db *gorm.DB, configDir string)
 		return nil
 	}
 
+	// 采用清单只提升现有模型的全局可见性，不接管其生命周期，也不改写参数或凭据。
+	// 这允许部署方把已经在管理界面配置好的模型安全地升级为公司预置模型。
+	adopted := adoptExistingBuiltinModels(ctx, db, file.AdoptExistingModelIDs)
+
 	// yamlIDs collects every id we successfully upserted this run. Used by
 	// the drift sweep below to determine which previously-yaml-managed rows
 	// have disappeared and should be retired.
@@ -192,8 +198,62 @@ func LoadBuiltinModelsConfig(ctx context.Context, db *gorm.DB, configDir string)
 		log.Printf("[builtin-models] WARN: drift sweep failed: %v; continuing", sweepErr)
 	}
 
-	log.Printf("[builtin-models] applied: %d upserted, %d pruned from %s", applied, pruned, path)
+	log.Printf("[builtin-models] applied: %d upserted, %d adopted, %d pruned from %s", applied, adopted, pruned, path)
 	return nil
+}
+
+// adoptExistingBuiltinModels 按稳定 ID 采用已有模型。
+// 仅更新 is_builtin，保留 tenant_id、managed_by、默认状态、参数和加密凭据。
+// 清单是幂等的单向提升；移除 ID 不会自动降级或删除已经采用的模型。
+func adoptExistingBuiltinModels(ctx context.Context, db *gorm.DB, rawIDs []string) int64 {
+	seen := make(map[string]struct{}, len(rawIDs))
+	var adopted int64
+
+	for index, rawID := range rawIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			log.Printf("[builtin-models] WARN: adopt_existing_model_ids[%d] is empty; skipping", index)
+			continue
+		}
+		if len(id) > ModelIDMaxLen {
+			log.Printf("[builtin-models] WARN: adopt existing id %q exceeds %d-char DB limit; skipping", id, ModelIDMaxLen)
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		var existing Model
+		err := db.WithContext(ctx).
+			Select("id", "name", "is_builtin").
+			Where("id = ?", id).
+			First(&existing).Error
+		if err == gorm.ErrRecordNotFound {
+			log.Printf("[builtin-models] WARN: adopt existing model %s not found; skipping", id)
+			continue
+		}
+		if err != nil {
+			log.Printf("[builtin-models] WARN: inspect adopt existing model %s failed: %v; skipping", id, err)
+			continue
+		}
+		if existing.IsBuiltin {
+			continue
+		}
+
+		res := db.WithContext(ctx).
+			Model(&Model{}).
+			Where("id = ?", id).
+			Update("is_builtin", true)
+		if res.Error != nil {
+			log.Printf("[builtin-models] WARN: adopt existing model %s failed: %v; skipping", id, res.Error)
+			continue
+		}
+		adopted += res.RowsAffected
+		log.Printf("[builtin-models] adopted existing: id=%s name=%s", id, existing.Name)
+	}
+
+	return adopted
 }
 
 // pruneOrphanYAMLManagedModels soft-deletes rows where managed_by='yaml'

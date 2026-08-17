@@ -171,6 +171,53 @@ func TestLoadBuiltinModelsConfig_EnvInterpolation(t *testing.T) {
 		"unset env var must be kept as literal placeholder")
 }
 
+func TestLoadBuiltinModelsConfig_AdoptsExistingWithoutOverwriting(t *testing.T) {
+	db := setupBuiltinModelsDB(t)
+	existing := &Model{
+		ID:          "existing-company-chat",
+		TenantID:    10000,
+		Name:        "company-chat",
+		Type:        ModelTypeKnowledgeQA,
+		Source:      ModelSourceRemote,
+		Status:      ModelStatusActive,
+		IsDefault:   true,
+		IsBuiltin:   false,
+		ManagedBy:   "",
+		Description: "现有公司模型",
+		Parameters: ModelParameters{
+			BaseURL: "https://models.example.com/v1",
+			APIKey:  "encrypted-or-plain-existing-secret",
+			Provider: "generic",
+		},
+	}
+	require.NoError(t, db.Create(existing).Error)
+
+	dir := writeYAML(t, `adopt_existing_model_ids:
+  - existing-company-chat
+  - existing-company-chat
+  - missing-company-model
+builtin_models: []
+`)
+	require.NoError(t, LoadBuiltinModelsConfig(context.Background(), db, dir))
+	require.NoError(t, LoadBuiltinModelsConfig(context.Background(), db, dir))
+
+	var adopted Model
+	require.NoError(t, db.Where("id = ?", existing.ID).First(&adopted).Error)
+	assert.True(t, adopted.IsBuiltin)
+	assert.Equal(t, existing.TenantID, adopted.TenantID)
+	assert.Equal(t, existing.Name, adopted.Name)
+	assert.Equal(t, existing.Description, adopted.Description)
+	assert.Equal(t, existing.IsDefault, adopted.IsDefault)
+	assert.Equal(t, existing.ManagedBy, adopted.ManagedBy)
+	assert.Equal(t, existing.Parameters.BaseURL, adopted.Parameters.BaseURL)
+	assert.Equal(t, existing.Parameters.APIKey, adopted.Parameters.APIKey)
+	assert.Equal(t, existing.Parameters.Provider, adopted.Parameters.Provider)
+
+	var missingCount int64
+	require.NoError(t, db.Model(&Model{}).Where("id = ?", "missing-company-model").Count(&missingCount).Error)
+	assert.Zero(t, missingCount, "采用清单不能凭空创建缺少参数的模型")
+}
+
 func TestLoadBuiltinModelsConfig_DriftSweepRemovesYAMLManaged(t *testing.T) {
 	db := setupBuiltinModelsDB(t)
 

@@ -25,6 +25,10 @@
 # enough for changes to take effect. Entries removed from the file are NOT
 # auto-deleted from the database; clean them up manually if you need to.
 
+# 可选：把已经通过管理界面配置好的模型按稳定 ID 提升为公司预置模型。
+# 只更新 is_builtin，不覆盖现有参数、凭据、默认状态或归属空间。
+adopt_existing_model_ids: []
+
 builtin_models: []
 
 # ----- Example: env-driven entries — uncomment and adapt --------------------

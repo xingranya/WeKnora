@@ -1,0 +1,15 @@
+# 见外传媒当前公司预置模型。
+# 这些模型已经在系统管理空间中完成连接配置，采用时只提升全平台可见性，
+# 不复制、不覆盖数据库中的参数和加密凭据。
+adopt_existing_model_ids:
+  - f7151059-adf6-449f-b90c-c831e63f9107 # 语音识别转录模型
+  - 76c28a52-783d-453a-b86c-9870ddb1cb80 # BGE-M3 本地向量模型
+  - faec5372-e975-4b77-b1d4-9c297c8a49a0 # Qwen3 VL 向量模型
+  - 13fc4cb3-30d7-42e6-81d2-60029d4060a1 # SEEWAY GPT-5.6 Terra
+  - 9a3875c5-9db5-4dbb-a612-1104d7807af1 # DeepSeek V4 Flash
+  - 34b1ce37-049a-4c8c-ae0e-fabfce887f5d # Qwen3 VL 重排序模型
+  - 94e07843-7fbb-40b2-8e5b-36ff720206e1 # GPT-5.6 Terra 视觉模型
+  - b7691a7d-4406-44e6-9bb0-c1352f7982fc # Qwen3.6 视觉模型
+
+# 新建且由 YAML 完整托管的模型仍在这里声明；当前公司模型采用现有安全配置。
+builtin_models: []

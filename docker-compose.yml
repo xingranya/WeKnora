@@ -45,10 +45,8 @@ services:
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
       - ./skills/preloaded:/app/skills/preloaded
-      # Optional: declarative built-in models. Copy config/builtin_models.yaml.example
-      # to config/builtin_models.yaml, edit it for your deployment, then
-      # uncomment the line below. See docs/BUILTIN_MODELS.md.
-      # - ./config/builtin_models.yaml:/app/config/builtin_models.yaml:ro
+      # 公司预置模型采用清单与声明式配置。文件已纳入当前部署仓库，运行时只读挂载。
+      - ./config/builtin_models.yaml:/app/config/builtin_models.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
