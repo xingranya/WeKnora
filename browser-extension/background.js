@@ -121,27 +121,78 @@ async function extractAllFrames(tabId) {
       func: async function () {
         if (!window.JiwaiPageExtractor) return null;
         try {
-          return await window.JiwaiPageExtractor.extract({
+          var result = await window.JiwaiPageExtractor.extract({
             document: document,
             url: location.href,
             maxWaitMs: 5000
           });
+          window.__jiwaiFrameExtraction = result;
+          return {
+            title: result.title || '',
+            author: result.author || '',
+            description: result.description || '',
+            site: result.site || '',
+            published: result.published || '',
+            matchedSite: !!result.matchedSite,
+            adapterId: result.adapterId || 'generic',
+            imageCount: result.imageCount || 0,
+            blockCount: result.blockCount || 0,
+            markdownLength: (result.markdown || '').length
+          };
         } catch (error) {
           return null;
         }
       }
     });
+    var candidates = injections.map(function (injection) {
+      if (!injection.result || injection.result.markdownLength <= 80) return null;
+      return Object.assign({ frameId: injection.frameId }, injection.result);
+    }).filter(Boolean);
+    candidates.sort(function (left, right) {
+      var leftScore = left.markdownLength + (left.matchedSite ? 100000 : 0);
+      var rightScore = right.markdownLength + (right.matchedSite ? 100000 : 0);
+      return rightScore - leftScore;
+    });
+    var best = candidates[0];
+    if (!best) return { success: true, data: [] };
+
     return {
       success: true,
-      data: injections.map(function (injection) {
-        if (!injection.result) return null;
-        injection.result.frameId = injection.frameId;
-        return injection.result;
-      }).filter(Boolean)
+      data: [Object.assign({}, best, { chunked: true })]
     };
   } catch (error) {
     return { success: false, error: error.message || '跨 frame 页面读取失败' };
   }
+}
+
+async function readFrameExtractionChunk(tabId, frameId, offset, size) {
+  var safeSize = Math.max(1, Math.min(Number(size) || 0, 512 * 1024));
+  var safeOffset = Math.max(0, Number(offset) || 0);
+  try {
+    var result = await chrome.scripting.executeScript({
+      target: { tabId: tabId, frameIds: [Number(frameId)] },
+      func: function (chunkOffset, chunkSize) {
+        var extraction = window.__jiwaiFrameExtraction;
+        return extraction && extraction.markdown
+          ? extraction.markdown.slice(chunkOffset, chunkOffset + chunkSize)
+          : '';
+      },
+      args: [safeOffset, safeSize]
+    });
+    return { success: true, data: (result[0] && result[0].result) || '' };
+  } catch (error) {
+    return { success: false, error: error.message || '读取采集分块失败' };
+  }
+}
+
+async function clearFrameExtraction(tabId, frameId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId, frameIds: [Number(frameId)] },
+      func: function () { delete window.__jiwaiFrameExtraction; }
+    });
+  } catch (e) {}
+  return { success: true };
 }
 
 // === chatbot.weixin.qq.com 扫码登录 API Helper ===
@@ -475,6 +526,21 @@ async function handleMessage(msg, sender) {
         return { success: false, error: '无法获取当前标签页' };
       }
       return extractAllFrames(sender.tab.id);
+
+    case 'EXTRACT_FRAME_CHUNK':
+      if (!sender || !sender.tab || !sender.tab.id) {
+        return { success: false, error: '无法获取当前标签页' };
+      }
+      return readFrameExtractionChunk(
+        sender.tab.id,
+        msg.payload && msg.payload.frameId,
+        msg.payload && msg.payload.offset,
+        msg.payload && msg.payload.size
+      );
+
+    case 'CLEAR_FRAME_EXTRACTION':
+      if (!sender || !sender.tab || !sender.tab.id) return { success: true };
+      return clearFrameExtraction(sender.tab.id, msg.payload && msg.payload.frameId);
 
     // === WeKnora API 相关 ===
     case 'VALIDATE_CONFIG':

@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +21,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
+
+var manualEmbeddedImageDataPattern = regexp.MustCompile(
+	`(?i)data:image/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+`,
+)
+
+func validateManualContentLength(content string) error {
+	if len(content) > manualContentMaxBytes {
+		return werrors.NewValidationError(
+			fmt.Sprintf("内容总大小超出限制（最多%dMB）", manualContentMaxBytes/(1024*1024)),
+		)
+	}
+	textOnly := manualEmbeddedImageDataPattern.ReplaceAllString(content, "data:image/embedded")
+	if len([]rune(textOnly)) > manualContentMaxLength {
+		return werrors.NewValidationError(fmt.Sprintf("内容长度超出限制（最多%d个字符，不含内嵌图片）", manualContentMaxLength))
+	}
+	return nil
+}
 
 // CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
@@ -737,8 +755,8 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 	if strings.TrimSpace(cleanContent) == "" {
 		return nil, werrors.NewValidationError("内容不能为空")
 	}
-	if len([]rune(cleanContent)) > manualContentMaxLength {
-		return nil, werrors.NewValidationError(fmt.Sprintf("内容长度超出限制（最多%d个字符）", manualContentMaxLength))
+	if err := validateManualContentLength(cleanContent); err != nil {
+		return nil, err
 	}
 
 	safeTitle, ok := secutils.ValidateInput(payload.Title)
@@ -995,8 +1013,8 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	if strings.TrimSpace(cleanContent) == "" {
 		return nil, werrors.NewValidationError("内容不能为空")
 	}
-	if len([]rune(cleanContent)) > manualContentMaxLength {
-		return nil, werrors.NewValidationError(fmt.Sprintf("内容长度超出限制（最多%d个字符）", manualContentMaxLength))
+	if err := validateManualContentLength(cleanContent); err != nil {
+		return nil, err
 	}
 
 	safeTitle, ok := secutils.ValidateInput(payload.Title)
@@ -1205,6 +1223,17 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 			logger.Infof(ctx, "Resolved %d remote images for manual knowledge %s", len(storedImages), knowledge.ID)
 			clean = updatedContent
 			resolvedImages = append(resolvedImages, storedImages...)
+		}
+	}
+	if clean != strings.TrimSpace(content) {
+		if meta, err := knowledge.ManualMetadata(); err == nil && meta != nil {
+			meta.Content = clean
+			meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if err := knowledge.SetManualMetadata(meta); err != nil {
+				logger.Warnf(ctx, "Failed to update resolved manual metadata for %s: %v", knowledge.ID, err)
+			} else if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
+				logger.Warnf(ctx, "Failed to persist resolved manual metadata for %s: %v", knowledge.ID, err)
+			}
 		}
 	}
 

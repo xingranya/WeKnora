@@ -356,7 +356,7 @@ export default {
       copySuccess: 'API 주소가 복사되었습니다',
       installCta: '확장 프로그램 다운로드',
       installCtaHint: '내부 CRX 파일 · 다운로드 후 아래 단계 진행',
-      storeMeta: '见外 지식베이스 도우미 · v1.1.0',
+      storeMeta: '见外 지식베이스 도우미 · v1.2.0',
       installGuide: '확인 창이 나타나면 “확장 프로그램 추가” 또는 “유지”를 선택하세요.',
       steps: {
         connect: {

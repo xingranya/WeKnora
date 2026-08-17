@@ -179,16 +179,59 @@
     return null;
   }
 
-  function requestAllFrameExtractions() {
+  function sendRuntimeMessage(message) {
     return new Promise(function (resolve) {
+      safeSendMessage(message, function (response) { resolve(response || null); });
+    });
+  }
+
+  function setContentStage(stage, details) {
+    var state = Object.assign({ stage: stage, timestamp: Date.now(), url: location.href }, details || {});
+    window.__jiwaiContentStage = state;
+    try { chrome.storage.session.set({ jiwai_content_stage: state }); } catch (e) {}
+  }
+
+  async function requestAllFrameExtractions() {
+    setContentStage('metadata');
+    var response = await new Promise(function (resolve) {
       safeSendMessage({ type: 'EXTRACT_ALL_FRAMES' }, function (response) {
-        if (!response || !response.success || !Array.isArray(response.data)) {
-          resolve([]);
-          return;
-        }
-        resolve(response.data);
+        resolve(response || null);
       });
     });
+    if (!response || !response.success || !Array.isArray(response.data)) {
+      setContentStage('metadata-error', { error: response && response.error ? response.error : '无有效响应' });
+      return [];
+    }
+
+    for (var resultIndex = 0; resultIndex < response.data.length; resultIndex++) {
+      var result = response.data[resultIndex];
+      if (!result || !result.chunked || !result.markdownLength) continue;
+      var parts = [];
+      var chunkSize = 512 * 1024;
+      var totalChunks = Math.ceil(result.markdownLength / chunkSize);
+      for (var offset = 0; offset < result.markdownLength; offset += chunkSize) {
+        var chunkResponse = await sendRuntimeMessage({
+          type: 'EXTRACT_FRAME_CHUNK',
+          payload: { frameId: result.frameId, offset: offset, size: chunkSize }
+        });
+        if (!chunkResponse || !chunkResponse.success) {
+          setContentStage('chunk-error', { offset: offset, error: chunkResponse && chunkResponse.error ? chunkResponse.error : '分块读取失败' });
+          parts = [];
+          break;
+        }
+        parts.push(chunkResponse.data || '');
+        setContentStage('chunks', {
+          completed: parts.length,
+          total: totalChunks
+        });
+      }
+      await sendRuntimeMessage({ type: 'CLEAR_FRAME_EXTRACTION', payload: { frameId: result.frameId } });
+      result.markdown = parts.join('');
+      setContentStage('assembled', { length: result.markdown.length });
+      delete result.chunked;
+      delete result.markdownLength;
+    }
+    return response.data;
   }
 
   function selectBestFrameExtraction(results) {
@@ -210,6 +253,7 @@
 
     // 动态办公文档优先使用站点适配器，普通网页继续保留 Defuddle 的正文提取优势。
     var enhanced = selectBestFrameExtraction(await requestAllFrameExtractions());
+    setContentStage('selected', { length: enhanced && enhanced.markdown ? enhanced.markdown.length : 0 });
     if (!enhanced && window.JiwaiPageExtractor) {
       try {
         enhanced = await window.JiwaiPageExtractor.extract({
@@ -221,7 +265,7 @@
         enhanced = null;
       }
     }
-    var defuddled = extractWithDefuddle();
+    var defuddled = enhanced && enhanced.matchedSite ? null : extractWithDefuddle();
     var enhancedLength = enhanced && enhanced.markdown ? enhanced.markdown.length : 0;
     var defuddledLength = defuddled && defuddled.markdown ? defuddled.markdown.length : 0;
     var extracted = enhanced && enhancedLength > 80 &&
@@ -235,6 +279,11 @@
       title = extracted.frameId && extracted.frameId !== 0
         ? (document.title || extracted.title)
         : extracted.title;
+      title = String(title || '').replace(/\s*-\s*巨量[^-]*帮助中心\s*$/, '').trim() || extracted.title;
+      if (extracted.frameId && extracted.frameId !== 0 &&
+          content.slice(0, 500).indexOf(title) === -1) {
+        content = '# ' + title + '\n\n' + content;
+      }
       meta = {
         url: location.href,
         title: title,
@@ -275,6 +324,7 @@
     var editorOpts = { defaultTitle: defaultTitle, headerTitle: '智能剪藏' };
 
     // 弹出编辑器让用户确认和编辑，使用回调保存
+    setContentStage('opening-editor', { length: fullContent.length });
     openClipEditor(fullContent, null, function (finalContent) {
       var clipData = {
         type: 'smart-clip',
@@ -310,6 +360,7 @@
         }
       });
     }, editorOpts);
+    setContentStage('editor-open', { length: fullContent.length });
   }
 
   function extractMainContent() {
@@ -901,6 +952,41 @@
 
   // === 截图/剪藏编辑弹窗 ===
   var clipEditorOverlay = null;
+  var clipEditorImageDataByBlob = new Map();
+
+  function clearClipEditorPreviewImages() {
+    clipEditorImageDataByBlob.forEach(function (_, blobURL) {
+      try { URL.revokeObjectURL(blobURL); } catch (e) {}
+    });
+    clipEditorImageDataByBlob.clear();
+  }
+
+  function prepareClipEditorPreview(markdown) {
+    clearClipEditorPreviewImages();
+    return String(markdown || '').replace(
+      /!\[([^\]]*)\]\((data:image\/([^;]+);base64,([A-Za-z0-9+/=]+))\)/g,
+      function (match, alt, dataURL, mimeSubtype, base64Data) {
+        try {
+          var binary = atob(base64Data);
+          var bytes = new Uint8Array(binary.length);
+          for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          var blobURL = URL.createObjectURL(new Blob([bytes], { type: 'image/' + mimeSubtype }));
+          clipEditorImageDataByBlob.set(blobURL, dataURL);
+          return '![' + alt + '](' + blobURL + ')';
+        } catch (e) {
+          return match;
+        }
+      }
+    );
+  }
+
+  function restoreClipEditorImageData(markdown) {
+    var restored = String(markdown || '');
+    clipEditorImageDataByBlob.forEach(function (dataURL, blobURL) {
+      restored = restored.split(blobURL).join(dataURL);
+    });
+    return restored;
+  }
 
   function openClipEditor(textContent, screenshotDataUrl, onSaveCallback, editorOptions) {
     closeClipEditor();
@@ -1038,7 +1124,8 @@
     var previewDiv = overlay.querySelector('.ka-clip-ed-preview');
     previewDiv.setAttribute('contenteditable', 'true');
     previewDiv.setAttribute('spellcheck', 'true');
-    previewDiv.innerHTML = renderMarkdown(textarea.value);
+    previewDiv.innerHTML = renderMarkdown(prepareClipEditorPreview(textarea.value));
+    var previewDirty = false;
     var previewBtn = overlay.querySelector('.ka-editor-tool-btn[data-md="preview"]');
     if (previewBtn) {
       previewBtn.style.color = '#07C160';
@@ -1047,11 +1134,14 @@
     }
 
     function syncPreviewToTextarea() {
-      textarea.value = htmlToMarkdown(previewDiv);
+      if (!previewDirty) return;
+      textarea.value = restoreClipEditorImageData(htmlToMarkdown(previewDiv));
+      previewDirty = false;
     }
 
     function syncTextareaToPreview() {
-      previewDiv.innerHTML = renderMarkdown(textarea.value);
+      previewDiv.innerHTML = renderMarkdown(prepareClipEditorPreview(textarea.value));
+      previewDirty = false;
     }
 
     // 自动调整高度（由 CSS flex 控制实际可用空间）
@@ -1062,8 +1152,13 @@
         syncTextareaToPreview();
       }
     });
-    previewDiv.addEventListener('input', syncPreviewToTextarea);
-    previewDiv.addEventListener('blur', syncPreviewToTextarea);
+    previewDiv.addEventListener('input', function () {
+      previewDirty = true;
+      syncPreviewToTextarea();
+    });
+    previewDiv.addEventListener('blur', function () {
+      if (previewDirty) syncPreviewToTextarea();
+    });
 
     // 关闭
     overlay.querySelector('.ka-editor-close').addEventListener('click', function () { closeClipEditor(); });
@@ -1130,6 +1225,7 @@
               if (imgUrl) document.execCommand('insertImage', false, imgUrl);
               break;
           }
+          previewDirty = true;
           syncPreviewToTextarea();
         } else {
           // 源码模式：插入 Markdown 语法
@@ -1147,7 +1243,7 @@
 
     // 确认保存
     overlay.querySelector('.ka-editor-btn-save').addEventListener('click', function () {
-      if (previewDiv.style.display !== 'none') {
+      if (previewDiv.style.display !== 'none' && previewDirty) {
         syncPreviewToTextarea();
       }
       var finalTitle = titleInput.value.trim() || defaultTitle;
@@ -1210,6 +1306,7 @@
       clipEditorOverlay.remove();
       clipEditorOverlay = null;
     }
+    clearClipEditorPreviewImages();
   }
 
   function extractTextInRect(absX, absY, w, h) {
@@ -1637,6 +1734,26 @@
   function htmlToMarkdown(el) {
     var result = [];
 
+    function inlineNodeToMarkdown(node) {
+      if (!node) return '';
+      if (node.nodeType === 3) return node.textContent || '';
+      if (node.nodeType !== 1) return '';
+      var tag = node.tagName.toLowerCase();
+      if (tag === 'br') return '<br>';
+      if (tag === 'img') return '![' + (node.alt || '') + '](' + (node.src || '') + ')';
+      var childText = '';
+      for (var childIndex = 0; childIndex < node.childNodes.length; childIndex++) {
+        childText += inlineNodeToMarkdown(node.childNodes[childIndex]);
+      }
+      if (tag === 'a') return '[' + childText + '](' + (node.href || '') + ')';
+      if (tag === 'strong' || tag === 'b') return '**' + childText + '**';
+      if (tag === 'em' || tag === 'i') return '*' + childText + '*';
+      if (tag === 'del' || tag === 's') return '~~' + childText + '~~';
+      if (tag === 'code') return '`' + childText + '`';
+      if (/^(p|div|section|blockquote|li)$/.test(tag)) return childText + '<br>';
+      return childText;
+    }
+
     function walkChildren(parent) {
       for (var i = 0; i < parent.childNodes.length; i++) {
         walk(parent.childNodes[i]);
@@ -1725,7 +1842,13 @@
           var cells = rows[r].querySelectorAll('th, td');
           var cellTexts = [];
           for (var c = 0; c < cells.length; c++) {
-            cellTexts.push(cells[c].textContent.trim().replace(/\|/g, '\\|').replace(/\n/g, ' '));
+            cellTexts.push(
+              inlineNodeToMarkdown(cells[c])
+                .replace(/(?:<br>\s*)+$/g, '')
+                .replace(/\|/g, '\\|')
+                .replace(/\n+/g, '<br>')
+                .trim()
+            );
           }
           result.push('| ' + cellTexts.join(' | ') + ' |\n');
           // 在第一行后插入分隔行

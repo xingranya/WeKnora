@@ -86,6 +86,7 @@ type knowledgeService struct {
 
 const (
 	manualContentMaxLength = 200000
+	manualContentMaxBytes  = 32 * 1024 * 1024
 	manualFileExtension    = ".md"
 	faqImportBatchSize     = 50 // 每批处理的FAQ条目数
 )

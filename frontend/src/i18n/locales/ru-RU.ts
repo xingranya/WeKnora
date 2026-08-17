@@ -356,7 +356,7 @@ export default {
       copySuccess: 'URL API скопирован',
       installCta: 'Скачать расширение',
       installCtaHint: 'Внутренний CRX-файл · после загрузки следуйте шагам',
-      storeMeta: 'Помощник 见外 · v1.1.0',
+      storeMeta: 'Помощник 见外 · v1.2.0',
       installGuide: 'При появлении запроса подтвердите добавление расширения или сохранение файла.',
       steps: {
         connect: {

@@ -98,6 +98,7 @@
   function normalizeWhitespace(value) {
     return String(value || '')
       .replace(/\u00a0/g, ' ')
+      .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
       .replace(/[ \t]+/g, ' ')
       .replace(/ *\n */g, '\n')
       .replace(/\n{3,}/g, '\n\n')
@@ -406,14 +407,413 @@
     return element ? (element.getAttribute('content') || '') : '';
   }
 
+  function directSemanticBlocks(container) {
+    if (!container || typeof container.querySelectorAll !== 'function') return [];
+    return Array.prototype.slice.call(container.querySelectorAll('[data-block-type]')).filter(function (element) {
+      var current = element.parentElement;
+      while (current && current !== container) {
+        if (current.hasAttribute('data-block-type')) return false;
+        current = current.parentElement;
+      }
+      return current === container;
+    });
+  }
+
+  function markdownWrap(content, marker) {
+    var clean = normalizeWhitespace(content);
+    return clean ? marker + clean + marker : '';
+  }
+
+  async function blobToDataURL(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result || '')); };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function compressLargeImage(blob) {
+    if (blob.size <= 400 * 1024 || typeof createImageBitmap !== 'function') return blob;
+    try {
+      var bitmap = await createImageBitmap(blob);
+      var maxDimension = 2400;
+      var ratio = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
+      canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
+      var context = canvas.getContext('2d');
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      if (bitmap.close) bitmap.close();
+      var compressed = await new Promise(function (resolve) {
+        canvas.toBlob(resolve, 'image/webp', 0.94);
+      });
+      return compressed || blob;
+    } catch (e) {
+      return blob;
+    }
+  }
+
+  async function resolveRichImage(image, context, fallbackAlt) {
+    var source = image && (image.currentSrc || image.getAttribute('src') || image.getAttribute('data-src'));
+    if (!source) return '';
+    var alt = normalizeWhitespace((image.getAttribute('alt') || fallbackAlt || '图片').replace(/^飞书文档\s*-\s*/, '')) || '图片';
+    if (context.imageCache.has(source)) {
+      var cached = context.imageCache.get(source);
+      return cached ? '![' + escapeMarkdown(alt) + '](' + cached + ')' : '> 图片：' + alt;
+    }
+
+    if (/^data:image\//i.test(source)) {
+      if (context.totalImageChars + source.length > context.maxImageChars) {
+        context.imageCache.set(source, '');
+        return '> 图片因文档体积限制未内嵌：' + alt;
+      }
+      context.totalImageChars += source.length;
+      context.imageCount += 1;
+      var dataToken = '__JIWAI_IMAGE_' + context.imagePayloads.length + '__';
+      context.imagePayloads.push({ token: dataToken, dataURL: source });
+      context.imageCache.set(source, dataToken);
+      return '![' + escapeMarkdown(alt) + '](' + dataToken + ')';
+    }
+
+    if (!/^blob:/i.test(source)) {
+      var stableSource = absoluteUrl(source, context.url);
+      context.imageCache.set(source, stableSource);
+      return stableSource ? '![' + escapeMarkdown(alt) + '](' + stableSource + ')' : '> 图片：' + alt;
+    }
+
+    try {
+      var dataURL = await Promise.race([
+        (async function () {
+          var response = await fetch(source);
+          var blob = await response.blob();
+          blob = await compressLargeImage(blob);
+          return blobToDataURL(blob);
+        })(),
+        new Promise(function (_, reject) {
+          global.setTimeout(function () { reject(new Error('图片读取超时')); }, 3500);
+        })
+      ]);
+      if (context.totalImageChars + dataURL.length > context.maxImageChars) {
+        context.imageCache.set(source, '');
+        return '> 图片因文档体积限制未内嵌：' + alt;
+      }
+      context.totalImageChars += dataURL.length;
+      context.imageCount += 1;
+      var token = '__JIWAI_IMAGE_' + context.imagePayloads.length + '__';
+      context.imagePayloads.push({ token: token, dataURL: dataURL });
+      context.imageCache.set(source, token);
+      return '![' + escapeMarkdown(alt) + '](' + token + ')';
+    } catch (e) {
+      context.imageCache.set(source, '');
+      return '> 图片读取失败：' + alt;
+    }
+  }
+
+  async function serializeRichInline(node, context) {
+    if (!node) return '';
+    if (node.nodeType === 3) return String(node.nodeValue || '').replace(/[\u200b\u200c\u200d\ufeff]/g, '');
+    if (node.nodeType !== 1 || isIgnored(node)) return '';
+
+    var tag = node.tagName.toLowerCase();
+    if (tag === 'br') return '\n';
+    if (tag === 'img') return resolveRichImage(node, context, '图片');
+
+    var children = '';
+    for (var i = 0; i < node.childNodes.length; i++) {
+      children += await serializeRichInline(node.childNodes[i], context);
+    }
+    var clean = normalizeWhitespace(children);
+    if (!clean) return '';
+
+    if (tag === 'a') {
+      var href = absoluteUrl(node.getAttribute('href'), context.url);
+      return href ? '[' + clean + '](' + href + ')' : clean;
+    }
+    var style = String(node.getAttribute('style') || '').toLowerCase();
+    if (tag === 'strong' || tag === 'b' || /font-weight\s*:\s*(bold|[6-9]00)/.test(style)) {
+      return markdownWrap(clean, '**');
+    }
+    if (tag === 'em' || tag === 'i' || /font-style\s*:\s*italic/.test(style)) {
+      return markdownWrap(clean, '*');
+    }
+    if (tag === 'del' || tag === 's' || /text-decoration[^;]*line-through/.test(style)) {
+      return markdownWrap(clean, '~~');
+    }
+    if (tag === 'code') return '`' + clean.replace(/`/g, '\\`') + '`';
+    if (/^(div|p|section)$/.test(tag) && node.hasAttribute('data-block-type')) return clean + '\n';
+    return children;
+  }
+
+  async function serializeFeishuContainer(container, context) {
+    var blocks = directSemanticBlocks(container);
+    if (!blocks.length) return normalizeWhitespace(await serializeRichInline(container, context));
+    var parts = [];
+    for (var i = 0; i < blocks.length; i++) {
+      var part = await serializeFeishuBlock(blocks[i], context);
+      if (part) parts.push(part);
+    }
+    return parts.join('\n\n');
+  }
+
+  function tableCellMarkdown(value) {
+    return normalizeWhitespace(value)
+      .replace(/\|/g, '\\|')
+      .replace(/\n+/g, '<br>');
+  }
+
+  async function serializeFeishuTable(block, context) {
+    var table = block.querySelector('table');
+    if (!table) return serializeFeishuContainer(block, context);
+    var rows = Array.prototype.slice.call(table.querySelectorAll('tr')).filter(function (row) {
+      return row.closest('table') === table;
+    });
+    var renderedRows = [];
+    var maxColumns = 0;
+    for (var rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      var cells = Array.prototype.slice.call(rows[rowIndex].querySelectorAll(':scope > th, :scope > td'));
+      if (!cells.length) continue;
+      var renderedCells = [];
+      for (var cellIndex = 0; cellIndex < cells.length; cellIndex++) {
+        var value = await serializeFeishuContainer(cells[cellIndex], context);
+        renderedCells.push(tableCellMarkdown(value));
+        var colspan = Number(cells[cellIndex].getAttribute('colspan') || 1);
+        for (var span = 1; span < colspan; span++) renderedCells.push('');
+      }
+      maxColumns = Math.max(maxColumns, renderedCells.length);
+      renderedRows.push(renderedCells);
+    }
+    if (!renderedRows.length) return '';
+    maxColumns = Math.max(maxColumns, 1);
+    renderedRows.forEach(function (row) {
+      while (row.length < maxColumns) row.push('');
+    });
+    var header = renderedRows[0].map(function (value, index) { return value || ('列 ' + (index + 1)); });
+    var lines = [
+      '| ' + header.join(' | ') + ' |',
+      '| ' + header.map(function () { return '---'; }).join(' | ') + ' |'
+    ];
+    for (var i = 1; i < renderedRows.length; i++) {
+      lines.push('| ' + renderedRows[i].join(' | ') + ' |');
+    }
+    return lines.join('\n');
+  }
+
+  async function serializeFeishuBlock(block, context) {
+    var type = String(block.getAttribute('data-block-type') || '').toLowerCase();
+    var blockImages = Array.prototype.slice.call(block.querySelectorAll('img'));
+    if (blockImages.length) {
+      await Promise.all(blockImages.map(function (image) {
+        return resolveRichImage(image, context, normalizeWhitespace(block.innerText || block.textContent || '') || '图片');
+      }));
+    }
+    if (type === 'page' || type === 'table_cell' || type === 'grid_column') {
+      return serializeFeishuContainer(block, context);
+    }
+    if (type === 'table') return serializeFeishuTable(block, context);
+    if (type === 'grid') return serializeFeishuContainer(block, context);
+    if (type === 'image') {
+      var image = block.querySelector('img');
+      var imageAlt = normalizeWhitespace(block.innerText || block.textContent || '') || '图片';
+      return image ? resolveRichImage(image, context, imageAlt) : '> 图片：' + imageAlt;
+    }
+    if (/^heading[1-6]$/.test(type)) {
+      var level = Number(type.slice(-1));
+      var heading = normalizeWhitespace(await serializeRichInline(block, context));
+      return heading ? new Array(level + 1).join('#') + ' ' + heading : '';
+    }
+    if (type === 'callout') {
+      var calloutText = normalizeWhitespace(await serializeFeishuContainer(block, context));
+      var rawText = normalizeWhitespace(block.innerText || block.textContent || '');
+      var iconMatch = rawText.match(/[\u2600-\u27bf\u{1f300}-\u{1faff}]/u);
+      var icon = iconMatch ? iconMatch[0] + ' ' : '';
+      return calloutText ? '> ' + icon + calloutText.replace(/\n/g, '\n> ') : '';
+    }
+    if (type === 'quote_container' || type === 'quote') {
+      var quote = normalizeWhitespace(await serializeFeishuContainer(block, context));
+      return quote ? '> ' + quote.replace(/\n/g, '\n> ') : '';
+    }
+    if (type === 'bullet' || type === 'bulleted_list') {
+      var bullet = normalizeWhitespace(await serializeRichInline(block, context)).replace(/^[•◦▪]\s*/, '');
+      return bullet ? '- ' + bullet.replace(/\n/g, '\n  ') : '';
+    }
+    if (type === 'ordered' || type === 'numbered_list') {
+      var ordered = normalizeWhitespace(await serializeRichInline(block, context)).replace(/^\d+[.)、]?\s*/, '');
+      return ordered ? '1. ' + ordered.replace(/\n/g, '\n   ') : '';
+    }
+    if (type === 'todo' || type === 'task') {
+      var todo = normalizeWhitespace(await serializeRichInline(block, context));
+      return todo ? '- [ ] ' + todo : '';
+    }
+    if (type === 'code' || type === 'code_block') {
+      return '```\n' + String(block.innerText || block.textContent || '').trim() + '\n```';
+    }
+    if (type === 'divider') return '---';
+    return normalizeWhitespace(await serializeRichInline(block, context));
+  }
+
+  async function extractFeishuDocument(doc, url) {
+    var scrollContainer = doc.querySelector('.bear-web-x-container');
+    var originalTop = scrollContainer ? scrollContainer.scrollTop : 0;
+    var originalClassName = scrollContainer ? scrollContainer.className : '';
+    var originalStyle = scrollContainer ? scrollContainer.getAttribute('style') : null;
+    var context = {
+      url: url,
+      imageCache: new Map(),
+      imageCount: 0,
+      totalImageChars: 0,
+      maxImageChars: 24 * 1024 * 1024,
+      imagePayloads: []
+    };
+    var records = new Map();
+    global.__jiwaiExtractionStage = { stage: 'scroll', blockCount: 0, imageCount: 0 };
+
+    function captureVisibleBlocks() {
+      var pages = Array.prototype.slice.call(doc.querySelectorAll('.docx-page-block'));
+      for (var pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        var blocks = directSemanticBlocks(pages[pageIndex]);
+        for (var blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+          var block = blocks[blockIndex];
+          var recordID = block.getAttribute('data-record-id') || block.getAttribute('data-block-id') || '';
+          var blockID = Number(block.getAttribute('data-block-id'));
+          var key = recordID || ('block-' + blockID + '-' + blockIndex);
+          var existing = records.get(key);
+          var htmlLength = block.innerHTML.length;
+          if (!existing || htmlLength > existing.htmlLength) {
+            records.set(key, {
+              order: Number.isFinite(blockID) ? blockID : records.size + 100000,
+              htmlLength: htmlLength,
+              node: block.cloneNode(true)
+            });
+          }
+        }
+      }
+    }
+
+    if (scrollContainer) {
+      scrollContainer.classList.remove('opendoc-unscrollable');
+      scrollContainer.style.setProperty('overflow-y', 'auto', 'important');
+      scrollContainer.style.setProperty('pointer-events', 'auto', 'important');
+      scrollContainer.scrollTop = 0;
+      scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await delay(180);
+    }
+
+    for (var step = 0; step < 120; step++) {
+      captureVisibleBlocks();
+      global.__jiwaiExtractionStage = { stage: 'scroll', blockCount: records.size, step: step };
+      if (!scrollContainer) break;
+      var maxTop = Math.max(scrollContainer.scrollHeight - scrollContainer.clientHeight, 0);
+      if (scrollContainer.scrollTop >= maxTop - 2) {
+        await delay(220);
+        captureVisibleBlocks();
+        break;
+      }
+      var nextTop = Math.min(maxTop, scrollContainer.scrollTop + Math.max(scrollContainer.clientHeight * 2, 1200));
+      scrollContainer.scrollTop = nextTop;
+      scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await delay(550);
+    }
+
+    if (scrollContainer) {
+      scrollContainer.scrollTop = originalTop;
+      scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
+      scrollContainer.className = originalClassName;
+      if (originalStyle === null) scrollContainer.removeAttribute('style');
+      else scrollContainer.setAttribute('style', originalStyle);
+    }
+
+    var orderedRecords = Array.from(records.values())
+      .sort(function (left, right) { return left.order - right.order; });
+    var imageEntries = [];
+    var seenImages = new Set();
+    orderedRecords.forEach(function (record) {
+      Array.prototype.slice.call(record.node.querySelectorAll('img')).forEach(function (image) {
+        var source = image.getAttribute('src') || image.getAttribute('data-src') || '';
+        if (!source || seenImages.has(source)) return;
+        seenImages.add(source);
+        imageEntries.push({ image: image, alt: normalizeWhitespace(record.node.innerText || record.node.textContent || '') || '图片' });
+      });
+    });
+
+    var imageIndex = 0;
+    var imageDeadline = Date.now() + 9000;
+    global.__jiwaiExtractionStage = { stage: 'images', blockCount: records.size, imageTotal: imageEntries.length, imageDone: 0 };
+    async function imageWorker() {
+      while (imageIndex < imageEntries.length && Date.now() < imageDeadline) {
+        var entry = imageEntries[imageIndex++];
+        await resolveRichImage(entry.image, context, entry.alt);
+        global.__jiwaiExtractionStage = {
+          stage: 'images',
+          blockCount: records.size,
+          imageTotal: imageEntries.length,
+          imageDone: context.imageCache.size
+        };
+      }
+    }
+    var workerCount = Math.min(6, imageEntries.length);
+    var workers = [];
+    for (var workerIndex = 0; workerIndex < workerCount; workerIndex++) workers.push(imageWorker());
+    await Promise.all(workers);
+    for (; imageIndex < imageEntries.length; imageIndex++) {
+      var unresolvedSource = imageEntries[imageIndex].image.getAttribute('src') || '';
+      if (unresolvedSource && !context.imageCache.has(unresolvedSource)) context.imageCache.set(unresolvedSource, '');
+    }
+
+    global.__jiwaiExtractionStage = { stage: 'serialize', blockCount: records.size, imageCount: context.imageCount };
+    var markdownParts = [];
+    for (var recordIndex = 0; recordIndex < orderedRecords.length; recordIndex++) {
+      var markdownPart = await serializeFeishuBlock(orderedRecords[recordIndex].node, context);
+      if (markdownPart) markdownParts.push(markdownPart);
+    }
+    var markdown = normalizeWhitespace(markdownParts.join('\n\n'));
+    context.imagePayloads.forEach(function (payload) {
+      markdown = markdown.split(payload.token).join(payload.dataURL);
+    });
+    global.__jiwaiExtractionStage = { stage: 'done', blockCount: records.size, imageCount: context.imageCount, length: markdown.length };
+    return {
+      markdown: markdown,
+      imageCount: context.imageCount,
+      blockCount: records.size
+    };
+  }
+
   async function extract(options) {
     options = options || {};
     var doc = options.document || global.document;
     var url = options.url || (global.location && global.location.href) || '';
-    await waitForStableContent(doc, options.maxWaitMs);
-
     var adapter = findAdapter(url);
+    await waitForStableContent(doc, adapter && adapter.id === 'feishu' ? 1200 : options.maxWaitMs);
+    if (adapter && adapter.id === 'feishu' && doc.querySelector('.docx-page-block')) {
+      var feishuResult = await extractFeishuDocument(doc, url);
+      if (feishuResult.markdown) {
+        return {
+          markdown: feishuResult.markdown,
+          title: getMetaContent(doc, 'og:title') || doc.title || adapter.name,
+          author: getMetaContent(doc, 'author') || '',
+          description: getMetaContent(doc, 'description') || '',
+          site: adapter.name,
+          published: '',
+          matchedSite: true,
+          adapterId: adapter.id,
+          imageCount: feishuResult.imageCount,
+          blockCount: feishuResult.blockCount
+        };
+      }
+    }
     var selected = selectCandidate(doc, adapter);
+    if (adapter && adapter.id === 'douyin-rules' && doc.querySelector('tt-docs-component')) {
+      return {
+        markdown: toMarkdown(selected.element, url),
+        title: getMetaContent(doc, 'og:title') || doc.title || adapter.name,
+        author: getMetaContent(doc, 'author') || '',
+        description: getMetaContent(doc, 'description') || '',
+        site: adapter.name,
+        published: getMetaContent(doc, 'article:published_time'),
+        matchedSite: true,
+        adapterId: adapter.id
+      };
+    }
     var markdown = await materializeVirtualContent(selected.element, selected.roots, adapter, url);
 
     return {

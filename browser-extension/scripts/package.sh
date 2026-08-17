@@ -7,8 +7,9 @@ REPO_DIR="$(cd "${EXTENSION_DIR}/.." && pwd)"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 KEY_PATH="${JIWAI_EXTENSION_KEY_PATH:-${HOME}/.config/weknora/jiwai-extension.pem}"
 OUTPUT_DIR="${REPO_DIR}/frontend/public/downloads"
-CRX_OUTPUT="${OUTPUT_DIR}/jiwai-knowledge-assistant-1.1.0.crx"
-ZIP_OUTPUT="${OUTPUT_DIR}/jiwai-knowledge-assistant-1.1.0.zip"
+VERSION="$(jq -r '.version' "${EXTENSION_DIR}/manifest.json")"
+CRX_OUTPUT="${OUTPUT_DIR}/jiwai-knowledge-assistant-${VERSION}.crx"
+ZIP_OUTPUT="${OUTPUT_DIR}/jiwai-knowledge-assistant-${VERSION}.zip"
 STAGING_DIR="$(mktemp -d /tmp/jiwai-extension-build.XXXXXX)"
 
 cleanup() {

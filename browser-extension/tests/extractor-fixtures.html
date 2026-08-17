@@ -122,11 +122,36 @@
         assert(markdown.indexOf('data:image') === -1, 'base64 内嵌图片未清理');
       }
 
+      async function testFeishuBlockSemantics() {
+        var fixture = resetFixture();
+        fixture.innerHTML = [
+          '<div class="docx-page-block" data-block-type="page">',
+          '<div data-block-id="1" data-record-id="heading" data-block-type="heading1"><span>一级标题</span></div>',
+          '<div data-block-id="2" data-record-id="callout" data-block-type="callout">💡<div data-block-type="text"><span style="font-weight:bold;">重点提示</span></div></div>',
+          '<div data-block-id="4" data-record-id="table" data-block-type="table"><table><tbody>',
+          '<tr><td><div data-block-type="text">项目</div></td><td><div data-block-type="text">要求</div></td></tr>',
+          '<tr><td><div data-block-type="text">归档</div></td><td><div data-block-type="text">每周完成</div></td></tr>',
+          '</tbody></table></div>',
+          '<div data-block-id="9" data-record-id="image" data-block-type="image"><img alt="流程图" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="></div>',
+          '</div>'
+        ].join('');
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: 'https://bytedance.larkoffice.com/docx/example',
+          maxWaitMs: 900
+        });
+        assert(result.markdown.indexOf('# 一级标题') !== -1, '飞书标题层级未保留');
+        assert(result.markdown.indexOf('> 💡 **重点提示**') !== -1, '飞书 Callout 或加粗样式未保留');
+        assert(result.markdown.indexOf('| 项目 | 要求 |') !== -1, '飞书表格未保留');
+        assert(result.markdown.indexOf('![流程图](data:image/gif;base64,') !== -1, '飞书图片未保留');
+      }
+
       await testFeishuShadowAndVirtualScroll();
       await testDouyinDelayedContent();
       await testTableAndLinkMarkdown();
       testEmbeddedOfficeHosts();
       testLarkOpenDocLinkSanitizing();
+      await testFeishuBlockSemantics();
 
       var status = failures.length ? 'fail' : 'pass';
       document.body.textContent = failures.length ? 'EXTENSION_TEST_FAIL\n' + failures.join('\n') : 'EXTENSION_TEST_PASS';

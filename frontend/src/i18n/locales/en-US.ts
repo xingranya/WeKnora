@@ -6044,7 +6044,7 @@ export default {
       copySuccess: 'API URL copied',
       installCta: 'Download extension',
       installCtaHint: 'Internal CRX package · follow the steps after download',
-      storeMeta: '见外 Knowledge Base Assistant · v1.1.0',
+      storeMeta: '见外 Knowledge Base Assistant · v1.2.0',
       installGuide: 'When prompted, confirm Add extension or Keep to finish the installation.'
     },
     claw: {

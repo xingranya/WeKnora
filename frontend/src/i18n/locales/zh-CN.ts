@@ -356,7 +356,7 @@ export default {
       copySuccess: '已复制 API 地址',
       installCta: '下载插件安装包',
       installCtaHint: '内部 CRX 文件 · 下载后按步骤安装',
-      storeMeta: '见外知识库助手 · v1.1.0',
+      storeMeta: '见外知识库助手 · v1.2.0',
       installGuide: '浏览器弹出确认提示时，请选择“添加扩展”或“保留”。',
       steps: {
         connect: {
@@ -393,7 +393,7 @@ export default {
         },
         clip: {
           title: '网页内容一键采集',
-          desc: '读取飞书、巨量引擎与抖音规则、腾讯文档、语雀、Notion、WPS 等动态页面，也可手动框选内容。'
+          desc: '保留飞书、巨量引擎与抖音规则等动态文档的标题、表格、列表、链接和图片，也可手动框选内容。'
         },
         qa: {
           title: '知识库智能问答',
