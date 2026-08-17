@@ -3957,6 +3957,10 @@ export default {
         thinkingType: {
           label: 'thinking.type',
           hint: 'Volcengine Ark; Tencent LKEAP (DeepSeek V3, etc.; default for LKEAP; use “Do not send” for R1)'
+        },
+        reasoningEffort: {
+          label: 'reasoning_effort',
+          hint: 'Sub2API / OpenAI Chat Completions: sends reasoning_effort=high when enabled and omits it when disabled'
         }
       },
       dimensionHint: 'Model selected. Click "Detect Dimension" to fetch the vector dimension automatically.',

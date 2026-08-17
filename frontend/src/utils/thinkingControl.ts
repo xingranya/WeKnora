@@ -14,17 +14,27 @@ export function isLkeapDeepSeekR1Model(modelName: string): boolean {
   return modelName.toLowerCase().includes('deepseek-r1')
 }
 
+/** 与后端 internal/models/provider.IsOpenAIReasoningOrGPT5Model 保持一致。 */
+export function isOpenAIReasoningOrGPT5Model(modelName: string): boolean {
+  const lower = modelName.trim().toLowerCase()
+  if (!lower) return false
+  if (lower.startsWith('gpt-5')) return true
+  return ['o1', 'o3', 'o4'].some(prefix => lower === prefix || lower.startsWith(`${prefix}-`))
+}
+
 export type ThinkingControlValue =
   | 'none'
   | 'chat_template_kwargs'
   | 'enable_thinking'
   | 'thinking_type'
+  | 'reasoning_effort'
 
 const THINKING_CONTROL_VALUES: ThinkingControlValue[] = [
   'none',
   'chat_template_kwargs',
   'enable_thinking',
   'thinking_type',
+  'reasoning_effort',
 ]
 
 /**
@@ -46,6 +56,9 @@ export function defaultThinkingControl(
       if (model && isLkeapDeepSeekR1Model(model)) return 'none'
       return 'thinking_type'
     case 'generic':
+      return isOpenAIReasoningOrGPT5Model(model)
+        ? 'reasoning_effort'
+        : 'chat_template_kwargs'
     case 'nvidia':
       return 'chat_template_kwargs'
     case 'volcengine':

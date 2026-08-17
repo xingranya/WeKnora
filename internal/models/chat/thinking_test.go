@@ -20,6 +20,7 @@ func TestThinkingStrategy_NilThinking(t *testing.T) {
 		enableThinking{}, // not alwaysSend
 		thinkingTypeField{},
 		chatTemplateKwargs{},
+		reasoningEffort{},
 	}
 	for _, s := range strategies {
 		custom, raw := s.Apply(&req, nil, true)
@@ -108,12 +109,36 @@ func TestChatTemplateKwargs(t *testing.T) {
 	assert.Contains(t, string(body), "chat_template_kwargs")
 }
 
+func TestReasoningEffort(t *testing.T) {
+	s := reasoningEffort{}
+	req := openai.ChatCompletionRequest{Model: "gpt-5.6-terra"}
+
+	custom, raw := s.Apply(&req, &ChatOptions{Thinking: ptrBool(true)}, true)
+	require.True(t, raw)
+	out, ok := custom.(ReasoningEffortChatCompletionRequest)
+	require.True(t, ok)
+	assert.Equal(t, "high", out.ReasoningEffort)
+	body, err := json.Marshal(custom)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"reasoning_effort":"high"`)
+	assert.NotContains(t, string(body), "chat_template_kwargs")
+
+	custom, raw = s.Apply(&req, &ChatOptions{Thinking: ptrBool(false)}, true)
+	assert.Nil(t, custom)
+	assert.False(t, raw)
+
+	custom, raw = s.Apply(&req, nil, true)
+	assert.Nil(t, custom)
+	assert.False(t, raw)
+}
+
 func TestParseThinkingOverride(t *testing.T) {
 	cases := map[string]ThinkingStrategy{
 		"none":                 noThinking{},
 		"enable_thinking":      enableThinking{},
 		"thinking_type":        thinkingTypeField{},
 		"chat_template_kwargs": chatTemplateKwargs{},
+		"reasoning_effort":     reasoningEffort{},
 		"something-unknown":    chatTemplateKwargs{}, // legacy default-mode fallback
 	}
 	for value, want := range cases {
@@ -135,6 +160,10 @@ func TestEffectiveThinkingControl(t *testing.T) {
 		Provider:    "generic",
 		ModelName:   "qwen3",
 		ExtraConfig: map[string]string{ExtraConfigThinkingControl: "chat_template_kwargs"},
+	}))
+	assert.Equal(t, "reasoning_effort", EffectiveThinkingControl(&ChatConfig{
+		Provider:  "generic",
+		ModelName: "gpt-5.6-terra",
 	}))
 	assert.Equal(t, "none", EffectiveThinkingControl(&ChatConfig{
 		Provider:    "generic",

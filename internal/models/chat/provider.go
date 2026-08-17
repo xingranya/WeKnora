@@ -163,6 +163,19 @@ type genericProvider struct{ baseProvider }
 func (genericProvider) Name() provider.ProviderName { return provider.ProviderGeneric }
 func (genericProvider) Thinking() ThinkingStrategy  { return chatTemplateKwargs{} }
 
+// genericReasoningProvider 适配通过 Sub2API 等网关接入的 GPT-5/o 系列模型。
+// 这类模型使用 Chat Completions 顶层 reasoning_effort，并且沿用 OpenAI
+// 推理模型的采样参数约束。
+type genericReasoningProvider struct{ genericProvider }
+
+func (genericReasoningProvider) Matches(model string) bool {
+	return provider.IsOpenAIReasoningOrGPT5Model(model)
+}
+func (genericReasoningProvider) Thinking() ThinkingStrategy { return reasoningEffort{} }
+func (genericReasoningProvider) ShapeRequest(req *openai.ChatCompletionRequest, _ *ChatOptions, _ bool) {
+	shapeOpenAIReasoning(req)
+}
+
 type nvidiaProvider struct{ baseProvider }
 
 func (nvidiaProvider) Name() provider.ProviderName { return provider.ProviderNvidia }
@@ -276,6 +289,7 @@ var providerRegistry = []providerAdapter{
 	qwenThinkingProvider{},
 	lkeapProvider{},
 	deepseekProvider{},
+	genericReasoningProvider{},
 	genericProvider{},
 	geminiProvider{},
 	volcengineProvider{},

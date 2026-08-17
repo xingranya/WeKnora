@@ -7,6 +7,9 @@ import { defaultThinkingControl } from './thinkingControl.ts'
 test('defaultThinkingControl matches backend provider adapters', () => {
   const cases: Array<[string, string, ReturnType<typeof defaultThinkingControl>]> = [
     ['generic', 'anything', 'chat_template_kwargs'],
+    ['generic', 'gpt-5.6-terra', 'reasoning_effort'],
+    ['generic', 'o3-mini', 'reasoning_effort'],
+    ['generic', 'gpt-4o', 'chat_template_kwargs'],
     ['nvidia', 'anything', 'chat_template_kwargs'],
     ['volcengine', 'doubao', 'thinking_type'],
     ['aliyun', 'qwen3-32b', 'enable_thinking'],

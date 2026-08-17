@@ -700,8 +700,8 @@ const applyThinkingControlFromModelData = () => {
 }
 
 const thinkingControlOptions = computed(() => {
-  const keys = ['none', 'chatTemplateKwargs', 'enableThinking', 'thinkingType'] as const
-  const values = ['none', 'chat_template_kwargs', 'enable_thinking', 'thinking_type'] as const
+  const keys = ['none', 'chatTemplateKwargs', 'enableThinking', 'thinkingType', 'reasoningEffort'] as const
+  const values = ['none', 'chat_template_kwargs', 'enable_thinking', 'thinking_type', 'reasoning_effort'] as const
   return keys.map((key, i) => ({
     value: values[i],
     label: t(`model.editor.thinkingControl.${key}.label`),

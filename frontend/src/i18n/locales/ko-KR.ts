@@ -2460,6 +2460,10 @@ export default {
           label: 'chat_template_kwargs',
           hint: '사용자 정의 OpenAI 호환, NVIDIA NIM, vLLM / 로컬 Qwen 배포'
         },
+        reasoningEffort: {
+          label: 'reasoning_effort',
+          hint: 'Sub2API / OpenAI Chat Completions: 활성화 시 reasoning_effort=high를 보내고 비활성화 시 생략합니다'
+        },
         none: {
           label: '사고 매개변수 전송 안 함',
           hint: '에이전트 「사고 모드」 스위치가 효과 없음, 요청에 사고 관련 매개변수를 보내지 않음'

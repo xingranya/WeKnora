@@ -11,7 +11,7 @@ import (
 // selecting how ChatOptions.Thinking is translated to provider HTTP fields.
 // The accepted values mirror the strings the frontend writes (see
 // ModelEditorDialog.vue): "none", "enable_thinking", "thinking_type",
-// "chat_template_kwargs".
+// "chat_template_kwargs", "reasoning_effort".
 const ExtraConfigThinkingControl = "thinking_control"
 
 // Wire-format request bodies used by providers that express extended-thinking
@@ -35,6 +35,13 @@ type ThinkingConfig struct {
 type ThinkingChatCompletionRequest struct {
 	openai.ChatCompletionRequest
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+}
+
+// ReasoningEffortChatCompletionRequest 使用 OpenAI Chat Completions 的顶层
+// reasoning_effort 字段，Sub2API 会将其转换为 Responses API 的 reasoning.effort。
+type ReasoningEffortChatCompletionRequest struct {
+	openai.ChatCompletionRequest
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // ThinkingStrategy encodes how ChatOptions.Thinking is mapped onto a provider's
@@ -117,6 +124,19 @@ func (chatTemplateKwargs) Apply(req *openai.ChatCompletionRequest, opts *ChatOpt
 	return req, true
 }
 
+// reasoningEffort 使用 Chat Completions 标准的 reasoning_effort 字段。
+// 当前智能体只有开关，因此开启时使用 high；关闭或未设置时省略字段，交给
+// 网关/模型的默认策略处理，避免发送不被接口识别的布尔值。
+type reasoningEffort struct{}
+
+func (reasoningEffort) Apply(req *openai.ChatCompletionRequest, opts *ChatOptions, _ bool) (any, bool) {
+	if opts == nil || opts.Thinking == nil || !*opts.Thinking {
+		return nil, false
+	}
+	r := ReasoningEffortChatCompletionRequest{ChatCompletionRequest: *req, ReasoningEffort: "high"}
+	return r, true
+}
+
 // parseThinkingOverride reads extra_config.thinking_control and returns the
 // strategy it selects, or nil when unset (the provider adapter's default
 // strategy then applies). An unrecognized non-empty value falls back to
@@ -134,6 +154,8 @@ func parseThinkingOverride(extraConfig map[string]string) ThinkingStrategy {
 		return enableThinking{}
 	case "thinking_type":
 		return thinkingTypeField{}
+	case "reasoning_effort":
+		return reasoningEffort{}
 	default:
 		// "chat_template_kwargs" and any unknown non-empty value.
 		return chatTemplateKwargs{}
@@ -166,6 +188,8 @@ func thinkingStrategyName(strategy ThinkingStrategy) string {
 		return "thinking_type"
 	case chatTemplateKwargs:
 		return "chat_template_kwargs"
+	case reasoningEffort:
+		return "reasoning_effort"
 	default:
 		return "none"
 	}

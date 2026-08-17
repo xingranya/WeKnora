@@ -26,6 +26,7 @@ func TestResolveProvider(t *testing.T) {
 		{"lkeap r1 falls back", provider.ProviderLKEAP, "deepseek-r1", baseProvider{}},
 		{"qwen thinking", provider.ProviderAliyun, "qwen3-32b", qwenThinkingProvider{}},
 		{"generic", provider.ProviderGeneric, "anything", genericProvider{}},
+		{"generic Sub2API reasoning", provider.ProviderGeneric, "gpt-5.6-terra", genericReasoningProvider{}},
 		{"gemini", provider.ProviderGemini, "gemini-3-flash-preview", geminiProvider{}},
 		{"nvidia", provider.ProviderNvidia, "anything", nvidiaProvider{}},
 		{"volcengine", provider.ProviderVolcengine, "doubao", volcengineProvider{}},
@@ -83,6 +84,21 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), "chat_template_kwargs")
+	})
+
+	t.Run("generic GPT-5 uses Sub2API reasoning_effort", func(t *testing.T) {
+		c := newOutboundChat(t, string(provider.ProviderGeneric), "gpt-5.6-terra", nil)
+		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		js := mustJSON(t, body)
+		assert.Contains(t, js, `"reasoning_effort":"high"`)
+		assert.NotContains(t, js, "chat_template_kwargs")
+
+		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		require.NoError(t, err)
+		assert.False(t, useRaw)
+		assert.NotContains(t, mustJSON(t, body), "reasoning_effort")
 	})
 
 	t.Run("none keeps the standard SDK request", func(t *testing.T) {

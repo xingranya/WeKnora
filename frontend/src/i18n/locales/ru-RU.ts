@@ -2460,6 +2460,10 @@ export default {
           label: 'chat_template_kwargs',
           hint: 'Пользовательские OpenAI-совместимые шлюзы, NVIDIA NIM, vLLM / локальный Qwen'
         },
+        reasoningEffort: {
+          label: 'reasoning_effort',
+          hint: 'Sub2API / OpenAI Chat Completions: при включении отправляет reasoning_effort=high, при выключении поле не отправляется'
+        },
         none: {
           label: 'Не отправлять параметры размышления',
           hint: 'Переключатель «Режим размышления» агента не действует; параметры размышления не отправляются в запросе'

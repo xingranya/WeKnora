@@ -2462,6 +2462,10 @@ export default {
           label: 'chat_template_kwargs',
           hint: '自定义 OpenAI 兼容、NVIDIA NIM、vLLM / 本地 Qwen 部署'
         },
+        reasoningEffort: {
+          label: 'reasoning_effort',
+          hint: 'Sub2API / OpenAI Chat Completions：开启时发送 reasoning_effort=high，关闭时省略该字段'
+        },
         none: {
           label: '不写入思考参数',
           hint: '智能体「思考模式」开关不生效，不会在请求中写入思考相关参数'
