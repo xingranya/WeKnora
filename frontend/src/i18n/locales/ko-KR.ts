@@ -279,7 +279,7 @@ export default {
         generic: '기타 Agent Skills 플랫폼'
       },
       downloadCta: '见外知识库 ZIP 다운로드',
-      downloadCtaHint: 'macOS 및 Windows 사용자 환경 설정 스크립트 포함 · v1.2.0',
+      downloadCtaHint: 'macOS 및 Windows 사용자 환경 설정 스크립트 포함 · v1.2.1',
       apiKeyTitle: 'API Key 선택',
       apiKeyDesc: '현재 공간에서 만든 Key를 선택하세요. 목록에는 마스킹된 값만 표시되고 AI용 복사 내용에는 전체 값이 포함됩니다.',
       apiKeyPlaceholder: 'API Key를 선택하세요',
@@ -343,7 +343,7 @@ export default {
         }
       },
       ecosystemNote: '패키지는 Agent Skills 디렉터리 규칙을 따르며 OpenClaw 버전은 ClawHub에서도 받을 수 있습니다.',
-      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
       openClawHub: 'ClawHub 열기'
     },
     chrome: {

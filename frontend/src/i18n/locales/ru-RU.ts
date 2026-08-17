@@ -279,7 +279,7 @@ export default {
         generic: 'Другие платформы Agent Skills'
       },
       downloadCta: 'Скачать ZIP 见外知识库',
-      downloadCtaHint: 'Скрипты настройки пользовательской среды macOS и Windows · v1.2.0',
+      downloadCtaHint: 'Скрипты настройки пользовательской среды macOS и Windows · v1.2.1',
       apiKeyTitle: 'Выберите API Key',
       apiKeyDesc: 'Выберите ключ, уже созданный в текущем пространстве. В списке значение скрыто, а скопированная подсказка содержит полный ключ.',
       apiKeyPlaceholder: 'Выберите API Key',
@@ -343,7 +343,7 @@ export default {
         }
       },
       ecosystemNote: 'Пакет следует правилам каталогов Agent Skills; версия для OpenClaw также доступна через ClawHub.',
-      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
       openClawHub: 'Открыть ClawHub'
     },
     chrome: {

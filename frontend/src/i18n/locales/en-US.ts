@@ -6058,7 +6058,7 @@ export default {
         generic: 'Other Agent Skills platforms'
       },
       downloadCta: 'Download 见外知识库 ZIP',
-      downloadCtaHint: 'Includes macOS and Windows user-environment setup scripts · v1.2.0',
+      downloadCtaHint: 'Includes macOS and Windows user-environment setup scripts · v1.2.1',
       apiKeyTitle: 'Select an API key',
       apiKeyDesc: 'Choose a key already created in this workspace. The menu stays masked; the copied AI prompt includes the full value.',
       apiKeyPlaceholder: 'Select an API key',
@@ -6122,7 +6122,7 @@ export default {
         }
       },
       ecosystemNote: 'The package follows Agent Skills directory conventions; an OpenClaw build is also available through ClawHub.',
-      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
       openClawHub: 'Open ClawHub'
     }
   },

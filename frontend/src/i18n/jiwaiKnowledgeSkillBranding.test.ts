@@ -25,6 +25,8 @@ test('见外知识库展示名在所有主界面语言中保持一致', () => {
     assert.match(locale.integrations.claw.setupPrompt, /\{apiKey\}/, `${localeName} 配置提示缺少 API Key 占位符`)
     assert.match(locale.integrations.claw.setupPrompt, /\{archiveName\}/, `${localeName} 配置提示缺少安装包占位符`)
     assert.equal(locale.integrations.claw.compatibility.generic.length > 0, true, `${localeName} 缺少通用 Agent 文案`)
+    assert.match(locale.integrations.claw.downloadCtaHint, /v1\.2\.1/, `${localeName} 下载版本不是 v1.2.1`)
+    assert.match(locale.integrations.claw.packageMeta, /v1\.2\.1/, `${localeName} 包版本不是 v1.2.1`)
   }
 })
 
