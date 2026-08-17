@@ -33,6 +33,9 @@ services:
       args:
         - APK_MIRROR_ARG=${APK_MIRROR_ARG:-}
         - WITH_ANYDOC=${WITH_ANYDOC:-1}
+        - RUSTUP_INIT_URL=${RUSTUP_INIT_URL:-https://sh.rustup.rs}
+        - RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER:-https://static.rust-lang.org}
+        - RUSTUP_UPDATE_ROOT=${RUSTUP_UPDATE_ROOT:-https://static.rust-lang.org/rustup}
     container_name: WeKnora-app
     ports:
       - "${APP_PORT:-8080}:8080"
