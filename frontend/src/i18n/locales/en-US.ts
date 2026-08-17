@@ -5993,8 +5993,8 @@ export default {
       desc: 'Publish this agent to IM platforms or websites. Manage in Integrations.'
     },
     chrome: {
-      title: 'Knowledge Assistant',
-      subtitle: 'For self-hosted 见外传媒知识库: ask questions in a sidebar, clip web pages, and save Markdown notes into your knowledge bases while you browse.',
+      title: '见外 Knowledge Base Assistant',
+      subtitle: 'Connect to the company knowledge base, ask in the sidebar, capture dynamic office documents, and save Markdown notes.',
       capabilitiesTitle: 'Core capabilities',
       capabilities: {
         qa: {
@@ -6003,7 +6003,7 @@ export default {
         },
         clip: {
           title: 'One-click web capture',
-          desc: 'Save page URLs, AI-extract main content, or manually select regions into a target knowledge base.'
+          desc: 'Capture dynamic pages from Feishu, Douyin Rules, Tencent Docs, Yuque, Notion, WPS, DingTalk, Google Docs, and Microsoft 365.'
         },
         notes: {
           title: 'Markdown quick notes',
@@ -6024,7 +6024,7 @@ export default {
       steps: {
         api: {
           title: 'Get API credentials',
-          desc: 'Copy your API Key and base URL from Settings → API Info.'
+          desc: 'Copy your API Key from Settings → API Info.'
         },
         port: {
           title: 'Desktop: fixed port (recommended)',
@@ -6036,7 +6036,7 @@ export default {
         },
         connect: {
           title: 'Connect in the extension',
-          desc: 'Open extension settings, choose enterprise/developer mode, and enter the service API URL and API Key. Your current API URL is shown below.'
+          desc: 'Open the extension and paste your API Key. The company knowledge base address is already fixed.'
         }
       },
       openApiSettings: 'Open API Info',
@@ -6044,7 +6044,7 @@ export default {
       copySuccess: 'API URL copied',
       installCta: 'Download extension',
       installCtaHint: 'Internal CRX package · follow the steps after download',
-      storeMeta: 'Internal CRX package · v1.0.0',
+      storeMeta: '见外 Knowledge Base Assistant · v1.1.0',
       installGuide: 'When prompted, confirm Add extension or Keep to finish the installation.'
     },
     claw: {

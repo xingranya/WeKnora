@@ -347,8 +347,8 @@ export default {
       openClawHub: 'ClawHub 열기'
     },
     chrome: {
-      title: '지식 관리 어시스턴트',
-      subtitle: '자체 호스팅 见外传媒知识库와 함께: 사이드바에서 질문하고, 웹 페이지를 클리핑하며, Markdown 메모를 지식베이스에 저장하세요.',
+      title: '见外 지식베이스 도우미',
+      subtitle: '회사 지식베이스에 연결해 사이드바에서 질문하고 동적 업무 문서와 Markdown 메모를 저장하세요.',
       capabilitiesTitle: '핵심 기능',
       stepsTitle: '구성 단계',
       openApiSettings: 'API 정보 열기',
@@ -356,12 +356,12 @@ export default {
       copySuccess: 'API 주소가 복사되었습니다',
       installCta: '확장 프로그램 다운로드',
       installCtaHint: '내부 CRX 파일 · 다운로드 후 아래 단계 진행',
-      storeMeta: '내부 CRX 설치 파일 · v1.0.0',
+      storeMeta: '见外 지식베이스 도우미 · v1.1.0',
       installGuide: '확인 창이 나타나면 “확장 프로그램 추가” 또는 “유지”를 선택하세요.',
       steps: {
         connect: {
           title: '확장에서 연결',
-          desc: '확장 설정에서 기업/개발자 모드를 선택하고 서비스 API 주소와 API Key를 입력하세요. 아래는 현재 서비스 주소입니다.'
+          desc: '확장을 열고 API Key만 붙여 넣으세요. 회사 지식베이스 주소는 이미 고정되어 있습니다.'
         },
         install: {
           title: 'Chrome 확장 설치',
@@ -373,7 +373,7 @@ export default {
         },
         api: {
           title: 'API 자격 증명',
-          desc: '설정 → API 정보에서 API Key와 API 주소를 복사하세요.'
+          desc: '설정 → API 정보에서 API Key를 복사하세요.'
         }
       },
       scenarios: {
@@ -393,7 +393,7 @@ export default {
         },
         clip: {
           title: '원클릭 웹 수집',
-          desc: 'URL 저장, AI 본문 추출, 영역 선택으로 지식베이스에 정확히 저장.'
+          desc: 'Feishu, Douyin Rules, Tencent Docs, Yuque, Notion, WPS, DingTalk, Google Docs 및 Microsoft 365 동적 페이지를 수집합니다.'
         },
         qa: {
           title: '지식베이스 Q&A',

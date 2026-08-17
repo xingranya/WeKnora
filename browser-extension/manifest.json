@@ -1,0 +1,68 @@
+{
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqvFsG0/cD9+msSH5H8quM6j85MCesfPNpWOxNl1PhJznqyw9SAdCAV4obBO8ISxQ5Gz09zpg+S2tY3q/Yn0qyao7ES8TWY3+9T4B4PebQIxpfAqWSm+l3Fd4YvzeDRVHqyTY+36GHZVvgrT1Jjj2h42yJOb/ce5M47eXmt50pk0h6DCZ4rNnIig+4XxndnNerCVdENjuY82ABi7UsdsPYh/LSqUMVVlGeWkbwk3+2JDYxdR2h39rHHIAJD7evggCbiWg1xQ+ob1V7lAUyb7xdfDizYhRWW1wW2nNWg5PL/KFGWJ9hJ1UYSnTGak7RiN1g4iQhVMiwYC+A/4FGxS5nwIDAQAB",
+  "name": "见外知识库助手",
+  "version": "1.1.0",
+  "description": "见外知识库浏览器插件，一键采集动态网页、侧边栏问答并记录 Markdown 笔记",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "见外知识库助手"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["extractors.js", "defuddle.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "contextMenus",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "commands": {
+    "open-sidepanel": {
+      "description": "打开侧边栏"
+    },
+    "quick-ask": {
+      "description": "快速提问"
+    },
+    "select-clip": {
+      "description": "选择剪藏"
+    },
+    "quick-note": {
+      "description": "快速笔记"
+    },
+    "smart-clip": {
+      "description": "智能剪藏"
+    }
+  }
+}

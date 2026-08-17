@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>动态网页采集器测试</title>
+</head>
+<body>
+  <main id="fixture"></main>
+  <script src="../extractors.js"></script>
+  <script>
+    (async function () {
+      'use strict';
+
+      var failures = [];
+
+      function assert(condition, message) {
+        if (!condition) failures.push(message);
+      }
+
+      function resetFixture() {
+        var fixture = document.getElementById('fixture');
+        fixture.innerHTML = '';
+        return fixture;
+      }
+
+      async function testFeishuShadowAndVirtualScroll() {
+        var fixture = resetFixture();
+        var scroller = document.createElement('div');
+        scroller.className = 'docx-scroll-container';
+        scroller.style.cssText = 'height:120px;overflow:auto;';
+        var spacer = document.createElement('div');
+        spacer.style.height = '1200px';
+        var host = document.createElement('div');
+        var shadow = host.attachShadow({ mode: 'open' });
+        var editor = document.createElement('article');
+        editor.className = 'docx-editor';
+        editor.innerHTML = '<h1>飞书项目规则</h1><p>第一章：适用范围与申请条件。</p>';
+        shadow.appendChild(editor);
+        scroller.appendChild(host);
+        scroller.appendChild(spacer);
+        fixture.appendChild(scroller);
+
+        var appended = false;
+        scroller.addEventListener('scroll', function () {
+          if (appended) return;
+          appended = true;
+          var paragraph = document.createElement('p');
+          paragraph.textContent = '最后一章：违规处理与申诉流程。';
+          editor.appendChild(paragraph);
+        });
+
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: 'https://example.feishu.cn/docx/rule',
+          maxWaitMs: 1200
+        });
+        assert(result.adapterId === 'feishu', '未命中飞书适配器');
+        assert(result.markdown.indexOf('# 飞书项目规则') !== -1, '飞书标题未保留');
+        assert(result.markdown.indexOf('违规处理与申诉流程') !== -1, '虚拟滚动后半段未采集');
+      }
+
+      async function testDouyinDelayedContent() {
+        var fixture = resetFixture();
+        var shell = document.createElement('div');
+        shell.className = 'rule-content';
+        fixture.appendChild(shell);
+        window.setTimeout(function () {
+          shell.innerHTML = '<h2>抖店内容规范</h2><p>直播间不得发布虚假宣传信息，商家须保存相关凭证。</p>';
+        }, 280);
+
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: 'https://school.jinritemai.com/doudian/web/article/123',
+          maxWaitMs: 1800
+        });
+        assert(result.adapterId === 'douyin-rules', '未命中抖音规则适配器');
+        assert(result.markdown.indexOf('直播间不得发布虚假宣传信息') !== -1, '异步规则正文未采集');
+      }
+
+      async function testTableAndLinkMarkdown() {
+        var fixture = resetFixture();
+        fixture.innerHTML = [
+          '<article>',
+          '<h1>办公文档</h1>',
+          '<table><thead><tr><th>项目</th><th>要求</th></tr></thead>',
+          '<tbody><tr><td>归档</td><td>每周完成</td></tr></tbody></table>',
+          '<p><a href="/policy">查看完整制度</a></p>',
+          '</article>'
+        ].join('');
+
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: 'https://intranet.example.com/docs/weekly',
+          maxWaitMs: 900
+        });
+        assert(result.markdown.indexOf('| 项目 | 要求 |') !== -1, '表格未转换为 Markdown');
+        assert(result.markdown.indexOf('[查看完整制度](https://intranet.example.com/policy)') !== -1, '相对链接未转换为绝对地址');
+      }
+
+      function testEmbeddedOfficeHosts() {
+        assert(
+          window.JiwaiPageExtractor.findAdapter('https://bytedance.larkoffice.com/docx/example').id === 'feishu',
+          '巨量引擎内嵌飞书文档未命中适配器'
+        );
+        assert(
+          window.JiwaiPageExtractor.findAdapter('https://support.oceanengine.com/support/content/140628').id === 'douyin-rules',
+          '巨量引擎帮助中心未命中适配器'
+        );
+      }
+
+      function testLarkOpenDocLinkSanitizing() {
+        var fixture = resetFixture();
+        fixture.innerHTML = [
+          '<article>',
+          '<a href="https://bytedance.larkoffice.com/docx/example?edition_id=v2&opendoc=1&encrypt_jssdk_session=secret">规则正文</a>',
+          '<img src="data:image/png;base64,AAAA" alt="内嵌图片">',
+          '</article>'
+        ].join('');
+        var markdown = window.JiwaiPageExtractor.toMarkdown(fixture.firstElementChild, location.href);
+        assert(markdown.indexOf('edition_id=v2') !== -1, '飞书版本号未保留');
+        assert(markdown.indexOf('encrypt_jssdk_session') === -1, '飞书临时加密会话未清理');
+        assert(markdown.indexOf('data:image') === -1, 'base64 内嵌图片未清理');
+      }
+
+      await testFeishuShadowAndVirtualScroll();
+      await testDouyinDelayedContent();
+      await testTableAndLinkMarkdown();
+      testEmbeddedOfficeHosts();
+      testLarkOpenDocLinkSanitizing();
+
+      var status = failures.length ? 'fail' : 'pass';
+      document.body.textContent = failures.length ? 'EXTENSION_TEST_FAIL\n' + failures.join('\n') : 'EXTENSION_TEST_PASS';
+      document.documentElement.setAttribute('data-test-result', status);
+      if (location.protocol === 'http:' || location.protocol === 'https:') {
+        fetch('/__result?status=' + status + '&details=' + encodeURIComponent(failures.join('|'))).catch(function () {});
+      }
+    })();
+  </script>
+</body>
+</html>

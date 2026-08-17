@@ -5,6 +5,7 @@ import koKR from './locales/ko-KR.ts'
 import ruRU from './locales/ru-RU.ts'
 import zhCN from './locales/zh-CN.ts'
 import {
+  CHROME_EXTENSION_DOWNLOAD_URL,
   INTEGRATION_TAB_MIN_ROLE,
   JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL,
 } from '../config/integrations.ts'
@@ -32,6 +33,15 @@ test('见外知识库展示名在所有主界面语言中保持一致', () => {
 
 test('见外知识库安装包使用稳定的静态下载地址', () => {
   assert.equal(JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL, '/downloads/jiwai-knowledge-skill.zip')
+})
+
+test('见外浏览器插件使用公司品牌版本和独立下载地址', () => {
+  assert.equal(CHROME_EXTENSION_DOWNLOAD_URL, '/downloads/jiwai-knowledge-assistant-1.1.0.crx')
+  for (const [localeName, locale] of Object.entries(localeBundles)) {
+    assert.match(locale.integrations.chrome.storeMeta, /v1\.1\.0/, `${localeName} 插件版本不是 v1.1.0`)
+  }
+  assert.match(zhCN.integrations.chrome.steps.connect.desc, /只需粘贴 API Key/)
+  assert.doesNotMatch(zhCN.integrations.chrome.steps.connect.desc, /API 地址/)
 })
 
 test('见外知识库安装页仅向可读取完整 API Key 的空间所有者开放', () => {

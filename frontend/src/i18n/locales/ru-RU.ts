@@ -347,8 +347,8 @@ export default {
       openClawHub: 'Открыть ClawHub'
     },
     chrome: {
-      title: 'Помощник по знаниям',
-      subtitle: 'Для self-hosted 见外传媒知识库: вопросы в боковой панели, клиппинг страниц и Markdown-заметки в базы знаний прямо при просмотре.',
+      title: 'Помощник базы знаний 见外',
+      subtitle: 'Подключение к корпоративной базе знаний, вопросы в боковой панели и сбор динамических офисных документов.',
       capabilitiesTitle: 'Возможности',
       stepsTitle: 'Шаги настройки',
       openApiSettings: 'Открыть API-информацию',
@@ -356,12 +356,12 @@ export default {
       copySuccess: 'URL API скопирован',
       installCta: 'Скачать расширение',
       installCtaHint: 'Внутренний CRX-файл · после загрузки следуйте шагам',
-      storeMeta: 'Внутренний CRX-файл · v1.0.0',
+      storeMeta: 'Помощник 见外 · v1.1.0',
       installGuide: 'При появлении запроса подтвердите добавление расширения или сохранение файла.',
       steps: {
         connect: {
           title: 'Подключите в расширении',
-          desc: 'В настройках расширения выберите режим enterprise/developer и введите API URL и API Key. Ниже — текущий URL сервиса.'
+          desc: 'Откройте расширение и вставьте API Key. Адрес корпоративной базы знаний уже задан.'
         },
         install: {
           title: 'Установите расширение',
@@ -373,7 +373,7 @@ export default {
         },
         api: {
           title: 'Получите API-учётные данные',
-          desc: 'Скопируйте API Key и базовый URL в «Настройки → API-информация».'
+          desc: 'Скопируйте API Key в «Настройки → API-информация».'
         }
       },
       scenarios: {
@@ -393,7 +393,7 @@ export default {
         },
         clip: {
           title: 'Сбор веб-контента',
-          desc: 'Сохранение URL, AI-извлечение текста или выбор области на странице.'
+          desc: 'Сбор динамических страниц Feishu, Douyin Rules, Tencent Docs, Yuque, Notion, WPS, DingTalk, Google Docs и Microsoft 365.'
         },
         qa: {
           title: 'Q&A по базе знаний',

@@ -16,7 +16,7 @@
         :label="$t('integrations.chrome.installCta')"
         :hint="$t('integrations.chrome.installCtaHint')"
         :href="CHROME_EXTENSION_DOWNLOAD_URL"
-        download="weknora-knowledge-assistant-1.0.0.crx"
+        download="jiwai-knowledge-assistant-1.1.0.crx"
         trailing-icon="download"
       >
         <template #icon>
@@ -68,19 +68,6 @@
                 >
                   {{ $t('integrations.chrome.openApiSettings') }}
                 </t-button>
-                <div v-if="step === 'connect'" class="landing-step-embed credential-row">
-                  <div class="api-key-control landing-api-control">
-                    <t-input :model-value="apiBaseUrlDisplay" readonly class="mono-text-input" />
-                    <t-button
-                      size="small"
-                      variant="text"
-                      :title="$t('integrations.chrome.copy')"
-                      @click="copyApiUrl"
-                    >
-                      <t-icon name="file-copy" size="16px" />
-                    </t-button>
-                  </div>
-                </div>
               </div>
             </li>
           </ol>
@@ -95,21 +82,18 @@
 </template>
 
 <script setup lang="ts">
-import { copyWithToast } from '@/utils/clipboard'
 import { useRouter } from 'vue-router'
 import { CHROME_EXTENSION_DOWNLOAD_URL } from '@/config/integrations'
-import { useApiBaseUrlDisplay } from '@/composables/useApiBaseUrlDisplay'
 import { useUIStore } from '@/stores/ui'
 import IntegrationLandingLayout from './IntegrationLandingLayout.vue'
 import IntegrationExternalCta from './IntegrationExternalCta.vue'
 
 const router = useRouter()
 const uiStore = useUIStore()
-const { apiBaseUrlDisplay } = useApiBaseUrlDisplay()
 
 const capabilityKeys = ['qa', 'clip', 'notes', 'shortcuts'] as const
 const scenarioKeys = ['research', 'learning', 'tech', 'work'] as const
-const stepKeys = ['api', 'port', 'install', 'connect'] as const
+const stepKeys = ['api', 'install', 'connect'] as const
 
 const capabilityIcons: Record<(typeof capabilityKeys)[number], string> = {
   qa: 'chat-bubble',
@@ -123,7 +107,4 @@ const openApiSettings = () => {
   uiStore.openSettings('integration-api')
 }
 
-const copyApiUrl = async () => {
-  await copyWithToast(apiBaseUrlDisplay.value, 'integrations.chrome.copySuccess')
-}
 </script>
