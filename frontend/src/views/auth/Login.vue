@@ -1686,7 +1686,7 @@ onMounted(async () => {
   .showcase-section {
     flex: 0 0 auto;
     min-height: 50vh;
-    padding: 40px 24px;
+    padding: 96px 24px 40px;
   }
 
   .showcase-content {
@@ -1750,7 +1750,7 @@ onMounted(async () => {
   }
 
   .showcase-section {
-    padding: 32px 20px;
+    padding: 88px 20px 32px;
   }
 
   .header-logo {
