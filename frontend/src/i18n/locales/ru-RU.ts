@@ -269,8 +269,8 @@ export default {
     filterByAgentWithName: 'Фильтр по агенту: {name}',
     filterAllAgents: 'Все агенты',
     claw: {
-      title: 'WeKnora Skill',
-      subtitle: 'Импорт документов и гибридный поиск (вектор + ключевые слова) через REST API WeKnora — загрузки, URL, Markdown и поиск.',
+      title: '见外传媒知识库 Skill',
+      subtitle: 'Импорт документов и гибридный поиск (вектор + ключевые слова) через REST API 见外传媒知识库: загрузки, URL, Markdown и поиск.',
       capabilitiesTitle: 'Возможности Skill',
       stepsTitle: 'Шаги настройки',
       openApiSettings: 'Открыть API-информацию',
@@ -279,7 +279,7 @@ export default {
       copyCmdSuccess: 'Команда установки скопирована',
       ecosystemNote: 'Skill размещён на ClawHub ({\'@\'}lyingbug/weknora). Полная документация API — на странице ClawHub.',
       installCta: 'Открыть ClawHub',
-      installCtaHint: 'Установка WeKnora Skill · откроется в новой вкладке',
+      installCtaHint: 'Установка 见外传媒知识库 Skill · откроется в новой вкладке',
       hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0',
       steps: {
         verify: {
@@ -324,7 +324,7 @@ export default {
     },
     chrome: {
       title: 'Помощник по знаниям',
-      subtitle: 'Для self-hosted WeKnora: вопросы в боковой панели, клиппинг страниц и Markdown-заметки в базы знаний прямо при просмотре.',
+      subtitle: 'Для self-hosted 见外传媒知识库: вопросы в боковой панели, клиппинг страниц и Markdown-заметки в базы знаний прямо при просмотре.',
       capabilitiesTitle: 'Возможности',
       stepsTitle: 'Шаги настройки',
       openApiSettings: 'Открыть API-информацию',
@@ -344,7 +344,7 @@ export default {
         },
         port: {
           title: 'Десктоп: фиксированный порт',
-          desc: 'В WeKnora Desktop задайте фиксированный порт API (например 37841) в API-информации.'
+          desc: 'В 见外传媒知识库 Desktop задайте фиксированный порт API (например 37841) в API-информации.'
         },
         api: {
           title: 'Получите API-учётные данные',
@@ -480,14 +480,14 @@ export default {
       directWarning: 'Прямой ID доверяет заголовку вызывающей стороны. Используйте только для доверенных server-to-server вызовов.',
       directWarningDetail: 'Любой, у кого есть API key, может подменить заголовок ID пользователя, выдать себя за другого внешнего пользователя и переиспользовать или перехватить его авторизацию MCP OAuth. Не используйте в браузере или ненадёжных клиентах; для пользовательских приложений выбирайте подписанный token.',
       signedRecommended: 'Рекомендуется для пользовательских приложений: ваш backend подписывает краткоживущий HS256 JWT для внешнего пользователя.',
-      signedFlowDetail: 'HMAC secret храните только в WeKnora и на доверенном backend — не передавайте в запросах и не отдавайте браузеру. В заголовке запроса передаётся JWT, подписанный этим secret (меняется при каждой выдаче или после истечения), а не сам secret. JWT должен содержать sub (ID внешнего пользователя), tenant_id, aud=weknora и exp (не более 24 ч).',
+      signedFlowDetail: 'HMAC secret храните только в 见外传媒知识库 и на доверенном backend. Не передавайте его в запросах и не отдавайте браузеру. В заголовке запроса передаётся JWT, подписанный этим secret (меняется при каждой выдаче или после истечения), а не сам secret. JWT должен содержать sub (ID внешнего пользователя), tenant_id, aud=weknora и exp (не более 24 ч).',
       directHeader: 'Заголовок ID пользователя',
       requireDirectHeader: 'Требовать заголовок ID пользователя',
       requireDirectHeaderDesc: 'Если включено, запросы без заголовка ID пользователя отклоняются; иначе все запросы обрабатываются как единое пространство без различия конечных пользователей.',
       tokenHeader: 'Заголовок token',
       tokenHeaderDesc: 'Клиент передаёт JWT, подписанный backend, в этом фиксированном заголовке.',
       hmacSecret: 'HMAC secret',
-      hmacSecretDesc: 'Тот же secret, что в WeKnora; только для подписи JWT на backend — не отправляйте его в заголовке запроса.',
+      hmacSecretDesc: 'Тот же secret, что в 见外传媒知识库; используйте его только для подписи JWT на backend и не отправляйте в заголовке запроса.',
       secretConfigured: 'Secret настроен (повторно не показывается); введите новое значение для ротации',
       secretSavedCopyHint: 'Secret сохранён. Скопируйте его в backend сейчас — после ухода со страницы просмотреть его будет нельзя.',
       generateSecret: 'Сгенерировать secret',
@@ -4113,7 +4113,7 @@ export default {
     allowFileUploadDesc: 'При включении посетители видят кнопку загрузки изображений в поле ввода. Кнопка появляется только если у привязанного агента включена загрузка изображений.',
     webhookUrl: 'Webhook URL',
     webhookUrlPlaceholder: 'https://your-server.example.com/weknora/embed-events',
-    webhookUrlDesc: 'Optional. WeKnora POSTs message_sent / message_received events to this HTTPS endpoint.',
+    webhookUrlDesc: 'Необязательно. 见外传媒知识库 отправляет события message_sent / message_received на этот HTTPS endpoint.',
     webhookSecret: 'Webhook secret',
     webhookSecretPlaceholder: 'HMAC-SHA256 secret (X-WeKnora-Signature header)',
     webhookSecretKeep: 'Leave blank to keep the saved secret',
@@ -4226,7 +4226,7 @@ export default {
     }
   },
   createChat: {
-    title: 'Привет, я WeKnora — ваши знания всегда под рукой',
+    title: 'Здравствуйте, я 见外传媒知识库 — ваши знания всегда под рукой',
     newSessionTitle: 'Новая сессия',
     messages: {
       createFailed: 'Не удалось создать сессию',
@@ -4471,11 +4471,11 @@ export default {
     haveAccount: 'Уже есть аккаунт?',
     backToLogin: 'Вернуться ко входу',
     loginHint: 'Войдите, чтобы продолжить, или создайте аккаунт ниже, если вы впервые здесь.',
-    firstTime: 'Впервые в WeKnora?',
+    firstTime: 'Впервые в 见外传媒知识库?',
     registerSuccess: 'Регистрация завершена. Войдите в систему',
     registerFailed: 'Ошибка регистрации',
     subtitle: 'RAG, ReAct-агент и Wiki — корпоративный фреймворк знаний на основе больших моделей',
-    registerSubtitle: 'Создайте аккаунт и начните работу с WeKnora',
+    registerSubtitle: 'Создайте аккаунт и начните работу с 见外传媒知识库',
     emailPlaceholder: 'Введите адрес электронной почты',
     passwordPlaceholder: 'Введите пароль (8-32 символа, включая буквы и цифры)',
     confirmPasswordPlaceholder: 'Введите пароль ещё раз',
@@ -4906,8 +4906,8 @@ export default {
       backendDescriptions: {
         cube: 'Self-hosted MicroVM cluster for private or on-premises deployments',
         e2b: 'Managed MicroVM service or an E2B-compatible deployment',
-        docker: 'Run every script in a short-lived container on this WeKnora host',
-        local: 'Run scripts directly in the WeKnora server process environment',
+        docker: 'Запускать каждый скрипт в кратковременном контейнере на этом хосте сервиса',
+        local: 'Запускать скрипты непосредственно в среде процесса сервиса',
       },
       addConfig: 'Add sandbox backend',
       viewClusterGuide: 'Cluster setup guide',
@@ -4955,12 +4955,12 @@ export default {
       policySaveFailed: 'Failed to update sandbox execution policy',
       legacyConfig: 'Deprecated',
       namedBackendHint: 'Workspace configuration is the only runtime source. Agents without one cannot execute skill scripts.',
-      weknoraTemplateTitle: 'WeKnora standard template',
-      weknoraDockerImage: 'WeKnora standard image',
+      weknoraTemplateTitle: 'Стандартный шаблон 见外传媒知识库',
+      weknoraDockerImage: 'Стандартный образ 见外传媒知识库',
       weknoraDockerImageHint: 'Each execution starts an isolated, short-lived container from this image. No session sandbox is retained.',
-      localRuntimeWarning: 'Local process runs skill scripts directly on the WeKnora server without container or MicroVM isolation. Use only in a trusted development workspace.',
-      weknoraTemplateOverview: 'WeKnora provides the standard runtime. Templates are discovered after connecting and the standard one is created when missing.',
-      weknoraTemplateDescription: 'Includes the Python, Node.js, CLI tools, workspace path, and non-root execution user expected by WeKnora skills.',
+      localRuntimeWarning: 'Локальный процесс запускает скрипты навыков непосредственно на сервере 见外传媒知识库 без изоляции контейнера или MicroVM. Используйте только в доверенном пространстве разработки.',
+      weknoraTemplateOverview: '见外传媒知识库 предоставляет стандартную среду выполнения. После подключения шаблоны обнаруживаются автоматически, а отсутствующий стандартный шаблон создаётся.',
+      weknoraTemplateDescription: 'Содержит Python, Node.js, CLI-инструменты, путь рабочей области и непривилегированного пользователя, необходимые навыкам 见外传媒知识库.',
       recommendedTag: 'Recommended',
       templateNotConfigured: 'Template not configured',
       cardTemplateConfigured: 'Шаблон настроен',
@@ -4971,21 +4971,21 @@ export default {
       cardEnvVars: 'Переменных окружения: {count}',
       cardPrivateEndpoints: 'Разрешён доступ к частной сети',
       imageNotConfigured: 'Image not configured',
-      localRuntimeSummary: 'WeKnora server process',
+      localRuntimeSummary: 'Серверный процесс 见外传媒知识库',
       templateApplied: 'Applied',
       refreshTemplates: 'Refresh templates',
       templateSelectHelp: 'Templates are loaded from this cluster. The saved configuration stores the ID automatically.',
       templateSelectPlaceholder: 'Connect to the cluster to load templates',
-      templateLoadHint: 'Enter the cluster connection and refresh. WeKnora creates its standard template when missing.',
+      templateLoadHint: 'Введите подключение к кластеру и обновите. Если стандартного шаблона нет, 见外传媒知识库 создаст его.',
       templateLoadFailed: 'Failed to load templates',
-      standardTemplateProvisioning: 'The WeKnora standard template is being created. Refresh shortly to see its status.',
+      standardTemplateProvisioning: 'Создаётся стандартный шаблон 见外传媒知识库. Скоро обновите страницу, чтобы увидеть статус.',
       templateNotReady: 'The selected template is not ready. Refresh and wait for the build to finish.',
       connectionPassed: 'Connection verified. Templates below are loaded from this cluster.',
       connectionPassedTitle: 'Cluster connected',
-      templateStepHint: 'WeKnora automatically creates its standard template when missing. You can continue after a template is ready.',
+      templateStepHint: 'Если стандартного шаблона нет, 见外传媒知识库 создаёт его автоматически. Продолжите после готовности шаблона.',
       loadingTemplates: 'Loading templates from the cluster...',
       templateBuildingHint: 'The standard template is being built automatically. This list will refresh.',
-      templateUntaggedHint: 'Сборки завершены, но ни одна не имеет тега default, поэтому при создании песочницы шаблон не находится. Удалите его в E2B и обновите список — WeKnora пересоберёт шаблон.',
+      templateUntaggedHint: 'Сборки завершены, но ни одна не имеет тега default, поэтому при создании песочницы шаблон не находится. Удалите его в E2B и обновите список — 见外传媒知识库 пересоберёт шаблон.',
       templateFailedReason: 'Сборка не удалась: {reason}',
       noTemplates: 'No templates were returned by this cluster.',
       templateReadyHint: 'Template “{name}” is ready and selected.',
@@ -6294,10 +6294,10 @@ export default {
       },
       knowledge: {
         title: 'Создайте базу знаний',
-        desc: 'С этого всё начинается: загружайте документы, веб-страницы или FAQ, и WeKnora автоматически разберёт и проиндексирует их. Нажмите здесь, чтобы открыть базы знаний.'
+        desc: 'С этого всё начинается: загружайте документы, веб-страницы или FAQ, и 见外传媒知识库 автоматически разберёт и проиндексирует их. Нажмите здесь, чтобы открыть базы знаний.'
       },
       welcome: {
-        title: 'Добро пожаловать в WeKnora',
+        title: 'Добро пожаловать в 见外传媒知识库',
         desc: 'Несколько простых шагов познакомят вас с базами знаний, чатом и агентами. Нажмите «Далее», чтобы начать.'
       }
     }

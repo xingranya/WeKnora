@@ -269,8 +269,8 @@ export default {
     filterByAgentWithName: '按智能体筛选：{name}',
     filterAllAgents: '全部智能体',
     claw: {
-      title: 'WeKnora Skill',
-      subtitle: '通过 WeKnora REST API 导入文档并执行混合检索（向量 + 关键词）。适用于上传文件/URL/Markdown 到知识库、跨库检索与浏览知识内容。',
+      title: '见外传媒知识库 Skill',
+      subtitle: '通过见外传媒知识库 REST API 导入文档并执行混合检索（向量 + 关键词）。适用于上传文件、URL 或 Markdown，支持跨库检索与知识浏览。',
       capabilitiesTitle: 'Skill 能力',
       stepsTitle: '配置步骤',
       openApiSettings: '打开 API 信息',
@@ -279,7 +279,7 @@ export default {
       copyCmdSuccess: '已复制安装命令',
       ecosystemNote: 'Skill 托管于 ClawHub（{\'@\'}lyingbug/weknora），完整 API 说明与版本历史请参见 ClawHub 页面。',
       installCta: '前往 ClawHub',
-      installCtaHint: '安装 WeKnora Skill · 将在新标签页打开',
+      installCtaHint: '安装见外传媒知识库 Skill · 将在新标签页打开',
       hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0',
       steps: {
         verify: {
@@ -324,7 +324,7 @@ export default {
     },
     chrome: {
       title: '知识管理助手',
-      subtitle: '配合 WeKnora 自建服务使用：在任意网页侧边栏提问、剪藏内容、Markdown 速记，将浏览中的知识沉淀到你的知识库。',
+      subtitle: '配合见外传媒知识库自建服务使用：在任意网页侧边栏提问、剪藏内容和记录 Markdown 笔记，将浏览中的知识沉淀到知识库。',
       capabilitiesTitle: '核心能力',
       stepsTitle: '配置步骤',
       openApiSettings: '打开 API 信息',
@@ -344,7 +344,7 @@ export default {
         },
         port: {
           title: '桌面版配置固定端口（推荐）',
-          desc: '使用 WeKnora 桌面版时，在 API 信息中设置固定端口（如 37841），避免每次启动后地址变化导致插件断连。'
+          desc: '使用见外传媒知识库桌面版时，在 API 信息中设置固定端口（如 37841），避免每次启动后地址变化导致插件断连。'
         },
         api: {
           title: '获取 API 凭证',
@@ -480,14 +480,14 @@ export default {
       directWarning: '直接传用户 ID 会信任调用方请求头，仅适用于可信服务端到服务端调用。',
       directWarningDetail: '任何持有 API Key 的调用方都可以通过修改用户 ID 请求头冒充其他外部用户，从而共用或劫持其 MCP OAuth 授权。请勿用于浏览器或不可信客户端；面向终端用户请使用「签名 Token」。',
       signedRecommended: '推荐给面向用户的应用：由你的业务后端为外部用户签发短期 HS256 JWT。',
-      signedFlowDetail: 'HMAC 密钥仅保存在 WeKnora 与你的可信后端，切勿放入请求或下发给浏览器。请求头里传的是用该密钥签出的 JWT 字符串（每次签发或过期后会变），不是密钥本身。JWT 须包含 sub（外部用户 ID）、tenant_id、aud=weknora、exp（有效期不超过 24 小时）。',
+      signedFlowDetail: 'HMAC 密钥仅保存在见外传媒知识库与可信后端，切勿放入请求或下发给浏览器。请求头里传的是用该密钥签出的 JWT 字符串（每次签发或过期后会变），不是密钥本身。JWT 须包含 sub（外部用户 ID）、tenant_id、aud=weknora、exp（有效期不超过 24 小时）。',
       directHeader: '用户 ID 请求头',
       requireDirectHeader: '必须携带用户 ID',
       requireDirectHeaderDesc: '开启后，缺少用户 ID 请求头的 API Key 请求将被拒绝；关闭则按整个空间统一处理，不区分具体终端用户。',
       tokenHeader: 'Token 请求头',
       tokenHeaderDesc: '客户端在该固定请求头中携带后端签发的 JWT。',
       hmacSecret: 'HMAC 密钥',
-      hmacSecretDesc: '与 WeKnora 保存的同一份密钥；仅用于后端签发 JWT，不要作为请求头发送。',
+      hmacSecretDesc: '与见外传媒知识库保存的同一份密钥；仅用于后端签发 JWT，不要作为请求头发送。',
       secretConfigured: '已配置密钥（不可回看）；输入新值可轮换',
       secretSavedCopyHint: '密钥已保存，请立即复制到后端配置。离开本页后将无法再次查看。',
       generateSecret: '生成密钥',
@@ -4115,7 +4115,7 @@ export default {
     allowFileUploadDesc: '开启后，访客可上传图片与文档附件。仅当绑定的智能体已启用图片上传时才会生效。',
     webhookUrl: 'Webhook 地址',
     webhookUrlPlaceholder: 'https://your-server.example.com/weknora/embed-events',
-    webhookUrlDesc: '可选。访客发消息与助手回复完成时，WeKnora 会向该 HTTPS 地址 POST 事件（message_sent / message_received）。',
+    webhookUrlDesc: '可选。访客发消息与助手回复完成时，见外传媒知识库会向该 HTTPS 地址 POST 事件（message_sent / message_received）。',
     webhookSecret: 'Webhook 签名密钥',
     webhookSecretPlaceholder: '用于 HMAC-SHA256 签名（X-WeKnora-Signature）',
     webhookSecretKeep: '留空表示不修改已保存的密钥',
@@ -4228,7 +4228,7 @@ export default {
     }
   },
   createChat: {
-    title: 'Hi，我是 WeKnora，让你的知识触手可及',
+    title: '我是见外传媒知识库，让你的知识触手可及',
     newSessionTitle: '新会话',
     messages: {
       createFailed: '创建会话失败',
@@ -4473,11 +4473,11 @@ export default {
     haveAccount: '已有账户？',
     backToLogin: '返回登录',
     loginHint: '登录以继续使用；首次使用请在下方创建账户。',
-    firstTime: '首次使用 WeKnora？',
+    firstTime: '首次使用见外传媒知识库？',
     registerSuccess: '注册成功，请登录',
     registerFailed: '注册失败',
     subtitle: 'RAG 问答、ReAct 智能体与 Wiki 知识库，大模型驱动的企业级知识框架',
-    registerSubtitle: '创建账户并开始使用 WeKnora',
+    registerSubtitle: '创建账户并开始使用见外传媒知识库',
     emailPlaceholder: '输入邮箱地址',
     passwordPlaceholder: '输入密码（8-32个字符，包含字母和数字）',
     confirmPasswordPlaceholder: '再次输入密码',
@@ -4908,8 +4908,8 @@ export default {
       backendDescriptions: {
         cube: '适合私有化或内网部署的自建 MicroVM 集群',
         e2b: 'E2B 托管服务或兼容 E2B 的集群',
-        docker: '每次在当前 WeKnora 主机启动一个短生命周期容器执行脚本',
-        local: '直接在 WeKnora 服务进程所在环境执行脚本',
+        docker: '每次在当前服务主机启动一个短生命周期容器执行脚本',
+        local: '直接在当前服务进程所在环境执行脚本',
       },
       addConfig: '添加沙箱后端',
       viewClusterGuide: '集群搭建指南',
@@ -4957,12 +4957,12 @@ export default {
       policySaveFailed: '更新沙盒执行策略失败',
       legacyConfig: '已废弃',
       namedBackendHint: '空间配置是唯一运行时来源；智能体没有选择配置时不会执行技能脚本。',
-      weknoraTemplateTitle: 'WeKnora 标准模板',
-      weknoraDockerImage: 'WeKnora 标准镜像',
+      weknoraTemplateTitle: '见外传媒知识库标准模板',
+      weknoraDockerImage: '见外传媒知识库标准镜像',
       weknoraDockerImageHint: '每次执行都会基于该镜像创建一个隔离的短生命周期容器，不保留会话沙箱。',
-      localRuntimeWarning: '本地进程会直接在 WeKnora 服务器上执行技能脚本，不具备容器或 MicroVM 隔离。仅建议在可信的开发空间使用。',
-      weknoraTemplateOverview: 'WeKnora 负责提供标准运行环境。连接集群后会自动发现模板，缺少标准模板时自动创建。',
-      weknoraTemplateDescription: '包含 WeKnora 技能所需的 Python、Node.js、CLI 工具、工作目录和非 root 执行用户。',
+      localRuntimeWarning: '本地进程会直接在见外传媒知识库服务器上执行技能脚本，不具备容器或 MicroVM 隔离。仅建议在可信的开发空间使用。',
+      weknoraTemplateOverview: '见外传媒知识库提供标准运行环境。连接集群后会自动发现模板，缺少标准模板时自动创建。',
+      weknoraTemplateDescription: '包含见外传媒知识库技能所需的 Python、Node.js、CLI 工具、工作目录和非 root 执行用户。',
       recommendedTag: '推荐',
       templateNotConfigured: '未配置模板',
       cardTemplateConfigured: '模板已配置',
@@ -4973,21 +4973,21 @@ export default {
       cardEnvVars: '{count} 个环境变量',
       cardPrivateEndpoints: '允许访问私网',
       imageNotConfigured: '未配置镜像',
-      localRuntimeSummary: 'WeKnora 服务器本地进程',
+      localRuntimeSummary: '见外传媒知识库服务器本地进程',
       templateApplied: '已使用',
       refreshTemplates: '刷新模板',
       templateSelectHelp: '模板由当前集群实时返回，保存时仅记录模板 ID，无需手工复制。',
       templateSelectPlaceholder: '先连接集群并加载模板',
-      templateLoadHint: '填写集群连接后刷新模板；若缺少 WeKnora 标准模板，系统会自动创建。',
+      templateLoadHint: '填写集群连接后刷新模板；若缺少见外传媒知识库标准模板，系统会自动创建。',
       templateLoadFailed: '模板列表加载失败',
-      standardTemplateProvisioning: '已开始在集群中创建 WeKnora 标准模板，请稍后刷新查看状态',
+      standardTemplateProvisioning: '已开始在集群中创建见外传媒知识库标准模板，请稍后刷新查看状态',
       templateNotReady: '所选模板尚未构建完成，请刷新并等待状态就绪',
       connectionPassed: '连接验证通过，以下模板均从当前集群实时加载。',
       connectionPassedTitle: '集群连接成功',
-      templateStepHint: '集群缺少标准模板时，WeKnora 会自动创建；模板就绪后才能继续。',
+      templateStepHint: '集群缺少标准模板时，见外传媒知识库会自动创建；模板就绪后才能继续。',
       loadingTemplates: '正在从集群加载模板…',
       templateBuildingHint: '标准模板正在自动构建，列表会自动刷新。',
-      templateUntaggedHint: '构建已完成，但没有构建带 default 标签，创建沙箱时无法解析。请在 E2B 删除该模板，刷新后 WeKnora 会重新构建。',
+      templateUntaggedHint: '构建已完成，但没有构建带 default 标签，创建沙箱时无法解析。请在 E2B 删除该模板，刷新后见外传媒知识库会重新构建。',
       templateFailedReason: '构建失败：{reason}',
       noTemplates: '当前集群未返回可用模板。',
       templateReadyHint: '模板「{name}」已就绪并选中。',
@@ -6296,10 +6296,10 @@ export default {
       },
       knowledge: {
         title: '创建你的知识库',
-        desc: '知识库是一切的起点：上传文档、网页或 FAQ，WeKnora 会自动解析并建立索引。点击这里进入知识库。'
+        desc: '知识库是一切的起点：上传文档、网页或 FAQ，见外传媒知识库会自动解析并建立索引。点击这里进入知识库。'
       },
       welcome: {
-        title: '欢迎使用 WeKnora',
+        title: '欢迎使用见外传媒知识库',
         desc: '只需几步，带你快速了解知识库、对话与智能体的核心用法。点击「下一步」开始。'
       }
     }

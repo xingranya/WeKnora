@@ -269,8 +269,8 @@ export default {
     filterByAgentWithName: '에이전트별 필터: {name}',
     filterAllAgents: '전체 에이전트',
     claw: {
-      title: 'WeKnora Skill',
-      subtitle: 'WeKnora REST API로 문서를 가져오고 하이브리드 검색(벡터+키워드)을 수행합니다. 파일/URL/Markdown 업로드 및 검색에 사용.',
+      title: '见外传媒知识库 Skill',
+      subtitle: '见外传媒知识库 REST API로 문서를 가져오고 하이브리드 검색(벡터+키워드)을 수행합니다. 파일, URL, Markdown 업로드와 검색에 사용합니다.',
       capabilitiesTitle: 'Skill 기능',
       stepsTitle: '구성 단계',
       openApiSettings: 'API 정보 열기',
@@ -279,7 +279,7 @@ export default {
       copyCmdSuccess: '설치 명령이 복사되었습니다',
       ecosystemNote: 'Skill은 ClawHub({\'@\'}lyingbug/weknora)에 호스팅됩니다. 전체 API 문서는 ClawHub 페이지를 참고하세요.',
       installCta: 'ClawHub 열기',
-      installCtaHint: 'WeKnora Skill 설치 · 새 탭에서 열림',
+      installCtaHint: '见外传媒知识库 Skill 설치 · 새 탭에서 열림',
       hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0',
       steps: {
         verify: {
@@ -324,7 +324,7 @@ export default {
     },
     chrome: {
       title: '지식 관리 어시스턴트',
-      subtitle: '자체 호스팅 WeKnora와 함께: 사이드바에서 질문하고, 웹 페이지를 클리핑하며, Markdown 메모를 지식베이스에 저장하세요.',
+      subtitle: '자체 호스팅 见外传媒知识库와 함께: 사이드바에서 질문하고, 웹 페이지를 클리핑하며, Markdown 메모를 지식베이스에 저장하세요.',
       capabilitiesTitle: '핵심 기능',
       stepsTitle: '구성 단계',
       openApiSettings: 'API 정보 열기',
@@ -344,7 +344,7 @@ export default {
         },
         port: {
           title: '데스크톱: 고정 포트(권장)',
-          desc: 'WeKnora 데스크톱에서는 API 정보에서 고정 포트(예: 37841)를 설정하세요.'
+          desc: '见外传媒知识库 데스크톱에서는 API 정보에서 고정 포트(예: 37841)를 설정하세요.'
         },
         api: {
           title: 'API 자격 증명',
@@ -480,14 +480,14 @@ export default {
       directWarning: '직접 사용자 ID 모드는 요청 헤더를 신뢰합니다. 신뢰된 서버 간 호출에만 사용하세요.',
       directWarningDetail: 'API Key를 가진 호출자는 사용자 ID 헤더를 바꿔 다른 외부 사용자를 가장하고 해당 사용자의 MCP OAuth 인증을 공유하거나 탈취할 수 있습니다. 브라우저나 신뢰할 수 없는 클라이언트에는 사용하지 마세요. 최종 사용자 앱에는 서명 토큰을 사용하세요.',
       signedRecommended: '사용자 대상 앱에 권장: 비즈니스 백엔드가 외부 사용자용 단기 HS256 JWT를 서명합니다.',
-      signedFlowDetail: 'HMAC secret은 WeKnora와 신뢰할 수 있는 백엔드에만 보관하세요. 요청에 넣거나 브라우저에 배포하지 마세요. 요청 헤더에는 secret이 아니라 해당 secret으로 서명한 JWT 문자열을 넣습니다(발급마다 또는 만료 후 변경). JWT에는 sub(외부 사용자 ID), tenant_id, aud=weknora, exp(최대 24시간)가 필요합니다.',
+      signedFlowDetail: 'HMAC secret은 见外传媒知识库와 신뢰할 수 있는 백엔드에만 보관하세요. 요청에 넣거나 브라우저에 배포하지 마세요. 요청 헤더에는 secret이 아니라 해당 secret으로 서명한 JWT 문자열을 넣습니다(발급마다 또는 만료 후 변경). JWT에는 sub(외부 사용자 ID), tenant_id, aud=weknora, exp(최대 24시간)가 필요합니다.',
       directHeader: '사용자 ID 헤더',
       requireDirectHeader: '사용자 ID 헤더 필수',
       requireDirectHeaderDesc: '켜면 사용자 ID 헤더가 없는 API Key 요청을 거부하고, 끄면 워크스페이스 전체로 통일 처리하며 개별 사용자를 구분하지 않습니다.',
       tokenHeader: '토큰 헤더',
       tokenHeaderDesc: '클라이언트는 이 고정 헤더에 백엔드가 서명한 JWT를 전달합니다.',
       hmacSecret: 'HMAC secret',
-      hmacSecretDesc: 'WeKnora에 저장된 것과 동일한 secret. 백엔드에서 JWT 서명에만 사용하며 요청 헤더로 보내지 않습니다.',
+      hmacSecretDesc: '见外传媒知识库에 저장된 것과 동일한 secret. 백엔드에서 JWT 서명에만 사용하며 요청 헤더로 보내지 않습니다.',
       secretConfigured: 'Secret configured (not shown again); enter a new value to rotate',
       secretSavedCopyHint: 'Secret saved. Copy it to your backend now — you will not be able to view it again after leaving this page.',
       generateSecret: 'Secret 생성',
@@ -4113,7 +4113,7 @@ export default {
     allowFileUploadDesc: '활성화하면 방문자 입력창에 이미지 업로드 버튼이 표시됩니다. 연결된 에이전트에서 이미지 업로드가 활성화된 경우에만 버튼이 나타납니다.',
     webhookUrl: 'Webhook URL',
     webhookUrlPlaceholder: 'https://your-server.example.com/weknora/embed-events',
-    webhookUrlDesc: 'Optional. WeKnora POSTs message_sent / message_received events to this HTTPS endpoint.',
+    webhookUrlDesc: '선택 사항입니다. 见外传媒知识库가 message_sent / message_received 이벤트를 이 HTTPS 엔드포인트로 POST합니다.',
     webhookSecret: 'Webhook secret',
     webhookSecretPlaceholder: 'HMAC-SHA256 secret (X-WeKnora-Signature header)',
     webhookSecretKeep: 'Leave blank to keep the saved secret',
@@ -4226,7 +4226,7 @@ export default {
     }
   },
   createChat: {
-    title: '안녕하세요, WeKnora입니다 — 당신의 지식을 손끝에',
+    title: '안녕하세요, 见外传媒知识库입니다 — 당신의 지식을 손끝에',
     newSessionTitle: '새 세션',
     messages: {
       createFailed: '세션 생성 실패',
@@ -4471,11 +4471,11 @@ export default {
     haveAccount: '이미 계정이 있으신가요?',
     backToLogin: '로그인으로 돌아가기',
     loginHint: '로그인하여 계속하세요. 처음이시라면 아래에서 계정을 만드세요.',
-    firstTime: 'WeKnora가 처음이신가요?',
+    firstTime: '见外传媒知识库가 처음이신가요?',
     registerSuccess: '가입이 완료되었습니다. 로그인해주세요',
     registerFailed: '가입 실패',
     subtitle: 'RAG Q&A, ReAct 에이전트, Wiki 지식베이스 — 대규모 언어 모델 기반 엔터프라이즈 지식 프레임워크',
-    registerSubtitle: '계정을 만들고 WeKnora를 시작하세요',
+    registerSubtitle: '계정을 만들고 见外传媒知识库를 시작하세요',
     emailPlaceholder: '이메일 주소 입력',
     passwordPlaceholder: '비밀번호 입력 (8-32자, 문자와 숫자 포함)',
     confirmPasswordPlaceholder: '비밀번호 다시 입력',
@@ -4906,8 +4906,8 @@ export default {
       backendDescriptions: {
         cube: 'Self-hosted MicroVM cluster for private or on-premises deployments',
         e2b: 'Managed MicroVM service or an E2B-compatible deployment',
-        docker: 'Run every script in a short-lived container on this WeKnora host',
-        local: 'Run scripts directly in the WeKnora server process environment',
+        docker: '이 서비스 호스트에서 각 스크립트를 단명 컨테이너로 실행합니다',
+        local: '현재 서비스 프로세스 환경에서 스크립트를 직접 실행합니다',
       },
       addConfig: 'Add sandbox backend',
       viewClusterGuide: 'Cluster setup guide',
@@ -4955,12 +4955,12 @@ export default {
       policySaveFailed: 'Failed to update sandbox execution policy',
       legacyConfig: 'Deprecated',
       namedBackendHint: 'Workspace configuration is the only runtime source. Agents without one cannot execute skill scripts.',
-      weknoraTemplateTitle: 'WeKnora standard template',
-      weknoraDockerImage: 'WeKnora standard image',
+      weknoraTemplateTitle: '见外传媒知识库 표준 템플릿',
+      weknoraDockerImage: '见外传媒知识库 표준 이미지',
       weknoraDockerImageHint: 'Each execution starts an isolated, short-lived container from this image. No session sandbox is retained.',
-      localRuntimeWarning: 'Local process runs skill scripts directly on the WeKnora server without container or MicroVM isolation. Use only in a trusted development workspace.',
-      weknoraTemplateOverview: 'WeKnora provides the standard runtime. Templates are discovered after connecting and the standard one is created when missing.',
-      weknoraTemplateDescription: 'Includes the Python, Node.js, CLI tools, workspace path, and non-root execution user expected by WeKnora skills.',
+      localRuntimeWarning: '로컬 프로세스는 컨테이너나 MicroVM 격리 없이 见外传媒知识库 서버에서 스킬 스크립트를 직접 실행합니다. 신뢰할 수 있는 개발 공간에서만 사용하세요.',
+      weknoraTemplateOverview: '见外传媒知识库는 표준 런타임을 제공합니다. 연결 후 템플릿을 찾고, 없으면 표준 템플릿을 만듭니다.',
+      weknoraTemplateDescription: '见外传媒知识库 스킬에 필요한 Python, Node.js, CLI 도구, 작업 공간 경로와 non-root 실행 사용자를 포함합니다.',
       recommendedTag: 'Recommended',
       templateNotConfigured: 'Template not configured',
       cardTemplateConfigured: '템플릿 설정됨',
@@ -4971,21 +4971,21 @@ export default {
       cardEnvVars: '환경 변수 {count}개',
       cardPrivateEndpoints: '사설망 접근 허용',
       imageNotConfigured: 'Image not configured',
-      localRuntimeSummary: 'WeKnora server process',
+      localRuntimeSummary: '见外传媒知识库 서버 프로세스',
       templateApplied: 'Applied',
       refreshTemplates: 'Refresh templates',
       templateSelectHelp: 'Templates are loaded from this cluster. The saved configuration stores the ID automatically.',
       templateSelectPlaceholder: 'Connect to the cluster to load templates',
-      templateLoadHint: 'Enter the cluster connection and refresh. WeKnora creates its standard template when missing.',
+      templateLoadHint: '클러스터 연결을 입력하고 새로 고치세요. 표준 템플릿이 없으면 见外传媒知识库가 만듭니다.',
       templateLoadFailed: 'Failed to load templates',
-      standardTemplateProvisioning: 'The WeKnora standard template is being created. Refresh shortly to see its status.',
+      standardTemplateProvisioning: '见外传媒知识库 표준 템플릿을 만들고 있습니다. 잠시 후 새로 고쳐 상태를 확인하세요.',
       templateNotReady: 'The selected template is not ready. Refresh and wait for the build to finish.',
       connectionPassed: 'Connection verified. Templates below are loaded from this cluster.',
       connectionPassedTitle: 'Cluster connected',
-      templateStepHint: 'WeKnora automatically creates its standard template when missing. You can continue after a template is ready.',
+      templateStepHint: '표준 템플릿이 없으면 见外传媒知识库가 자동으로 만듭니다. 템플릿이 준비된 후 계속할 수 있습니다.',
       loadingTemplates: 'Loading templates from the cluster...',
       templateBuildingHint: 'The standard template is being built automatically. This list will refresh.',
-      templateUntaggedHint: '빌드는 끝났지만 default 태그가 붙은 빌드가 없어 샌드박스 생성 시 이 템플릿을 찾을 수 없습니다. E2B에서 템플릿을 삭제하고 새로고침하면 WeKnora가 다시 빌드합니다.',
+      templateUntaggedHint: '빌드는 끝났지만 default 태그가 붙은 빌드가 없어 샌드박스 생성 시 이 템플릿을 찾을 수 없습니다. E2B에서 템플릿을 삭제하고 새로고침하면 见外传媒知识库가 다시 빌드합니다.',
       templateFailedReason: '빌드 실패: {reason}',
       noTemplates: 'No templates were returned by this cluster.',
       templateReadyHint: 'Template “{name}” is ready and selected.',
@@ -6294,10 +6294,10 @@ export default {
       },
       knowledge: {
         title: '지식 베이스 만들기',
-        desc: '모든 것의 시작점입니다. 문서, 웹페이지, FAQ를 업로드하면 WeKnora가 자동으로 분석하고 색인합니다. 여기를 클릭해 지식 베이스로 이동하세요.'
+        desc: '모든 것의 시작점입니다. 문서, 웹페이지, FAQ를 업로드하면 见外传媒知识库가 자동으로 분석하고 색인합니다. 여기를 클릭해 지식 베이스로 이동하세요.'
       },
       welcome: {
-        title: 'WeKnora에 오신 것을 환영합니다',
+        title: '见外传媒知识库에 오신 것을 환영합니다',
         desc: '몇 단계만으로 지식 베이스, 대화, 에이전트의 핵심 사용법을 안내합니다. \'다음\'을 눌러 시작하세요.'
       }
     }
