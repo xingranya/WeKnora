@@ -269,36 +269,57 @@ export default {
     filterByAgentWithName: '按智能体筛选：{name}',
     filterAllAgents: '全部智能体',
     claw: {
-      title: '见外传媒知识库 Skill',
-      subtitle: '通过见外传媒知识库 REST API 导入文档并执行混合检索（向量 + 关键词）。适用于上传文件、URL 或 Markdown，支持跨库检索与知识浏览。',
-      capabilitiesTitle: 'Skill 能力',
-      stepsTitle: '配置步骤',
-      openApiSettings: '打开 API 信息',
-      copy: '复制',
-      copyEnvSuccess: '已复制环境变量示例',
-      copyCmdSuccess: '已复制安装命令',
-      ecosystemNote: 'Skill 托管于 ClawHub（{\'@\'}lyingbug/weknora），完整 API 说明与版本历史请参见 ClawHub 页面。',
-      installCta: '前往 ClawHub',
-      installCtaHint: '安装见外传媒知识库 Skill · 将在新标签页打开',
-      hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0',
+      title: '见外知识库',
+      subtitle: '下载通用 Skill 安装包，选择当前空间已有 API Key，再把配置提示交给任意 Agent 自动完成安装与连接。',
+      compatibility: {
+        codex: 'Codex',
+        claude: 'Claude Code',
+        cursor: 'Cursor',
+        openclaw: 'OpenClaw',
+        generic: '其他 Agent Skills 平台'
+      },
+      downloadCta: '下载见外知识库 ZIP',
+      downloadCtaHint: '包含 macOS / Windows 用户级环境配置脚本 · v1.2.0',
+      apiKeyTitle: '选择 API Key',
+      apiKeyDesc: '选择当前空间已创建的 Key。下拉列表只显示脱敏值，复制给 AI 的提示词会包含完整值。',
+      apiKeyPlaceholder: '请选择 API Key',
+      apiKeyPromptPlaceholder: '<选择 API Key 后自动填入>',
+      apiKeyFullAccess: '空间全部权限',
+      apiKeyScopedAccess: '受限权限',
+      expiredKeysIgnored: '已自动排除 {count} 个过期 Key。',
+      noApiKeys: '当前空间没有可用的 API Key，或现有 Key 已过期。请先创建一个 Key。',
+      createApiKey: '创建 API Key',
+      retry: '重试',
+      openApiSettings: '打开 API 集成',
+      loadApiKeysFailed: '加载 API Key 失败',
+      tenantUnavailable: '暂时无法确定当前空间，请刷新页面后重试。',
+      selectApiKeyFirst: '请先选择 API Key',
+      promptTitle: '交给 AI 自动安装',
+      promptDesc: '这段通用提示会让当前 AI 自动识别 Agent 平台和操作系统，安装 Skill、配置环境变量并验证连接。',
+      copyPrompt: '复制给 AI',
+      copyPromptSuccess: '已复制安装配置提示',
+      securityNote: '预览始终隐藏完整 Key；复制内容包含完整凭据。仅发送给可信 AI，并优先选择满足任务需要的最小权限 Key。',
+      setupPrompt: '请在当前 Agent 中安装并配置“见外知识库”Skill。\n\n安装包：请在系统默认下载目录找到“{archiveName}”。\n请完成以下操作：\n1. 自动识别当前 Agent 的用户级 Skill 目录并解压安装；若平台支持 Agent Skills 标准，沿用其标准目录。\n2. 自动识别 macOS 或 Windows，运行安装包内对应配置脚本，将以下变量写入用户级环境，而不是只在当前终端临时设置：\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. 重新加载环境后，使用该 Skill 列出知识库，验证连接。\n\n安全要求：不要在命令输出、项目文件或最终回复中显示完整 API Key；如需覆盖已有配置，先说明将修改的位置。',
+      stepsTitle: '安装流程',
       steps: {
+        download: {
+          title: '下载安装包',
+          desc: '点击上方按钮下载完整 ZIP，无需手动解压或查找安装目录。'
+        },
+        key: {
+          title: '选择现有 Key',
+          desc: '从当前空间已创建的 API Key 中选择一个，权限范围会原样保留。'
+        },
+        prompt: {
+          title: '复制给当前 AI',
+          desc: 'AI 会识别 Codex、Claude Code、Cursor、OpenClaw 等平台及 macOS、Windows 环境。'
+        },
         verify: {
           title: '验证连接',
-          desc: '安装后让 Agent 列出知识库或执行一次检索，确认 API 凭证与网络可达。'
-        },
-        install: {
-          title: '安装 Skill',
-          desc: '在已安装 OpenClaw CLI 的环境中执行下方命令，或前往 ClawHub 页面按指引安装。'
-        },
-        env: {
-          title: '配置环境变量',
-          desc: '在终端或 ~/.zshrc、~/.bashrc 中设置 WEKNORA_BASE_URL 与 WEKNORA_API_KEY。下方示例已填入当前 API 地址，请将 API Key 替换为实际值。'
-        },
-        api: {
-          title: '获取 API 凭证',
-          desc: '在「设置 → API 信息」中复制 API Key 与 API 地址。'
+          desc: 'AI 会重新加载环境并列出知识库，确认安装、凭据和网络均可用。'
         }
       },
+      capabilitiesTitle: '安装后可用',
       capabilities: {
         browse: {
           title: '浏览知识库',
@@ -320,7 +341,10 @@ export default {
           title: '上传文件',
           desc: '将 PDF、Word、Excel 等文档上传至知识库，自动解析与向量化。'
         }
-      }
+      },
+      ecosystemNote: '安装包兼容 Agent Skills 目录约定，也可通过 ClawHub 获取 OpenClaw 版本。',
+      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      openClawHub: '打开 ClawHub'
     },
     chrome: {
       title: '知识管理助手',
@@ -549,7 +573,7 @@ export default {
       embed: '网页嵌入',
       api: 'API 集成',
       chrome: 'Chrome 插件',
-      claw: 'Claw Skill'
+      claw: '见外知识库'
     }
   },
   datasource: {
@@ -1942,7 +1966,7 @@ export default {
     title: '模型配置',
     description: '管理不同类型的 AI 模型，支持 Ollama 本地模型和远程 API',
     copySuffix: ' 副本',
-    builtinTag: '内置',
+    builtinTag: '公司预置',
     confirmDelete: '确定删除模型「{name}」吗？',
     debug: {
       title: '模型测试',
@@ -1993,10 +2017,10 @@ export default {
       }
     },
     builtinModels: {
-      title: '内置模型',
-      description: '内置模型对所有空间可见，敏感信息会被隐藏，且不可编辑或删除。',
-      descriptionAdmin: '内置模型对所有空间可见。系统管理员可编辑配置和凭据；删除仍由部署配置管理。',
-      viewGuide: '查看内置模型管理指南'
+      title: '公司预置模型',
+      description: '公司预置模型对所有空间可见，敏感信息会被隐藏，且不可编辑、删除或测试。',
+      descriptionAdmin: '公司预置模型对所有空间可见。系统管理员可编辑配置和凭据；删除仍由部署配置管理。',
+      viewGuide: '查看公司预置模型管理指南'
     },
     toasts: {
       nameRequired: '模型名称不能为空',
@@ -2010,9 +2034,9 @@ export default {
       saveFailed: '保存模型失败',
       deleted: '模型已删除',
       deleteFailed: '删除模型失败',
-      builtinCannotEdit: '内置模型不能编辑',
-      builtinCannotDelete: '内置模型不能删除',
-      builtinCannotCopy: '内置模型不能复制',
+      builtinCannotEdit: '公司预置模型不能编辑',
+      builtinCannotDelete: '公司预置模型不能删除',
+      builtinCannotCopy: '公司预置模型不能复制',
       copied: '模型已复制',
       copyFailed: '复制模型失败'
     },
@@ -2276,7 +2300,7 @@ export default {
     loadFailed: '加载模型列表失败',
     selectModelPlaceholder: '请选择模型',
     searchPlaceholder: '搜索模型...',
-    builtinTag: '内置',
+    builtinTag: '公司预置',
     editor: {
       addTitle: '添加模型',
       editTitle: '编辑模型',
@@ -4428,7 +4452,7 @@ export default {
     all: '全部',
     clear: '清空',
     website: '官方网站',
-    clawhubSkill: 'Claw Skill',
+    clawhubSkill: '见外知识库',
     github: 'GitHub',
     githubStarTip: '在 GitHub 打开仓库，若觉得有用欢迎点个 Star',
     on: '开启',
@@ -5200,7 +5224,8 @@ export default {
     },
     parser: {
       title: '解析引擎',
-      description: '文档解析引擎状态及配置。此处设置优先于服务端环境变量，留空则使用环境变量默认值。',
+      description: '公司统一维护的文档解析引擎。员工可直接选择使用，连接配置仅系统管理员可见。',
+      companyPreset: '公司预置',
       supportedFileTypes: '支持文件类型',
       statusSection: '状态信息',
       configSection: '配置',

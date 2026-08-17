@@ -68,6 +68,7 @@ type knowledgeService struct {
 	kbShareService  interfaces.KBShareService
 	imageResolver   *docparser.ImageResolver
 	taskPendingRepo interfaces.TaskPendingOpsRepository
+	parserConfigSvc interfaces.PlatformParserEngineConfigService
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -118,6 +119,7 @@ func NewKnowledgeService(
 	taskPendingRepo interfaces.TaskPendingOpsRepository,
 	spanTracker SpanTracker,
 	audit interfaces.AuditLogService,
+	parserConfigSvc interfaces.PlatformParserEngineConfigService,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
 		config:          config,
@@ -147,6 +149,7 @@ func NewKnowledgeService(
 		taskPendingRepo: taskPendingRepo,
 		spanTracker:     spanTracker,
 		audit:           audit,
+		parserConfigSvc: parserConfigSvc,
 	}, nil
 }
 
@@ -360,15 +363,12 @@ func (s *knowledgeService) failPostprocessSubspan(
 	s.tracker().FailSpan(ctx, span, code, msg, err)
 }
 
-// getParserEngineOverridesFromContext returns parser engine overrides from tenant in context (e.g. MinerU endpoint, API key).
-// Used when building document ReadRequest so UI-configured values take precedence over env.
+// getParserEngineOverridesFromContext 返回平台统一维护的解析引擎参数。
 func (s *knowledgeService) getParserEngineOverridesFromContext(ctx context.Context) map[string]string {
-	if v := ctx.Value(types.TenantInfoContextKey); v != nil {
-		if tenant, ok := v.(*types.Tenant); ok && tenant != nil {
-			return tenant.ParserEngineConfig.ToOverridesMap()
-		}
+	if s.parserConfigSvc == nil {
+		return nil
 	}
-	return nil
+	return s.parserConfigSvc.ResolveConfig(ctx).ToOverridesMap()
 }
 
 // GetRepository gets the knowledge repository

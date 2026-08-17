@@ -7,7 +7,7 @@
           <p class="section-description">{{ $t('modelSettings.description') }}</p>
         </div>
         <t-button
-          v-if="authStore.hasRole('admin')"
+          v-if="authStore.hasRole('admin') && debugModels.length > 0"
           type="button"
           theme="primary"
           variant="text"
@@ -135,7 +135,7 @@
     <!-- 模型编辑器抽屉 -->
     <ModelEditorDialog v-model:visible="showDialog" :model-type="currentModelType" :model-data="editingModel"
       @confirm="handleModelSave" />
-    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="allModels" />
+    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="debugModels" />
 
   </div>
 </template>
@@ -177,6 +177,9 @@ watch(
 
 // 模型列表数据
 const allModels = ref<ModelConfig[]>([])
+const debugModels = computed(() => authStore.isSystemAdmin
+  ? allModels.value
+  : allModels.value.filter(model => !model.is_builtin))
 
 // 后端 type → 前端分组 type 的映射
 const backendTypeToModelType: Record<string, ModelType> = {

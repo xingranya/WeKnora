@@ -102,6 +102,7 @@ type temporaryDocumentService struct {
 	modelService    interfaces.ModelService
 	tenantService   interfaces.TenantService
 	taskEnqueuer    interfaces.TaskEnqueuer
+	parserConfigSvc interfaces.PlatformParserEngineConfigService
 }
 
 func NewTemporaryDocumentService(
@@ -113,11 +114,13 @@ func NewTemporaryDocumentService(
 	modelService interfaces.ModelService,
 	tenantService interfaces.TenantService,
 	taskEnqueuer interfaces.TaskEnqueuer,
+	parserConfigSvc interfaces.PlatformParserEngineConfigService,
 ) interfaces.TemporaryDocumentService {
 	return &temporaryDocumentService{
 		repo: repo, fileService: fileService, resourceCatalog: resourceCatalog,
 		documentReader: documentReader, imageResolver: imageResolver,
 		modelService: modelService, tenantService: tenantService, taskEnqueuer: taskEnqueuer,
+		parserConfigSvc: parserConfigSvc,
 	}
 }
 
@@ -216,10 +219,7 @@ func (s *temporaryDocumentService) supportsExtension(ctx context.Context, tenant
 	if s.documentReader == nil {
 		return false
 	}
-	var overrides map[string]string
-	if tenant, err := s.tenantService.GetTenantByID(ctx, tenantID); err == nil && tenant != nil {
-		overrides = tenant.ParserEngineConfig.ToOverridesMap()
-	}
+	overrides := s.resolveParserConfig(ctx).ToOverridesMap()
 	engines, err := s.documentReader.ListEngines(ctx, overrides)
 	if err != nil {
 		return false
@@ -361,9 +361,7 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 	var options types.TemporaryDocumentCreateOptions
 	_ = json.Unmarshal(document.ProcessingOptions, &options)
 	if options.ParserEngine == "" || options.ParserEngine == "auto" {
-		if tenant, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenant != nil {
-			options.ParserEngine = tenant.ParserEngineConfig.ResolveChatParserEngine(ext)
-		}
+		options.ParserEngine = s.resolveParserConfig(ctx).ResolveChatParserEngine(ext)
 	}
 	if _, ok := temporaryTextExtensions[ext]; ok && (options.ParserEngine == "" || options.ParserEngine == "auto") {
 		return string(data), nil, map[string]string{"parser": "plain_text"}, nil
@@ -391,9 +389,7 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 		FileContent: data, FileName: document.FileName, FileType: strings.TrimPrefix(ext, "."),
 		ParserEngine: parserEngine,
 	}
-	if tenant, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenant != nil && tenant.ParserEngineConfig != nil {
-		request.ParserEngineOverrides = tenant.ParserEngineConfig.ToOverridesMap()
-	}
+	request.ParserEngineOverrides = s.resolveParserConfig(ctx).ToOverridesMap()
 	deps := docparser.ReaderDeps{Overrides: request.ParserEngineOverrides, Remote: s.documentReader}
 	if s.tenantService != nil {
 		deps.WeKnoraCloudCredentials = s.tenantService.GetWeKnoraCloudCredentials
@@ -446,6 +442,13 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 		metadata["image_understanding"] = "vlm"
 	}
 	return content, images, metadata, nil
+}
+
+func (s *temporaryDocumentService) resolveParserConfig(ctx context.Context) *types.ParserEngineConfig {
+	if s.parserConfigSvc == nil {
+		return &types.ParserEngineConfig{}
+	}
+	return s.parserConfigSvc.ResolveConfig(ctx)
 }
 
 // applyImageUnderstanding uses the configured VLM to turn image content into

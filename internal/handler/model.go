@@ -158,7 +158,6 @@ func (h *ModelHandler) GetModel(c *gin.Context) {
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
-
 	logger.Infof(ctx, "Retrieved model successfully, ID: %s, Name: %s", model.ID, model.Name)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -360,6 +359,10 @@ func (h *ModelHandler) DebugModel(c *gin.Context) {
 			return
 		}
 		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	if model.IsBuiltin && !types.IsSystemAdminFromContext(ctx) {
+		c.Error(errors.NewForbiddenError("公司预置模型仅允许系统管理员测试"))
 		return
 	}
 

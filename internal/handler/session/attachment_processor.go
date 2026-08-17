@@ -28,10 +28,11 @@ const (
 // AttachmentProcessor saves uploaded file attachments and extracts their text content
 // for injection into the LLM prompt.
 type AttachmentProcessor struct {
-	fileService    interfaces.FileService
-	documentReader interfaces.DocumentReader
-	imageResolver  *docparser.ImageResolver
-	modelService   interfaces.ModelService // used to obtain the ASR model
+	fileService     interfaces.FileService
+	documentReader  interfaces.DocumentReader
+	imageResolver   *docparser.ImageResolver
+	modelService    interfaces.ModelService // used to obtain the ASR model
+	parserConfigSvc interfaces.PlatformParserEngineConfigService
 }
 
 // NewAttachmentProcessor creates an AttachmentProcessor with the given dependencies.
@@ -40,12 +41,14 @@ func NewAttachmentProcessor(
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
 	modelService interfaces.ModelService,
+	parserConfigSvc interfaces.PlatformParserEngineConfigService,
 ) *AttachmentProcessor {
 	return &AttachmentProcessor{
-		fileService:    fileService,
-		documentReader: documentReader,
-		imageResolver:  imageResolver,
-		modelService:   modelService,
+		fileService:     fileService,
+		documentReader:  documentReader,
+		imageResolver:   imageResolver,
+		modelService:    modelService,
+		parserConfigSvc: parserConfigSvc,
 	}
 }
 
@@ -244,7 +247,7 @@ func (p *AttachmentProcessor) processWithDocumentReader(
 			parserEngine = s
 		}
 	}
-	overrides := getParserEngineOverridesFromContext(ctx)
+	overrides := p.getParserEngineOverrides(ctx)
 
 	// Engines that parse in this process (anydoc, MinerU, ...) are resolved
 	// through the registry so a chat attachment honours the same engine rules
@@ -330,14 +333,12 @@ func isValidFileType(fileName string) bool {
 	return false
 }
 
-// getParserEngineOverridesFromContext returns parser engine overrides from tenant in context.
-func getParserEngineOverridesFromContext(ctx context.Context) map[string]string {
-	if v := ctx.Value(types.TenantInfoContextKey); v != nil {
-		if tenant, ok := v.(*types.Tenant); ok && tenant != nil && tenant.ParserEngineConfig != nil {
-			return tenant.ParserEngineConfig.ToOverridesMap()
-		}
+// getParserEngineOverrides 返回平台统一维护的解析引擎参数。
+func (p *AttachmentProcessor) getParserEngineOverrides(ctx context.Context) map[string]string {
+	if p.parserConfigSvc == nil {
+		return nil
 	}
-	return nil
+	return p.parserConfigSvc.ResolveConfig(ctx).ToOverridesMap()
 }
 
 // DecodeBase64Attachment decodes a base64 attachment payload, stripping any data URI prefix.

@@ -1317,7 +1317,8 @@ export default {
     system: 'System Settings',
     parser: {
       title: 'Parser Engine',
-      description: 'Document parser engine status and configuration. Settings here take priority over server environment variables. Leave empty to use environment variable defaults.',
+      description: 'Company-managed document parser engines. Employees can use them directly; connection settings are visible only to system administrators.',
+      companyPreset: 'Company preset',
       supportedFileTypes: 'Supported Formats',
       statusSection: 'Status',
       configSection: 'Configuration',
@@ -1945,7 +1946,7 @@ export default {
     all: 'All',
     clear: 'Clear',
     website: 'Official Website',
-    clawhubSkill: 'Claw Skill',
+    clawhubSkill: '见外知识库',
     github: 'GitHub',
     githubStarTip: 'Open the repo on GitHub — star it if you find it useful',
     on: 'On',
@@ -4092,7 +4093,7 @@ export default {
         }
       }
     },
-    builtinTag: 'Built-in'
+    builtinTag: 'Company preset'
   },
   language: {
     zhCN: '简体中文',
@@ -4361,20 +4362,20 @@ export default {
       saveFailed: 'Failed to save model',
       deleted: 'Model deleted',
       deleteFailed: 'Failed to delete model',
-      builtinCannotEdit: 'Built-in models cannot be edited',
-      builtinCannotDelete: 'Built-in models cannot be deleted',
-      builtinCannotCopy: 'Built-in models cannot be copied',
+      builtinCannotEdit: 'Company preset models cannot be edited',
+      builtinCannotDelete: 'Company preset models cannot be deleted',
+      builtinCannotCopy: 'Company preset models cannot be copied',
       copied: 'Model copied',
       copyFailed: 'Failed to copy model'
     },
     copySuffix: ' Copy',
     builtinModels: {
-      title: 'Built-in Models',
-      description: 'Built-in models are visible to all workspaces. Sensitive information is hidden, and they cannot be edited or deleted.',
-      descriptionAdmin: 'Built-in models are visible to all workspaces. System administrators can edit configuration and credentials; deletion remains deployment-managed.',
-      viewGuide: 'View Built-in Models Guide'
+      title: 'Company Preset Models',
+      description: 'Company preset models are visible to all workspaces. Sensitive information is hidden, and employees cannot edit, delete, or test them.',
+      descriptionAdmin: 'Company preset models are visible to all workspaces. System administrators can edit configuration and credentials; deletion remains deployment-managed.',
+      viewGuide: 'View Company Preset Model Guide'
     },
-    builtinTag: 'Built-in',
+    builtinTag: 'Company preset',
     confirmDelete: 'Delete model "{name}"?',
     debug: {
       title: 'Model Test',
@@ -5816,7 +5817,7 @@ export default {
       embed: 'Web Embed',
       api: 'API Integration',
       chrome: 'Chrome Extension',
-      claw: 'Claw Skill'
+      claw: '见外知识库'
     },
     api: {
       title: 'API Integration',
@@ -6047,9 +6048,57 @@ export default {
       installGuide: 'When prompted, confirm Add extension or Keep to finish the installation.'
     },
     claw: {
-      title: '见外传媒知识库 Skill',
-      subtitle: 'Import documents and run hybrid retrieval (vector + keyword) through the 见外传媒知识库 REST API for uploads, URL imports, Markdown entries, and cross-knowledge-base search.',
-      capabilitiesTitle: 'Skill capabilities',
+      title: '见外知识库',
+      subtitle: 'Download the universal Skill package, select an existing workspace API key, and let any agent install and connect it automatically.',
+      compatibility: {
+        codex: 'Codex',
+        claude: 'Claude Code',
+        cursor: 'Cursor',
+        openclaw: 'OpenClaw',
+        generic: 'Other Agent Skills platforms'
+      },
+      downloadCta: 'Download 见外知识库 ZIP',
+      downloadCtaHint: 'Includes macOS and Windows user-environment setup scripts · v1.2.0',
+      apiKeyTitle: 'Select an API key',
+      apiKeyDesc: 'Choose a key already created in this workspace. The menu stays masked; the copied AI prompt includes the full value.',
+      apiKeyPlaceholder: 'Select an API key',
+      apiKeyPromptPlaceholder: '<filled after selecting an API key>',
+      apiKeyFullAccess: 'Full workspace access',
+      apiKeyScopedAccess: 'Scoped access',
+      expiredKeysIgnored: '{count} expired key(s) were excluded automatically.',
+      noApiKeys: 'This workspace has no usable API key, or all existing keys have expired. Create a key first.',
+      createApiKey: 'Create API key',
+      retry: 'Retry',
+      openApiSettings: 'Open API integration',
+      loadApiKeysFailed: 'Failed to load API keys',
+      tenantUnavailable: 'The current workspace is not available yet. Refresh the page and try again.',
+      selectApiKeyFirst: 'Select an API key first',
+      promptTitle: 'Let AI install it',
+      promptDesc: 'This universal prompt asks the current AI to detect the agent platform and operating system, install the Skill, configure environment variables, and verify the connection.',
+      copyPrompt: 'Copy for AI',
+      copyPromptSuccess: 'Installation prompt copied',
+      securityNote: 'The preview always masks the full key; the copied text contains the credential. Send it only to a trusted AI and prefer the least-privileged key that fits the task.',
+      setupPrompt: 'Install and configure the “见外知识库” Skill in the current agent.\n\nPackage: find “{archiveName}” in the system default Downloads folder.\nComplete these steps:\n1. Detect the current agent user-level Skill directory and extract the package there. If the platform supports the Agent Skills standard, use its standard directory.\n2. Detect macOS or Windows and run the matching setup script from the package. Persist these variables in the user environment, not only in the current shell:\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. Reload the environment, then use the Skill to list knowledge bases and verify the connection.\n\nSecurity: do not print the full API key in command output, project files, or the final response. Before overwriting existing settings, state which location will be changed.',
+      stepsTitle: 'Installation flow',
+      steps: {
+        download: {
+          title: 'Download the package',
+          desc: 'Download the complete ZIP above. You do not need to extract it or find the installation directory manually.'
+        },
+        key: {
+          title: 'Select an existing key',
+          desc: 'Choose one of the API keys already created in the current workspace; its permission scope is preserved.'
+        },
+        prompt: {
+          title: 'Send it to the current AI',
+          desc: 'The AI detects Codex, Claude Code, Cursor, OpenClaw, or another compatible platform plus macOS or Windows.'
+        },
+        verify: {
+          title: 'Verify the connection',
+          desc: 'The AI reloads the environment and lists knowledge bases to confirm installation, credentials, and network access.'
+        }
+      },
+      capabilitiesTitle: 'Available after installation',
       capabilities: {
         upload: {
           title: 'Upload files',
@@ -6072,33 +6121,9 @@ export default {
           desc: 'List knowledge bases and entries, view details, and manage imported content.'
         }
       },
-      stepsTitle: 'Setup steps',
-      steps: {
-        api: {
-          title: 'Get API credentials',
-          desc: 'Copy API Key and base URL from Settings → API Info.'
-        },
-        env: {
-          title: 'Configure environment',
-          desc: 'Set WEKNORA_BASE_URL and WEKNORA_API_KEY in your shell or ~/.zshrc / ~/.bashrc. The example below uses your current API base URL—replace the API Key with your actual value.'
-        },
-        install: {
-          title: 'Install the skill',
-          desc: 'Run the command below in an environment with the OpenClaw CLI installed, or follow the ClawHub page instructions.'
-        },
-        verify: {
-          title: 'Verify connection',
-          desc: 'Ask the agent to list knowledge bases or run a search to confirm credentials and connectivity.'
-        }
-      },
-      openApiSettings: 'Open API Info',
-      copy: 'Copy',
-      copyEnvSuccess: 'Environment example copied',
-      copyCmdSuccess: 'Install command copied',
-      ecosystemNote: 'Skill hosted on ClawHub ({\'@\'}lyingbug/weknora). See the ClawHub page for full API docs and version history.',
-      installCta: 'Open ClawHub',
-      installCtaHint: 'Install 见外传媒知识库 Skill · opens in a new tab',
-      hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0'
+      ecosystemNote: 'The package follows Agent Skills directory conventions; an OpenClaw build is also available through ClawHub.',
+      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      openClawHub: 'Open ClawHub'
     }
   },
   credential: {

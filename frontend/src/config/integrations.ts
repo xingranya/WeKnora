@@ -7,6 +7,8 @@ export const CHROME_EXTENSION_DOWNLOAD_URL = '/downloads/weknora-knowledge-assis
 
 export const CLAWHUB_SKILL_URL = 'https://clawhub.ai/lyingbug/weknora'
 
+export const JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL = '/downloads/jiwai-knowledge-skill.zip'
+
 export type IntegrationTab = 'im' | 'embed' | 'api' | 'chrome' | 'claw'
 
 export const INTEGRATION_TABS: IntegrationTab[] = ['im', 'embed', 'api', 'chrome', 'claw']
@@ -16,6 +18,7 @@ export type IntegrationTabRole = 'viewer' | 'contributor' | 'admin' | 'owner'
 
 export const INTEGRATION_TAB_MIN_ROLE: Partial<Record<IntegrationTab, IntegrationTabRole>> = {
   api: 'owner',
+  claw: 'owner',
 }
 
 export const INTEGRATION_TAB_CAPABILITY: Partial<Record<IntegrationTab, DeploymentCapabilityKey>> = {

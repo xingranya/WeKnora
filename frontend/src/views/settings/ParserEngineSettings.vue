@@ -34,12 +34,15 @@
           type="button"
           class="engine-card engine-card--builtin"
           :class="{ 'engine-card--active': drawerVisible && currentEngine?.Name === 'builtin' }"
-          @click="openDrawer({ Name: 'builtin' } as any)"
+          @click="openDrawer({ Name: 'builtin', CompanyPreset: true } as any)"
         >
           <div class="engine-card__badge">{{ engineInitial('builtin') }}</div>
           <div class="engine-card__body">
             <div class="engine-card__header">
               <h3 class="engine-card__title">{{ getEngineDisplayName('builtin') }}</h3>
+              <t-tag size="small" theme="primary" variant="light">
+                {{ $t('settings.parser.companyPreset') }}
+              </t-tag>
               <span
                 class="engine-card__status"
                 :class="connected ? 'engine-card__status--on' : 'engine-card__status--err'"
@@ -67,6 +70,9 @@
           <div class="engine-card__body">
             <div class="engine-card__header">
               <h3 class="engine-card__title">{{ getEngineDisplayName(engine.Name) }}</h3>
+              <t-tag v-if="engine.CompanyPreset" size="small" theme="primary" variant="light">
+                {{ $t('settings.parser.companyPreset') }}
+              </t-tag>
               <span v-if="engine.Available" class="engine-card__status engine-card__status--on">
                 <span class="engine-card__status-dot" />
                 {{ $t('settings.parser.available') }}
@@ -98,7 +104,7 @@
       v-model:visible="drawerVisible"
       :title="drawerTitle"
       :class="currentEngine ? `parser-engine-drawer parser-engine-drawer--${currentEngine.Name}` : 'parser-engine-drawer'"
-      :hide-footer="!authStore.hasRole('admin') && !needsTestButton"
+      :hide-footer="!canManageCompanyPreset"
       :confirm-loading="saving"
       @confirm="onSave"
       @cancel="drawerVisible = false"
@@ -118,6 +124,9 @@
       -->
       <template v-if="currentEngine" #subtitle>
         <span>{{ getEngineDisplayDesc(currentEngine.Name, currentEngine.Description) }}</span>
+        <t-tag v-if="currentEngine.CompanyPreset" size="small" theme="primary" variant="light">
+          {{ $t('settings.parser.companyPreset') }}
+        </t-tag>
         <a
           v-if="engineDocLink(currentEngine.Name)"
           :href="engineDocLink(currentEngine.Name)"
@@ -171,7 +180,7 @@
           只有有内容时才渲染，避免空 section 空底部分隔线。
         -->
         <section
-          v-if="currentEngine.Name === 'builtin' || currentEngine.Name === 'weknoracloud'"
+          v-if="currentEngine.Name === 'builtin'"
           class="setting-drawer__section"
         >
           <h4 class="setting-drawer__section-title">{{ $t('settings.parser.statusSection', '状态信息') }}</h4>
@@ -188,43 +197,16 @@
               <t-tag theme="default" variant="light" size="small">
                 {{ docreaderTransport === 'http' ? 'HTTP' : 'gRPC' }}
               </t-tag>
-              <span v-if="docreaderAddrEnv" class="env-hint">
+              <span v-if="canManageCompanyPreset && docreaderAddrEnv" class="env-hint">
                 {{ $t('settings.parser.currentAddr') }}: {{ docreaderAddrEnv }}
               </span>
             </div>
-            <p class="form-desc">{{ $t('settings.parser.envVarHint') }}</p>
+            <p v-if="canManageCompanyPreset" class="form-desc">{{ $t('settings.parser.envVarHint') }}</p>
           </div>
-
-          <!--
-            weknoracloud: 凭证状态 — 不再用大块卡片。已配置 / 加载中 / 未配置
-            统一用 inline alert：图标 + 一行文案 + 行尾跳转 link，体量
-            匹配"一条信息"该有的样子。
-          -->
-          <template v-if="currentEngine.Name === 'weknoracloud'">
-            <div v-if="wkcState === 'configured'" class="inline-alert inline-alert--ok">
-              <t-icon name="check-circle-filled" class="inline-alert__icon" />
-              <span>{{ $t('settings.weknoraCloud.credentialConfigured') }}</span>
-            </div>
-            <div v-else-if="wkcState === 'loading'" class="inline-alert">
-              <t-icon name="loading" class="inline-alert__icon spinning" />
-              <span>{{ $t('settings.weknoraCloud.checkingStatus') }}</span>
-            </div>
-            <div v-else class="inline-alert inline-alert--warn">
-              <t-icon name="error-circle-filled" class="inline-alert__icon" />
-              <span class="inline-alert__text">
-                <span v-if="wkcState === 'expired'">{{ $t('settings.weknoraCloud.credentialExpired') }}</span>
-                <span v-else>{{ $t('settings.weknoraCloud.unconfigured') }}</span>
-              </span>
-              <a class="inline-alert__action" @click="goToWkcSettings">
-                {{ $t('settings.weknoraCloud.goToSettings') }}
-                <t-icon name="chevron-right" />
-              </a>
-            </div>
-          </template>
         </section>
 
         <!-- Section 3 — mineru 自建配置 -->
-        <section v-if="currentEngine.Name === 'mineru'" class="setting-drawer__section">
+        <section v-if="canManageCompanyPreset && currentEngine.Name === 'mineru'" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.parser.configSection', '配置') }}</h4>
 
           <div class="form-item">
@@ -281,7 +263,7 @@
         </section>
 
         <!-- Section 3 — mineru_cloud 云 API 配置 -->
-        <section v-if="currentEngine.Name === 'mineru_cloud'" class="setting-drawer__section">
+        <section v-if="canManageCompanyPreset && currentEngine.Name === 'mineru_cloud'" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.parser.configSection', '配置') }}</h4>
 
           <div class="form-item">
@@ -322,7 +304,7 @@
         </section>
 
         <!-- Section 3 — paddleocr_vl 自建配置 -->
-        <section v-if="currentEngine.Name === 'paddleocr_vl'" class="setting-drawer__section">
+        <section v-if="canManageCompanyPreset && currentEngine.Name === 'paddleocr_vl'" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.parser.configSection', '配置') }}</h4>
 
           <div class="form-item">
@@ -344,7 +326,7 @@
         </section>
 
         <!-- Section 3 — paddleocr_vl_cloud 云 API 配置 -->
-        <section v-if="currentEngine.Name === 'paddleocr_vl_cloud'" class="setting-drawer__section">
+        <section v-if="canManageCompanyPreset && currentEngine.Name === 'paddleocr_vl_cloud'" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.parser.configSection', '配置') }}</h4>
 
           <div class="form-item">
@@ -380,31 +362,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import {
   getParserEngines,
-  getParserEngineConfig,
-  updateParserEngineConfig,
-  checkParserEngines,
+  getPlatformParserEngineConfig,
+  updatePlatformParserEngineConfig,
+  checkPlatformParserEngines,
   type ParserEngineInfo,
   type ParserEngineConfig,
 } from '@/api/system'
-import { getWeKnoraCloudStatus } from '@/api/model'
 
 const { t } = useI18n()
-const uiStore = useUIStore()
 const authStore = useAuthStore()
+const canManageCompanyPreset = computed(() => authStore.isSystemAdmin)
 
 const CONFIGURABLE_ENGINES = new Set(['mineru', 'mineru_cloud', 'paddleocr_vl', 'paddleocr_vl_cloud'])
 
 /** 各解析引擎的项目/官方文档地址 */
 const ENGINE_DOC_LINKS: Record<string, string> = {
-  weknoracloud: 'https://developers.weixin.qq.com/doc/aispeech/knowledge/atomic_capability/atomic_interface.html',
   markitdown: 'https://github.com/microsoft/markitdown',
   mineru: 'https://github.com/opendatalab/MinerU',
   mineru_cloud: 'https://mineru.net/apiManage/docs',
@@ -469,21 +448,20 @@ const drawerTitle = computed(() => {
 // status is the whole point of the drawer) skip the test affordance — for
 // e.g. simple/markitdown there's nothing to validate beyond presence.
 const needsTestButton = computed(() => {
-  if (!currentEngine.value) return false
+  if (!canManageCompanyPreset.value || !currentEngine.value) return false
   return hasConfigFields(currentEngine.value.Name) || currentEngine.value.Name === 'builtin'
 })
 
 /** 固定展示顺序，未列出的引擎排在末尾按名称排序 */
 const ENGINE_ORDER: Record<string, number> = {
   builtin: 0,
-  weknoracloud: 1,
-  simple: 2,
-  anydoc: 3,
-  markitdown: 4,
-  mineru: 5,
-  mineru_cloud: 6,
-  paddleocr_vl: 7,
-  paddleocr_vl_cloud: 8,
+  simple: 1,
+  anydoc: 2,
+  markitdown: 3,
+  mineru: 4,
+  mineru_cloud: 5,
+  paddleocr_vl: 6,
+  paddleocr_vl_cloud: 7,
 }
 
 const sortedEngines = computed(() => {
@@ -536,7 +514,7 @@ function openDrawer(engine: ParserEngineInfo) {
 async function loadEngines() {
   try {
     const res = await getParserEngines()
-    engines.value = res?.data ?? []
+    engines.value = (res?.data ?? []).filter(engine => engine.Name !== 'weknoracloud')
     docreaderAddrEnv.value = res?.docreader_addr ?? ''
     const transport = (res?.docreader_transport ?? 'grpc').toLowerCase()
     docreaderTransport.value = transport === 'http' ? 'http' : 'grpc'
@@ -550,7 +528,7 @@ async function loadEngines() {
 
 async function loadConfig() {
   try {
-    const res = await getParserEngineConfig()
+    const res = await getPlatformParserEngineConfig()
     const data = res?.data
     config.value = {
       docreader_addr: data?.docreader_addr ?? DEFAULT_PARSER_CONFIG.docreader_addr ?? '',
@@ -585,7 +563,11 @@ async function loadConfig() {
 async function loadAll() {
   loading.value = true
   error.value = ''
-  await Promise.all([loadEngines(), loadConfig(), checkWkcStatus()])
+  if (canManageCompanyPreset.value) {
+    await Promise.all([loadEngines(), loadConfig()])
+  } else {
+    await loadEngines()
+  }
   loading.value = false
 }
 
@@ -619,6 +601,7 @@ function buildConfigPayload(): ParserEngineConfig {
 }
 
 async function onCheck() {
+  if (!canManageCompanyPreset.value) return
   if (!connected) {
     checkMessage.value = t('settings.parser.ensureDocreaderConnected')
     return
@@ -627,8 +610,8 @@ async function onCheck() {
   checkMessage.value = ''
   saveMessage.value = ''
   try {
-    const res = await checkParserEngines(buildConfigPayload())
-    engines.value = res?.data ?? []
+    const res = await checkPlatformParserEngines(buildConfigPayload())
+    engines.value = (res?.data ?? []).filter(engine => engine.Name !== 'weknoracloud')
     if (res?.connected !== undefined) {
       connected.value = res.connected
     }
@@ -672,10 +655,11 @@ async function onCheck() {
 }
 
 async function onSave() {
+  if (!canManageCompanyPreset.value) return
   saving.value = true
   saveMessage.value = ''
   try {
-    await updateParserEngineConfig(buildConfigPayload())
+    await updatePlatformParserEngineConfig(buildConfigPayload())
     saveSuccess.value = true
     saveMessage.value = t('settings.parser.saveSuccess')
     drawerVisible.value = false
@@ -686,33 +670,6 @@ async function onSave() {
   } finally {
     saving.value = false
   }
-}
-
-// ---- WeKnoraCloud 凭证状态 ----
-const wkcState = ref<'loading' | 'unconfigured' | 'configured' | 'expired'>('loading')
-
-async function checkWkcStatus() {
-  wkcState.value = 'loading'
-  try {
-    const status = await getWeKnoraCloudStatus()
-    if (status.needs_reinit) {
-      wkcState.value = 'expired'
-    } else if (status.has_models) {
-      wkcState.value = 'configured'
-    } else {
-      wkcState.value = 'unconfigured'
-    }
-  } catch {
-    wkcState.value = 'unconfigured'
-  }
-}
-
-async function goToWkcSettings() {
-  if (uiStore.showSettingsModal) {
-    uiStore.closeSettings()
-    await nextTick()
-  }
-  uiStore.openSettings('weknoracloud')
 }
 
 onMounted(loadAll)

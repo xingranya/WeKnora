@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,21 +114,14 @@ func TestGetTenantKVViewerForbiddenForSecretKeys(t *testing.T) {
 	}
 }
 
-func TestGetTenantKVAdminReturnsRedactedSecrets(t *testing.T) {
+func TestGetTenantKVAdminCannotReadParserConfig(t *testing.T) {
 	tenant := secretTenantFixture()
 	engine := newTenantHandlerTestEngine(t, types.TenantRoleAdmin, tenant)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/tenants/kv/parser-engine-config", nil)
 	engine.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var payload struct {
-		Success bool                     `json:"success"`
-		Data    types.ParserEngineConfig `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
-	assert.Equal(t, types.RedactedSecretPlaceholder, payload.Data.MinerUAPIKey)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "parser-secret-123")
 }
 
@@ -162,7 +154,7 @@ func TestGetTenantKVViewerAllowedForNonSecretKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestPutTenantParserConfigAdminPreservesRedactedSecrets(t *testing.T) {
+func TestPutTenantParserConfigAdminForbidden(t *testing.T) {
 	tenant := secretTenantFixture()
 	engine := newTenantHandlerTestEngine(t, types.TenantRoleAdmin, tenant)
 
@@ -171,8 +163,8 @@ func TestPutTenantParserConfigAdminPreservesRedactedSecrets(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/tenants/kv/parser-engine-config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 	require.NotNil(t, tenant.ParserEngineConfig)
 	assert.Equal(t, "parser-secret-123", tenant.ParserEngineConfig.MinerUAPIKey)
-	assert.Equal(t, "https://example.com/mineru", tenant.ParserEngineConfig.MinerUEndpoint)
+	assert.Empty(t, tenant.ParserEngineConfig.MinerUEndpoint)
 }

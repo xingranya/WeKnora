@@ -107,9 +107,10 @@ export interface ParserEngineInfo {
   FileTypes: string[]
   Available?: boolean
   UnavailableReason?: string
+  CompanyPreset?: boolean
 }
 
-/** 解析引擎配置（引擎连接参数存空间；聊天附件解析策略在智能体中配置） */
+/** 解析引擎配置（连接参数由平台统一维护；聊天附件解析策略在智能体中配置） */
 export type MinerUParseMethod = 'auto' | 'ocr' | 'txt'
 
 export interface ParserEngineConfig {
@@ -157,6 +158,18 @@ export function getParserEngines(): Promise<ParserEnginesResponse> {
 /** 使用当前填写的参数检测引擎可用性（不保存），用于填写新参数后即时测试 */
 export function checkParserEngines(config: ParserEngineConfig): Promise<ParserEnginesResponse> {
   return post('/api/v1/system/parser-engines/check', config)
+}
+
+export function checkPlatformParserEngines(config: ParserEngineConfig): Promise<ParserEnginesResponse> {
+  return post('/api/v1/system/admin/parser-engine-config/check', config)
+}
+
+export function getPlatformParserEngineConfig(): Promise<{ data: ParserEngineConfig }> {
+  return get('/api/v1/system/admin/parser-engine-config')
+}
+
+export function updatePlatformParserEngineConfig(config: ParserEngineConfig): Promise<{ data: ParserEngineConfig }> {
+  return put('/api/v1/system/admin/parser-engine-config', config)
 }
 
 export function getParserEngineConfig(): Promise<{ data: ParserEngineConfig }> {

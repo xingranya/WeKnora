@@ -63,6 +63,7 @@ type SystemHandler struct {
 	// unit tests, in which case only the legacy config is consulted.
 	storageBackendRepo interfaces.StorageBackendRepository
 	sandboxConfigSvc   sandboxConfigService
+	parserConfigSvc    interfaces.PlatformParserEngineConfigService
 	// startup snapshot for GET /system/capabilities; bound in router.NewRouter.
 	deploymentCapabilities DeploymentCapabilitiesData
 }
@@ -80,6 +81,7 @@ func NewSystemHandler(cfg *config.Config,
 	knowledgeSvc interfaces.KnowledgeService,
 	storageBackendRepo interfaces.StorageBackendRepository,
 	sandboxConfigSvc *service.TenantSandboxConfigService,
+	parserConfigSvc interfaces.PlatformParserEngineConfigService,
 ) *SystemHandler {
 	return &SystemHandler{
 		cfg:                cfg,
@@ -94,6 +96,7 @@ func NewSystemHandler(cfg *config.Config,
 		knowledgeSvc:       knowledgeSvc,
 		storageBackendRepo: storageBackendRepo,
 		sandboxConfigSvc:   sandboxConfigSvc,
+		parserConfigSvc:    parserConfigSvc,
 	}
 }
 
@@ -397,26 +400,23 @@ func (h *SystemHandler) getDocReaderConnInfo() (addr, transport string) {
 // @Success      200  {object}  map[string]interface{}  "解析引擎列表"
 // @Router       /system/parser-engines [get]
 func (h *SystemHandler) ListParserEngines(c *gin.Context) {
-	var overrides map[string]string
-	if v, exists := c.Get(types.TenantInfoContextKey.String()); exists {
-		if tenant, ok := v.(*types.Tenant); ok && tenant != nil {
-			if tenant.ParserEngineConfig != nil {
-				overrides = tenant.ParserEngineConfig.ToOverridesMap()
-			}
-			if creds := tenant.Credentials.GetWeKnoraCloud(); creds != nil {
-				if overrides == nil {
-					overrides = make(map[string]string)
-				}
-				overrides["weknoracloud_app_id"] = creds.AppID
-			}
-		}
-	}
+	overrides := h.resolvePlatformParserConfig(c.Request.Context()).ToOverridesMap()
 
 	reader, docreaderAddr, docreaderTransport := h.resolveDocReader(c.Request.Context(), overrides)
 	connected := reader != nil && reader.IsConnected()
 	remoteEngines := h.fetchRemoteEngines(c.Request.Context(), reader, overrides)
-	engines := docparser.ListAllEngines(connected, overrides, remoteEngines)
-	c.JSON(200, gin.H{"code": 0, "msg": "success", "data": engines, "docreader_addr": docreaderAddr, "docreader_transport": docreaderTransport, "connected": connected})
+	engines := companyPresetParserEngines(docparser.ListAllEngines(connected, overrides, remoteEngines))
+	response := gin.H{
+		"code":                0,
+		"msg":                 "success",
+		"data":                engines,
+		"docreader_transport": docreaderTransport,
+		"connected":           connected,
+	}
+	if types.IsSystemAdminFromContext(c.Request.Context()) {
+		response["docreader_addr"] = docreaderAddr
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // ReconnectDocReader reconnects the document converter to a new (or same) DocReader address.
@@ -459,22 +459,9 @@ func (h *SystemHandler) ReconnectDocReader(c *gin.Context) {
 		return
 	}
 
-	var overrides map[string]string
-	if v, exists := c.Get(types.TenantInfoContextKey.String()); exists {
-		if tenant, ok := v.(*types.Tenant); ok && tenant != nil {
-			if tenant.ParserEngineConfig != nil {
-				overrides = tenant.ParserEngineConfig.ToOverridesMap()
-			}
-			if creds := tenant.Credentials.GetWeKnoraCloud(); creds != nil {
-				if overrides == nil {
-					overrides = make(map[string]string)
-				}
-				overrides["weknoracloud_app_id"] = creds.AppID
-			}
-		}
-	}
+	overrides := h.resolvePlatformParserConfig(c.Request.Context()).ToOverridesMap()
 	remoteEngines := h.fetchRemoteEngines(c.Request.Context(), h.documentReader, overrides)
-	engines := docparser.ListAllEngines(true, overrides, remoteEngines)
+	engines := companyPresetParserEngines(docparser.ListAllEngines(true, overrides, remoteEngines))
 
 	_, docreaderTransport := h.getDocReaderConnInfo()
 	c.JSON(200, gin.H{"code": 0, "msg": "连接成功", "data": engines, "docreader_addr": addr, "docreader_transport": docreaderTransport, "connected": true})
@@ -495,29 +482,83 @@ func (h *SystemHandler) CheckParserEngines(c *gin.Context) {
 		c.JSON(400, gin.H{"code": 1, "msg": "请求体格式错误"})
 		return
 	}
-	var existing *types.ParserEngineConfig
-	var tenant *types.Tenant
-	if v, exists := c.Get(types.TenantInfoContextKey.String()); exists {
-		if t, ok := v.(*types.Tenant); ok && t != nil {
-			tenant = t
-			existing = t.ParserEngineConfig
-		}
+	existing, err := h.parserConfigSvc.GetConfig(c.Request.Context())
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("读取平台解析引擎配置失败").WithDetails(err.Error()))
+		return
 	}
 	merged := types.MergeParserEngineConfigForUpdate(&body, existing)
-	overrides := merged.ToOverridesMap()
-	if tenant != nil {
-		if creds := tenant.Credentials.GetWeKnoraCloud(); creds != nil {
-			if overrides == nil {
-				overrides = make(map[string]string)
-			}
-			overrides["weknoracloud_app_id"] = creds.AppID
-		}
+	if err := validateParserEngineOutboundURLs(merged); err != nil {
+		c.Error(apperrors.NewValidationError(err.Error()))
+		return
 	}
+	overrides := merged.ToOverridesMap()
 	reader, docreaderAddr, docreaderTransport := h.resolveDocReader(c.Request.Context(), overrides)
 	connected := reader != nil && reader.IsConnected()
 	remoteEngines := h.fetchRemoteEngines(c.Request.Context(), reader, overrides)
-	engines := docparser.ListAllEngines(connected, overrides, remoteEngines)
+	engines := companyPresetParserEngines(docparser.ListAllEngines(connected, overrides, remoteEngines))
 	c.JSON(200, gin.H{"code": 0, "msg": "success", "data": engines, "docreader_addr": docreaderAddr, "docreader_transport": docreaderTransport, "connected": connected})
+}
+
+// GetPlatformParserEngineConfig 返回平台解析引擎的脱敏配置。
+func (h *SystemHandler) GetPlatformParserEngineConfig(c *gin.Context) {
+	config, err := h.parserConfigSvc.GetConfig(c.Request.Context())
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("读取平台解析引擎配置失败").WithDetails(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    types.ParserEngineConfigForResponse(config, true),
+	})
+}
+
+// UpdatePlatformParserEngineConfig 更新平台统一使用的解析引擎配置。
+func (h *SystemHandler) UpdatePlatformParserEngineConfig(c *gin.Context) {
+	var incoming types.ParserEngineConfig
+	if err := c.ShouldBindJSON(&incoming); err != nil {
+		c.Error(apperrors.NewValidationError("请求体格式错误").WithDetails(err.Error()))
+		return
+	}
+	existing, err := h.parserConfigSvc.GetConfig(c.Request.Context())
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("读取平台解析引擎配置失败").WithDetails(err.Error()))
+		return
+	}
+	merged := types.MergeParserEngineConfigForUpdate(&incoming, existing)
+	if err := validateParserEngineOutboundURLs(merged); err != nil {
+		c.Error(apperrors.NewValidationError(err.Error()))
+		return
+	}
+	updated, err := h.parserConfigSvc.UpdateConfig(c.Request.Context(), merged)
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("保存平台解析引擎配置失败").WithDetails(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    types.ParserEngineConfigForResponse(updated, true),
+		"message": "公司预置解析引擎配置已更新",
+	})
+}
+
+func (h *SystemHandler) resolvePlatformParserConfig(ctx context.Context) *types.ParserEngineConfig {
+	if h.parserConfigSvc == nil {
+		return &types.ParserEngineConfig{}
+	}
+	return h.parserConfigSvc.ResolveConfig(ctx)
+}
+
+func companyPresetParserEngines(engines []types.ParserEngineInfo) []types.ParserEngineInfo {
+	result := make([]types.ParserEngineInfo, 0, len(engines))
+	for _, engine := range engines {
+		if engine.Name == "weknoracloud" {
+			continue
+		}
+		engine.CompanyPreset = true
+		result = append(result, engine)
+	}
+	return result
 }
 
 func (h *SystemHandler) resolveDocReader(ctx context.Context, overrides map[string]string) (interfaces.DocumentReader, string, string) {

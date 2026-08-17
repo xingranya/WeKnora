@@ -655,3 +655,222 @@
   font-size: 11px;
   color: var(--td-text-color-placeholder);
 }
+
+// ── 见外知识库通用安装流程 ──
+.key-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &__select {
+    width: 100%;
+  }
+}
+
+.selected-key-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 8px;
+  background: var(--td-bg-color-secondarycontainer);
+  box-sizing: border-box;
+
+  &__identity {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    code {
+      font-family: var(--app-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      font-size: 11px;
+      color: var(--td-text-color-placeholder);
+      overflow-wrap: anywhere;
+    }
+  }
+
+  &__name {
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--td-text-color-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__scope {
+    flex-shrink: 0;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: @claw-accent-dark;
+    background: color-mix(in srgb, @claw-accent 10%, var(--td-bg-color-container));
+  }
+}
+
+.key-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 8px;
+  background: var(--td-bg-color-secondarycontainer);
+
+  &--error {
+    border-color: color-mix(in srgb, var(--td-error-color) 30%, var(--td-component-stroke));
+  }
+
+  &__icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+    font-size: 16px;
+    color: var(--td-text-color-placeholder);
+  }
+
+  &--error &__icon {
+    color: var(--td-error-color);
+  }
+
+  &__body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+
+    p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--td-text-color-secondary);
+    }
+  }
+
+  &__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
+
+.prompt-toolbar {
+  align-items: flex-start;
+
+  .code-toolbar__code {
+    max-height: 280px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .code-toolbar__copy {
+    margin-top: 4px;
+  }
+}
+
+.security-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+
+  > .t-icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: @claw-accent-dark;
+  }
+
+  p {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--td-text-color-secondary);
+  }
+}
+
+.copy-prompt-button {
+  align-self: flex-start;
+}
+
+.compact-capability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+  }
+
+  &__icon {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    color: @claw-accent-dark;
+    background: color-mix(in srgb, @claw-accent 10%, var(--td-bg-color-secondarycontainer));
+  }
+
+  li > span:last-child {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  strong {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--td-text-color-primary);
+  }
+
+  small {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--td-text-color-secondary);
+  }
+}
+
+.landing-footer-bar--inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+
+  > div {
+    min-width: 0;
+  }
+
+  :deep(.t-button) {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .selected-key-summary,
+  .landing-footer-bar--inline {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .selected-key-summary__scope {
+    align-self: flex-start;
+  }
+
+  .copy-prompt-button {
+    width: 100%;
+  }
+}

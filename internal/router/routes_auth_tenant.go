@@ -224,8 +224,8 @@ func RegisterSystemRoutes(
 		systemRoutes.With(apiKeyAny()).GET("/capabilities", g.Viewer(), handler.GetDeploymentCapabilities)
 		systemRoutes.GET("/info", g.Viewer(), handler.GetSystemInfo)
 		systemRoutes.GET("/parser-engines", g.Viewer(), handler.ListParserEngines)
-		systemRoutes.POST("/parser-engines/check", g.Admin(), handler.CheckParserEngines)
-		systemRoutes.POST("/docreader/reconnect", g.Admin(), handler.ReconnectDocReader)
+		systemRoutes.POST("/parser-engines/check", g.SystemAdmin(), handler.CheckParserEngines)
+		systemRoutes.POST("/docreader/reconnect", g.SystemAdmin(), handler.ReconnectDocReader)
 		systemRoutes.GET("/storage-engine-status", g.Viewer(), handler.GetStorageEngineStatus)
 		systemRoutes.POST("/storage-engine-check", g.Admin(), handler.CheckStorageEngine)
 		systemRoutes.POST("/sandbox-check", g.Admin(), handler.CheckSandboxConfig)
@@ -266,6 +266,9 @@ func RegisterSystemAdminRoutes(
 		adminRoutes.GET("/api-keys", handler.ListPlatformAPIKeys)
 		adminRoutes.POST("/api-keys", handler.CreatePlatformAPIKey)
 		adminRoutes.DELETE("/api-keys/:key_id", handler.DeletePlatformAPIKey)
+		adminRoutes.GET("/parser-engine-config", handler.GetPlatformParserEngineConfig)
+		adminRoutes.PUT("/parser-engine-config", handler.UpdatePlatformParserEngineConfig)
+		adminRoutes.POST("/parser-engine-config/check", handler.CheckParserEngines)
 
 		// P1: platform-wide system settings (DB-backed runtime tunables).
 		// Reads return raw model rows / arrays (no `gin.H{"data":...}`

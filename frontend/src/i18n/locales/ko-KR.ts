@@ -269,36 +269,57 @@ export default {
     filterByAgentWithName: '에이전트별 필터: {name}',
     filterAllAgents: '전체 에이전트',
     claw: {
-      title: '见外传媒知识库 Skill',
-      subtitle: '见外传媒知识库 REST API로 문서를 가져오고 하이브리드 검색(벡터+키워드)을 수행합니다. 파일, URL, Markdown 업로드와 검색에 사용합니다.',
-      capabilitiesTitle: 'Skill 기능',
-      stepsTitle: '구성 단계',
-      openApiSettings: 'API 정보 열기',
-      copy: '복사',
-      copyEnvSuccess: '환경 변수 예시가 복사되었습니다',
-      copyCmdSuccess: '설치 명령이 복사되었습니다',
-      ecosystemNote: 'Skill은 ClawHub({\'@\'}lyingbug/weknora)에 호스팅됩니다. 전체 API 문서는 ClawHub 페이지를 참고하세요.',
-      installCta: 'ClawHub 열기',
-      installCtaHint: '见外传媒知识库 Skill 설치 · 새 탭에서 열림',
-      hubMeta: 'ClawHub · {\'@\'}lyingbug/weknora · MIT-0',
+      title: '见外知识库',
+      subtitle: '범용 Skill 패키지를 다운로드하고 기존 API Key를 선택한 뒤, 어떤 Agent에서든 자동 설치와 연결을 맡기세요.',
+      compatibility: {
+        codex: 'Codex',
+        claude: 'Claude Code',
+        cursor: 'Cursor',
+        openclaw: 'OpenClaw',
+        generic: '기타 Agent Skills 플랫폼'
+      },
+      downloadCta: '见外知识库 ZIP 다운로드',
+      downloadCtaHint: 'macOS 및 Windows 사용자 환경 설정 스크립트 포함 · v1.2.0',
+      apiKeyTitle: 'API Key 선택',
+      apiKeyDesc: '현재 공간에서 만든 Key를 선택하세요. 목록에는 마스킹된 값만 표시되고 AI용 복사 내용에는 전체 값이 포함됩니다.',
+      apiKeyPlaceholder: 'API Key를 선택하세요',
+      apiKeyPromptPlaceholder: '<API Key 선택 후 자동 입력>',
+      apiKeyFullAccess: '공간 전체 권한',
+      apiKeyScopedAccess: '제한된 권한',
+      expiredKeysIgnored: '만료된 Key {count}개를 자동으로 제외했습니다.',
+      noApiKeys: '현재 공간에 사용 가능한 API Key가 없거나 모든 Key가 만료되었습니다. 먼저 Key를 만드세요.',
+      createApiKey: 'API Key 만들기',
+      retry: '다시 시도',
+      openApiSettings: 'API 통합 열기',
+      loadApiKeysFailed: 'API Key를 불러오지 못했습니다',
+      tenantUnavailable: '현재 공간을 확인할 수 없습니다. 페이지를 새로고침한 뒤 다시 시도하세요.',
+      selectApiKeyFirst: '먼저 API Key를 선택하세요',
+      promptTitle: 'AI로 자동 설치',
+      promptDesc: '이 범용 안내는 현재 AI가 Agent 플랫폼과 운영체제를 감지해 Skill 설치, 환경 변수 설정, 연결 확인까지 수행하게 합니다.',
+      copyPrompt: 'AI에 전달할 내용 복사',
+      copyPromptSuccess: '설치 및 설정 안내를 복사했습니다',
+      securityNote: '미리보기에는 전체 Key가 항상 숨겨집니다. 복사 내용에는 전체 자격 증명이 포함되므로 신뢰할 수 있는 AI에만 보내고 최소 권한 Key를 사용하세요.',
+      setupPrompt: '현재 Agent에 “见外知识库” Skill을 설치하고 설정해 주세요.\n\n패키지: 시스템 기본 다운로드 폴더에서 “{archiveName}”을 찾으세요.\n다음을 수행하세요:\n1. 현재 Agent의 사용자 수준 Skill 디렉터리를 감지하고 패키지를 압축 해제해 설치하세요. 플랫폼이 Agent Skills 표준을 지원하면 해당 표준 디렉터리를 사용하세요.\n2. macOS 또는 Windows를 감지하고 패키지의 해당 설정 스크립트를 실행하세요. 아래 변수를 현재 셸에만 임시 적용하지 말고 사용자 환경에 영구 저장하세요:\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. 환경을 다시 로드한 뒤 Skill로 지식베이스 목록을 조회해 연결을 확인하세요.\n\n보안: 명령 출력, 프로젝트 파일, 최종 응답에 전체 API Key를 표시하지 마세요. 기존 설정을 덮어쓰기 전에 수정할 위치를 먼저 설명하세요.',
+      stepsTitle: '설치 절차',
       steps: {
+        download: {
+          title: '패키지 다운로드',
+          desc: '위 버튼으로 전체 ZIP을 다운로드하세요. 직접 압축을 풀거나 설치 디렉터리를 찾을 필요가 없습니다.'
+        },
+        key: {
+          title: '기존 Key 선택',
+          desc: '현재 공간에서 이미 만든 API Key 중 하나를 선택합니다. 권한 범위는 그대로 유지됩니다.'
+        },
+        prompt: {
+          title: '현재 AI에 전달',
+          desc: 'AI가 Codex, Claude Code, Cursor, OpenClaw 등과 macOS 또는 Windows 환경을 자동 감지합니다.'
+        },
         verify: {
           title: '연결 확인',
-          desc: '에이전트로 지식베이스 목록 또는 검색을 실행해 연결을 확인하세요.'
-        },
-        install: {
-          title: 'Skill 설치',
-          desc: 'OpenClaw CLI가 설치된 환경에서 아래 명령을 실행하거나 ClawHub 안내를 따르세요.'
-        },
-        env: {
-          title: '환경 변수 설정',
-          desc: '셸 또는 ~/.zshrc, ~/.bashrc에 WEKNORA_BASE_URL과 WEKNORA_API_KEY를 설정하세요. 아래 예시는 현재 API 주소를 사용하며, API Key는 실제 값으로 바꾸세요.'
-        },
-        api: {
-          title: 'API 자격 증명',
-          desc: '설정 → API 정보에서 API Key와 주소를 복사하세요.'
+          desc: 'AI가 환경을 다시 로드하고 지식베이스 목록을 조회해 설치, 자격 증명, 네트워크를 확인합니다.'
         }
       },
+      capabilitiesTitle: '설치 후 사용 가능',
       capabilities: {
         browse: {
           title: '지식 탐색',
@@ -320,7 +341,10 @@ export default {
           title: '파일 업로드',
           desc: 'PDF, Word, Excel 등을 업로드하고 자동 파싱·벡터화.'
         }
-      }
+      },
+      ecosystemNote: '패키지는 Agent Skills 디렉터리 규칙을 따르며 OpenClaw 버전은 ClawHub에서도 받을 수 있습니다.',
+      packageMeta: '见外知识库 Skill · v1.2.0 · MIT-0',
+      openClawHub: 'ClawHub 열기'
     },
     chrome: {
       title: '지식 관리 어시스턴트',
@@ -549,7 +573,7 @@ export default {
       embed: '웹 임베드',
       api: 'API 연동',
       chrome: 'Chrome 확장',
-      claw: 'Claw Skill'
+      claw: '见外知识库'
     }
   },
   datasource: {
@@ -1940,7 +1964,7 @@ export default {
     title: '모델 설정',
     description: '다양한 유형의 AI 모델을 관리합니다. Ollama 로컬 모델과 원격 API를 지원합니다',
     copySuffix: ' 사본',
-    builtinTag: '기본제공',
+    builtinTag: '회사 사전 설정',
     confirmDelete: '모델 "{name}"을(를) 삭제하시겠습니까?',
     debug: {
       title: '모델 테스트',
@@ -1991,10 +2015,10 @@ export default {
       }
     },
     builtinModels: {
-      title: '기본 제공 모델',
-      description: '기본 제공 모델은 모든 워크스페이스에게 표시됩니다. 민감한 정보는 숨겨지며, 편집하거나 삭제할 수 없습니다.',
-      descriptionAdmin: '기본 제공 모델은 모든 워크스페이스에게 표시됩니다. 시스템 관리자는 구성과 자격 증명을 편집할 수 있으며, 삭제는 배포 구성에서 관리됩니다.',
-      viewGuide: '기본 제공 모델 관리 가이드 보기'
+      title: '회사 사전 설정 모델',
+      description: '회사 사전 설정 모델은 모든 워크스페이스에 표시됩니다. 민감한 정보는 숨겨지며 직원은 편집, 삭제 또는 테스트할 수 없습니다.',
+      descriptionAdmin: '회사 사전 설정 모델은 모든 워크스페이스에 표시됩니다. 시스템 관리자는 구성과 자격 증명을 편집할 수 있으며 삭제는 배포 구성에서 관리됩니다.',
+      viewGuide: '회사 사전 설정 모델 관리 가이드 보기'
     },
     toasts: {
       nameRequired: '모델 이름은 비워둘 수 없습니다',
@@ -2008,9 +2032,9 @@ export default {
       saveFailed: '모델 저장 실패',
       deleted: '모델이 삭제되었습니다',
       deleteFailed: '모델 삭제 실패',
-      builtinCannotEdit: '기본 제공 모델은 편집할 수 없습니다',
-      builtinCannotDelete: '기본 제공 모델은 삭제할 수 없습니다',
-      builtinCannotCopy: '기본 제공 모델은 복사할 수 없습니다',
+      builtinCannotEdit: '회사 사전 설정 모델은 편집할 수 없습니다',
+      builtinCannotDelete: '회사 사전 설정 모델은 삭제할 수 없습니다',
+      builtinCannotCopy: '회사 사전 설정 모델은 복사할 수 없습니다',
       copied: '모델이 복사되었습니다',
       copyFailed: '모델 복사에 실패했습니다'
     },
@@ -2274,7 +2298,7 @@ export default {
     loadFailed: '모델 목록 로드 실패',
     selectModelPlaceholder: '모델을 선택해주세요',
     searchPlaceholder: '모델 검색...',
-    builtinTag: '내장',
+    builtinTag: '회사 사전 설정',
     editor: {
       addTitle: '모델 추가',
       editTitle: '모델 편집',
@@ -4426,7 +4450,7 @@ export default {
     all: '전체',
     clear: '지우기',
     website: '공식 웹사이트',
-    clawhubSkill: 'Claw Skill',
+    clawhubSkill: '见外知识库',
     github: 'GitHub',
     githubStarTip: 'GitHub에서 저장소로 이동합니다. 유용하다면 Star를 부탁드립니다',
     on: '켜기',
@@ -5198,7 +5222,8 @@ export default {
     },
     parser: {
       title: '파서 엔진',
-      description: '문서 파서 엔진 상태 및 구성. 이 설정은 서버 환경변수보다 우선 적용됩니다. 비워두면 환경변수 기본값을 사용합니다.',
+      description: '회사가 통합 관리하는 문서 파서 엔진입니다. 직원은 바로 사용할 수 있으며 연결 설정은 시스템 관리자에게만 표시됩니다.',
+      companyPreset: '회사 사전 설정',
       supportedFileTypes: '지원 형식',
       statusSection: '상태',
       configSection: '구성',

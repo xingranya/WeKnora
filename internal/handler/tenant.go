@@ -1312,6 +1312,10 @@ func (h *TenantHandler) GetTenantKV(c *gin.Context) {
 			return
 		}
 	}
+	if key == "parser-engine-config" && !types.IsSystemAdminFromContext(ctx) {
+		c.Error(errors.NewForbiddenError("公司预置解析引擎配置仅允许系统管理员维护"))
+		return
+	}
 
 	switch key {
 	case "web-search-config":
@@ -1365,6 +1369,10 @@ func (h *TenantHandler) UpdateTenantKV(c *gin.Context) {
 			c.Error(errors.NewForbiddenError("integration configuration requires admin access"))
 			return
 		}
+	}
+	if key == "parser-engine-config" && !types.IsSystemAdminFromContext(ctx) {
+		c.Error(errors.NewForbiddenError("公司预置解析引擎配置仅允许系统管理员维护"))
+		return
 	}
 
 	switch key {
