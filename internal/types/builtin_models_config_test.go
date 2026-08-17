@@ -185,8 +185,8 @@ func TestLoadBuiltinModelsConfig_AdoptsExistingWithoutOverwriting(t *testing.T) 
 		ManagedBy:   "",
 		Description: "现有公司模型",
 		Parameters: ModelParameters{
-			BaseURL: "https://models.example.com/v1",
-			APIKey:  "encrypted-or-plain-existing-secret",
+			BaseURL:  "https://models.example.com/v1",
+			APIKey:   "encrypted-or-plain-existing-secret",
 			Provider: "generic",
 		},
 	}
