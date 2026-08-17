@@ -127,6 +127,7 @@
     <!-- Left Showcase Section -->
     <div class="showcase-section">
       <div class="showcase-content">
+        <h1 class="showcase-title">{{ BRAND.name }}</h1>
         <p class="showcase-subtitle">{{ $t('platform.subtitle') }}</p>
         <p class="showcase-description">{{ $t('platform.description') }}</p>
 
@@ -1071,6 +1072,15 @@ onMounted(async () => {
   margin-bottom: 60px;
 }
 
+.showcase-title {
+  margin: 0 0 8px;
+  color: var(--td-text-color-anti);
+  font-family: var(--app-font-family);
+  font-size: 32px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
 .showcase-subtitle {
   margin-top: 0;
   font-size: 22px;
@@ -1645,6 +1655,10 @@ onMounted(async () => {
     font-size: 18px;
   }
 
+  .showcase-title {
+    font-size: 28px;
+  }
+
   .header-logo {
     top: 26px;
     left: 40px;
@@ -1707,6 +1721,10 @@ onMounted(async () => {
     margin-bottom: 24px;
   }
 
+  .showcase-title {
+    font-size: 24px;
+  }
+
   .feature-tags {
     margin-bottom: 24px;
   }
@@ -1764,6 +1782,10 @@ onMounted(async () => {
 
   .showcase-subtitle {
     font-size: 14px;
+  }
+
+  .showcase-title {
+    font-size: 20px;
   }
 
   .tag {
