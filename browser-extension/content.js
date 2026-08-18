@@ -2,7 +2,7 @@
   'use strict';
 
   // 防止重复注入 — 用版本号区分
-  var KA_VERSION = 12;
+  var KA_VERSION = 13;
   if (window.__kaContentVersion === KA_VERSION) {
     // 已注入过相同版本，但确保消息监听器仍然存在
     if (typeof window.ensureMessageListener === 'function') {
@@ -429,7 +429,8 @@
     dimTop: null,
     dimBottom: null,
     dimLeft: null,
-    dimRight: null
+    dimRight: null,
+    capturing: false
   };
 
   function startSelectClip() {
@@ -445,7 +446,7 @@
       '<div class="ka-clip-dim ka-clip-dim-left"></div>' +
       '<div class="ka-clip-dim ka-clip-dim-right"></div>' +
       '<div class="ka-clip-selection"></div>' +
-      '<div class="ka-clip-tip">拖拽鼠标框选要截取的区域，松开后确认</div>';
+      '<div class="ka-clip-tip">拖拽框选区域，松开后可移动、缩放或长截图</div>';
     document.body.appendChild(overlay);
     clipState.overlay = overlay;
 
@@ -454,6 +455,9 @@
     clipState.dimLeft = overlay.querySelector('.ka-clip-dim-left');
     clipState.dimRight = overlay.querySelector('.ka-clip-dim-right');
     clipState.rect = overlay.querySelector('.ka-clip-selection');
+    clipState.rect.addEventListener('mousedown', function (event) {
+      if (event.target === clipState.rect) startMoveSelection(event);
+    });
 
     // 初始暗幕覆盖全屏
     var w = window.innerWidth;
@@ -493,10 +497,59 @@
     clipState.dimRight.style.cssText = 'top:' + top + 'px;left:' + right + 'px;width:' + (w - right) + 'px;height:' + (bottom - top) + 'px;';
   }
 
+  function updateClipToolbarPosition(x, y, w, h) {
+    if (!clipState.toolbar) return;
+    var sizeLabel = clipState.toolbar.querySelector('.ka-clip-size');
+    if (sizeLabel && !clipState.capturing) sizeLabel.textContent = Math.round(w) + ' × ' + Math.round(h);
+    var toolbarWidth = clipState.toolbar.offsetWidth || 320;
+    var toolbarHeight = clipState.toolbar.offsetHeight || 40;
+    var left = Math.max(8, Math.min(x, window.innerWidth - toolbarWidth - 8));
+    var top = y + h + 8;
+    if (top + toolbarHeight > window.innerHeight - 8) top = Math.max(8, y - toolbarHeight - 8);
+    clipState.toolbar.style.left = left + 'px';
+    clipState.toolbar.style.top = top + 'px';
+  }
+
+  function applyClipSelection(x, y, w, h) {
+    clipState.rect.style.left = x + 'px';
+    clipState.rect.style.top = y + 'px';
+    clipState.rect.style.width = w + 'px';
+    clipState.rect.style.height = h + 'px';
+    setDims(x, y, x + w, y + h);
+    updateClipToolbarPosition(x, y, w, h);
+  }
+
+  function startMoveSelection(event) {
+    if (clipState.capturing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    var startX = event.clientX;
+    var startY = event.clientY;
+    var originalLeft = parseInt(clipState.rect.style.left) || 0;
+    var originalTop = parseInt(clipState.rect.style.top) || 0;
+    var width = parseInt(clipState.rect.style.width) || 0;
+    var height = parseInt(clipState.rect.style.height) || 0;
+
+    function onMove(moveEvent) {
+      moveEvent.preventDefault();
+      var left = Math.max(0, Math.min(window.innerWidth - width, originalLeft + moveEvent.clientX - startX));
+      var top = Math.max(0, Math.min(window.innerHeight - height, originalTop + moveEvent.clientY - startY));
+      applyClipSelection(left, top, width, height);
+    }
+
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
+
   function onClipMouseDown(e) {
     if (e.button !== 0) return;
     // 如果点击在工具栏或 handle 上，不要重新框选
-    if (e.target.closest && (e.target.closest('.ka-clip-toolbar') || e.target.closest('.ka-clip-handle'))) return;
+    if (e.target.closest && (e.target.closest('.ka-clip-toolbar') || e.target.closest('.ka-clip-handle') || e.target.closest('.ka-clip-selection'))) return;
     e.preventDefault();
     e.stopPropagation();
 
@@ -531,12 +584,7 @@
     var w = Math.abs(e.clientX - clipState.startX);
     var h = Math.abs(e.clientY - clipState.startY);
 
-    clipState.rect.style.left = x + 'px';
-    clipState.rect.style.top = y + 'px';
-    clipState.rect.style.width = w + 'px';
-    clipState.rect.style.height = h + 'px';
-
-    setDims(x, y, x + w, y + h);
+    applyClipSelection(x, y, w, h);
   }
 
   function onClipMouseUp(e) {
@@ -595,23 +643,18 @@
       var dy = ev.clientY - startY;
       var newLeft = origLeft, newTop = origTop, newW = origW, newH = origH;
 
-      if (pos.indexOf('e') !== -1) newW = Math.max(20, origW + dx);
-      if (pos.indexOf('w') !== -1) { newW = Math.max(20, origW - dx); newLeft = origLeft + dx; }
-      if (pos.indexOf('s') !== -1) newH = Math.max(20, origH + dy);
-      if (pos.indexOf('n') !== -1) { newH = Math.max(20, origH - dy); newTop = origTop + dy; }
-
-      clipState.rect.style.left = newLeft + 'px';
-      clipState.rect.style.top = newTop + 'px';
-      clipState.rect.style.width = newW + 'px';
-      clipState.rect.style.height = newH + 'px';
-
-      setDims(newLeft, newTop, newLeft + newW, newTop + newH);
-
-      // 更新工具栏位置
-      if (clipState.toolbar) {
-        clipState.toolbar.style.left = newLeft + 'px';
-        clipState.toolbar.style.top = (newTop + newH + 8) + 'px';
+      if (pos.indexOf('e') !== -1) newW = Math.max(20, Math.min(window.innerWidth - origLeft, origW + dx));
+      if (pos.indexOf('w') !== -1) {
+        newLeft = Math.max(0, Math.min(origLeft + origW - 20, origLeft + dx));
+        newW = origLeft + origW - newLeft;
       }
+      if (pos.indexOf('s') !== -1) newH = Math.max(20, Math.min(window.innerHeight - origTop, origH + dy));
+      if (pos.indexOf('n') !== -1) {
+        newTop = Math.max(0, Math.min(origTop + origH - 20, origTop + dy));
+        newH = origTop + origH - newTop;
+      }
+
+      applyClipSelection(newLeft, newTop, newW, newH);
     }
 
     function onUp() {
@@ -636,13 +679,16 @@
     bar.innerHTML =
       '<span class="ka-clip-size">' + Math.round(w) + ' × ' + Math.round(h) + '</span>' +
       '<button class="ka-clip-btn ka-clip-btn-cancel">取消 <kbd>Esc</kbd></button>' +
+      '<button class="ka-clip-btn ka-clip-btn-long">长截图</button>' +
       '<button class="ka-clip-btn ka-clip-btn-confirm">确认截取 <kbd>↵</kbd></button>';
 
     clipState.overlay.appendChild(bar);
     clipState.toolbar = bar;
 
     bar.querySelector('.ka-clip-btn-cancel').addEventListener('click', cancelClip);
+    bar.querySelector('.ka-clip-btn-long').addEventListener('click', confirmLongClip);
     bar.querySelector('.ka-clip-btn-confirm').addEventListener('click', confirmClip);
+    requestAnimationFrame(function () { updateClipToolbarPosition(x, y, w, h); });
   }
 
   function onClipKeyDown(e) {
@@ -651,6 +697,150 @@
       cancelClip();
     } else if (e.key === 'Enter') {
       confirmClip();
+    }
+  }
+
+  function captureVisibleScreenshot() {
+    return new Promise(function (resolve, reject) {
+      safeSendMessage({ type: 'CAPTURE_SCREENSHOT' }, function (response) {
+        if (!response || !response.success || !response.dataUrl) {
+          reject(new Error((response && response.error) || '截图失败'));
+          return;
+        }
+        resolve(response.dataUrl);
+      });
+    });
+  }
+
+  function loadScreenshotImage(dataUrl) {
+    return new Promise(function (resolve, reject) {
+      var image = new Image();
+      image.onload = function () { resolve(image); };
+      image.onerror = function () { reject(new Error('截图图片加载失败')); };
+      image.src = dataUrl;
+    });
+  }
+
+  function getLongCaptureBottom(docTop, centerX, centerY) {
+    var documentHeight = Math.max(
+      document.documentElement.scrollHeight,
+      document.body && document.body.scrollHeight || 0,
+      document.documentElement.offsetHeight,
+      document.body && document.body.offsetHeight || 0
+    );
+    var overlayDisplay = clipState.overlay && clipState.overlay.style.display;
+    if (clipState.overlay) clipState.overlay.style.display = 'none';
+    var target = document.elementFromPoint(centerX, centerY);
+    if (clipState.overlay) clipState.overlay.style.display = overlayDisplay || '';
+    var contentRoot = target && target.closest && target.closest(
+      'article, main, [role="main"], [role="article"], .article-content, .post-content, .entry-content, .content-detail'
+    );
+    if (contentRoot) {
+      var rootRect = contentRoot.getBoundingClientRect();
+      var rootBottom = rootRect.bottom + window.scrollY;
+      if (rootBottom > docTop + 200) return Math.min(documentHeight, rootBottom);
+    }
+    return documentHeight;
+  }
+
+  async function captureLongRegion(docLeft, docTop, width, height) {
+    var originalScrollX = window.scrollX;
+    var originalScrollY = window.scrollY;
+    var originalScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    var end = Math.min(docTop + height, docTop + 60000);
+    var totalHeight = Math.max(1, end - docTop);
+    var cursor = docTop;
+    var canvas = null;
+    var context = null;
+    var outputScale = 1;
+    var capturedSlices = 0;
+
+    try {
+      while (cursor < end) {
+        var maxScrollY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+        window.scrollTo(originalScrollX, Math.min(cursor, maxScrollY));
+        await collectionDelayForClip(240);
+        var actualScrollY = window.scrollY;
+        var sourceTopCss = Math.max(0, cursor - actualScrollY);
+        var availableCss = Math.min(window.innerHeight - sourceTopCss, end - cursor);
+        if (availableCss <= 0) break;
+
+        var dataUrl = await captureVisibleScreenshot();
+        var image = await loadScreenshotImage(dataUrl);
+        var screenshotScaleX = image.naturalWidth / window.innerWidth;
+        var screenshotScaleY = image.naturalHeight / window.innerHeight;
+
+        if (!canvas) {
+          var maxDimensionScale = 32760 / totalHeight;
+          var maxAreaScale = Math.sqrt(64000000 / Math.max(1, width * totalHeight));
+          outputScale = Math.max(0.25, Math.min(screenshotScaleX, screenshotScaleY, maxDimensionScale, maxAreaScale));
+          canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.floor(width * outputScale));
+          canvas.height = Math.max(1, Math.floor(totalHeight * outputScale));
+          context = canvas.getContext('2d');
+          context.fillStyle = '#fff';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        var sourceLeftCss = Math.max(0, docLeft - window.scrollX);
+        var sourceWidthCss = Math.min(width, window.innerWidth - sourceLeftCss);
+        context.drawImage(
+          image,
+          sourceLeftCss * screenshotScaleX,
+          sourceTopCss * screenshotScaleY,
+          sourceWidthCss * screenshotScaleX,
+          availableCss * screenshotScaleY,
+          0,
+          (cursor - docTop) * outputScale,
+          sourceWidthCss * outputScale,
+          availableCss * outputScale
+        );
+        cursor += availableCss;
+        capturedSlices++;
+      }
+      if (!canvas || !capturedSlices) throw new Error('未生成长截图');
+      return canvas.toDataURL('image/jpeg', 0.82);
+    } finally {
+      window.scrollTo(originalScrollX, originalScrollY);
+      document.documentElement.style.scrollBehavior = originalScrollBehavior;
+      await collectionDelayForClip(120);
+    }
+  }
+
+  function collectionDelayForClip(milliseconds) {
+    return new Promise(function (resolve) { setTimeout(resolve, milliseconds); });
+  }
+
+  async function confirmLongClip() {
+    if (!clipState.rect || clipState.capturing) return;
+    var rectLeft = parseInt(clipState.rect.style.left);
+    var rectTop = parseInt(clipState.rect.style.top);
+    var rectWidth = parseInt(clipState.rect.style.width);
+    var rectHeight = parseInt(clipState.rect.style.height);
+    if (isNaN(rectWidth) || isNaN(rectHeight) || rectWidth < 10 || rectHeight < 10) {
+      showNotification('选区太小，请重新框选', 'error');
+      return;
+    }
+
+    var documentLeft = rectLeft + window.scrollX;
+    var documentTop = rectTop + window.scrollY;
+    var documentBottom = getLongCaptureBottom(documentTop, rectLeft + rectWidth / 2, rectTop + rectHeight / 2);
+    var captureHeight = Math.max(rectHeight, documentBottom - documentTop);
+    var content = extractTextInRect(documentLeft, documentTop, rectWidth, captureHeight);
+    clipState.capturing = true;
+    var sizeLabel = clipState.toolbar && clipState.toolbar.querySelector('.ka-clip-size');
+    if (sizeLabel) sizeLabel.textContent = '正在生成长截图…';
+    if (clipState.overlay) clipState.overlay.style.display = 'none';
+
+    try {
+      var screenshot = await captureLongRegion(documentLeft, documentTop, rectWidth, captureHeight);
+      cancelClip();
+      openClipEditor(content, screenshot, null, { headerTitle: '保存长截图' });
+    } catch (error) {
+      cancelClip();
+      showNotification('长截图失败: ' + (error.message || '未知错误'), 'error');
+      if (content) openClipEditor(content, null, null, { headerTitle: '保存长内容' });
     }
   }
 
@@ -1416,6 +1606,18 @@
         if (!isFunctionReady()) { showAuthGuardHint(); sendResponse({ success: false }); return true; }
         smartClip();
         sendResponse({ success: true });
+      }
+      if (msg.type === 'DISCOVER_DOCUMENT_COLLECTION') {
+        if (!isFunctionReady()) { showAuthGuardHint(); sendResponse({ success: false, error: '请先选择知识库' }); return true; }
+        if (!window.JiwaiCollection) { sendResponse({ success: false, error: '文档目录发现器未加载' }); return true; }
+        window.JiwaiCollection.discoverDocumentLinks(document, location.href, {
+          maxPages: msg.payload && msg.payload.maxPages
+        }).then(function (result) {
+          sendResponse({ success: true, data: result });
+        }).catch(function (error) {
+          sendResponse({ success: false, error: error.message || '识别文档目录失败' });
+        });
+        return true;
       }
       if (msg.type === 'SELECT_CLIP') {
         if (!isFunctionReady()) { showAuthGuardHint(); sendResponse({ success: false }); return true; }
@@ -2322,4 +2524,14 @@
   window.ensureMessageListener = ensureMessageListener;
 
   ensureMessageListener();
+
+  // 文档集专用后台标签页加载完成后主动唤醒 Service Worker。
+  if (window === window.top) {
+    setTimeout(function () {
+      safeSendMessage({
+        type: 'DOCUMENT_COLLECTION_PAGE_READY',
+        payload: { url: location.href, title: document.title || '' }
+      }, function () {});
+    }, 1400);
+  }
 })();

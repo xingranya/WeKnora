@@ -6,6 +6,7 @@
 </head>
 <body>
   <main id="fixture"></main>
+  <script src="../collection.js"></script>
   <script src="../extractors.js"></script>
   <script>
     (async function () {
@@ -106,6 +107,10 @@
           window.JiwaiPageExtractor.findAdapter('https://support.oceanengine.com/support/content/140628').id === 'douyin-rules',
           '巨量引擎帮助中心未命中适配器'
         );
+        assert(
+          window.JiwaiPageExtractor.findAdapter('https://www.lifexue.com/course/detail/123').id === 'lifexue',
+          '抖音生活服务学习中心未命中适配器'
+        );
       }
 
       function testLarkOpenDocLinkSanitizing() {
@@ -146,12 +151,65 @@
         assert(result.markdown.indexOf('![流程图](data:image/gif;base64,') !== -1, '飞书图片未保留');
       }
 
+      async function testDocumentCollectionDiscovery() {
+        var fixture = resetFixture();
+        var sidebar = document.createElement('aside');
+        sidebar.className = 'docs-sidebar';
+        sidebar.style.cssText = 'height:100px;overflow:auto;';
+        sidebar.innerHTML = [
+          '<a href="/support/content/140962?timestamp=123">第一篇文档</a>',
+          '<details><summary>第二章</summary><a href="/support/content/140963?pageId=305">第二篇文档</a></details>',
+          '<div data-url="/support/content/140964">第三篇文档</div>',
+          '<div class="base-tree-file">组件路由第五篇</div>',
+          '<a href="/login">登录</a>',
+          '<a href="https://outside.example.com/support/content/1">外部文档</a>',
+          '<div style="height:700px"></div>'
+        ].join('');
+        fixture.appendChild(sidebar);
+
+        var frameworkNode = sidebar.querySelector('.base-tree-file');
+        Object.defineProperty(frameworkNode, '__reactFiber$fixture', {
+          value: {
+            memoizedProps: {
+              data: { data: { mappingId: 140966, mappingType: 2, mappingName: '组件路由第五篇' } }
+            },
+            return: null
+          }
+        });
+
+        var appended = false;
+        sidebar.addEventListener('scroll', function () {
+          if (appended) return;
+          appended = true;
+          var link = document.createElement('a');
+          link.href = '/support/content/140965';
+          link.textContent = '虚拟列表第四篇';
+          sidebar.appendChild(link);
+        });
+
+        var result = await window.JiwaiCollection.discoverDocumentLinks(
+          document,
+          'https://support.oceanengine.com/support/content/140962?mappingType=2&timestamp=999',
+          { maxPages: 50 }
+        );
+        var urls = result.pages.map(function (page) { return page.url; });
+        assert(urls[0] === 'https://support.oceanengine.com/support/content/140962?mappingType=2', '当前文档未排在第一位或临时参数未清理');
+        assert(urls.indexOf('https://support.oceanengine.com/support/content/140963?pageId=305') !== -1, '折叠目录文档未识别');
+        assert(urls.indexOf('https://support.oceanengine.com/support/content/140964') !== -1, 'data-url 文档未识别');
+        assert(urls.indexOf('https://support.oceanengine.com/support/content/140965') !== -1, '虚拟滚动目录文档未识别');
+        assert(urls.indexOf('https://support.oceanengine.com/support/content/140966?mappingType=2') !== -1, '组件树结构化路由未识别');
+        assert(urls.every(function (url) { return url.indexOf('outside.example.com') === -1 && url.indexOf('/login') === -1; }), '外链或危险路径未过滤');
+        assert(window.JiwaiCollection.isNavigationOnlyUrl('https://docs.example.com/category/api'), '分类页未标记为导航页');
+        assert(!window.JiwaiCollection.isNavigationOnlyUrl('https://docs.example.com/docs/api'), '正文页被错误标记为导航页');
+      }
+
       await testFeishuShadowAndVirtualScroll();
       await testDouyinDelayedContent();
       await testTableAndLinkMarkdown();
       testEmbeddedOfficeHosts();
       testLarkOpenDocLinkSanitizing();
       await testFeishuBlockSemantics();
+      await testDocumentCollectionDiscovery();
 
       var status = failures.length ? 'fail' : 'pass';
       document.body.textContent = failures.length ? 'EXTENSION_TEST_FAIL\n' + failures.join('\n') : 'EXTENSION_TEST_PASS';

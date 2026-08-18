@@ -98,5 +98,13 @@ try {
     ])
     if (chrome.exitCode === null) chrome.kill('SIGKILL')
   }
-  await rm(profileDir, { recursive: true, force: true })
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(profileDir, { recursive: true, force: true })
+      break
+    } catch (error) {
+      if (attempt === 4 || error.code !== 'ENOTEMPTY') throw error
+      await new Promise((resolveRetry) => setTimeout(resolveRetry, 200))
+    }
+  }
 }

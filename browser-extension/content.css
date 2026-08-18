@@ -28,7 +28,8 @@
   border: 2px solid #111827;
   background: transparent;
   z-index: 1;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: move;
   box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.3), 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
@@ -138,6 +139,16 @@
   background: #111827;
   color: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.16);
+}
+
+.ka-clip-btn-long {
+  background: rgba(255, 255, 255, 0.94);
+  color: #111827;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.ka-clip-btn-long:hover {
+  background: #fff;
 }
 
 .ka-clip-btn-confirm:hover {

@@ -27,6 +27,17 @@
       scrollSelectors: ['[class*="scroll"]', 'main']
     },
     {
+      id: 'lifexue',
+      name: '抖音生活服务学习中心',
+      hosts: ['lifexue.com'],
+      selectors: [
+        'article', '[class*="course-detail" i]', '[class*="courseDetail"]',
+        '[class*="detail-content" i]', '[class*="detailContent"]',
+        '[class*="lesson-content" i]', '[class*="lessonContent"]', 'main'
+      ],
+      scrollSelectors: ['main', '[class*="scroll"]', '[class*="content"]']
+    },
+    {
       id: 'tencent-docs',
       name: '腾讯文档',
       hosts: ['docs.qq.com'],
@@ -818,7 +829,9 @@
 
     return {
       markdown: markdown,
-      title: getMetaContent(doc, 'og:title') || doc.title || (adapter && adapter.name) || '网页采集',
+      title: getMetaContent(doc, 'og:title') ||
+        normalizeWhitespace(selected.element.querySelector && selected.element.querySelector('h1') && selected.element.querySelector('h1').textContent) ||
+        doc.title || (adapter && adapter.name) || '网页采集',
       author: getMetaContent(doc, 'author') || getMetaContent(doc, 'article:author'),
       description: getMetaContent(doc, 'description') || getMetaContent(doc, 'og:description'),
       site: getMetaContent(doc, 'og:site_name') || (adapter && adapter.name) || (global.location && global.location.hostname) || '',

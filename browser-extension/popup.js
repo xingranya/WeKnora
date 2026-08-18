@@ -5,6 +5,7 @@
   var currentUser = null; // { type: 'ka'|'wk', name, avatar, badge }
   var clipKbId = '';      // 剪藏目标知识库 ID
   var clipKbName = '';    // 剪藏目标知识库名称
+  var documentCollectionTask = null;
 
   // === DOM Helpers ===
   function $(id) { return document.getElementById(id); }
@@ -705,6 +706,7 @@
   var IMG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
   var SMART_CLIP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
   var SCREENSHOT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4"/><path d="M15 3h4a2 2 0 0 1 2 2v4"/><path d="M21 15v4a2 2 0 0 1-2 2h-4"/><path d="M3 15v4a2 2 0 0 0 2 2h4"/><rect x="7" y="7" width="10" height="10" rx="2"/></svg>';
+  var COLLECTION_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v5H6z"/><path d="M4 10h16v5H4z"/><path d="M2 17h20v4H2z"/></svg>';
 
   function detectClipTypeHint(title, content, explicitType) {
     var type = (explicitType || '').toLowerCase();
@@ -729,6 +731,9 @@
 
     if (explicitType === 'smart-clip') {
       return { tagText: '智能剪藏', tagClass: 'clip-list-tag tag-green', iconClass: 'icon-clip', iconSvg: SMART_CLIP_ICON };
+    }
+    if (explicitType === 'collection-clip') {
+      return { tagText: '文档集', tagClass: 'clip-list-tag tag-green', iconClass: 'icon-clip', iconSvg: COLLECTION_ICON };
     }
     if (explicitType === 'select-clip') {
       return { tagText: '截图', tagClass: 'clip-list-tag tag-gray', iconClass: 'icon-shot', iconSvg: SCREENSHOT_ICON };
@@ -1103,6 +1108,58 @@
   // 页面加载后初始化高度
   setTimeout(syncFlipperHeight, 50);
 
+  function renderDocumentCollectionTask(task) {
+    documentCollectionTask = task || null;
+    var panel = $('collection-progress');
+    if (!panel) return;
+    if (!task || task.status === 'cancelled') {
+      panel.classList.remove('show');
+      syncFlipperHeight();
+      return;
+    }
+
+    var processed = (task.completed || 0) + (task.failed || 0) + (task.skipped || 0);
+    var total = task.total || 0;
+    var percent = total ? Math.min(100, Math.round(processed * 100 / total)) : 0;
+    var currentPage = task.pages && task.pages[task.currentIndex];
+    var title = task.title || '文档集采集';
+    var detail = '';
+
+    if (task.status === 'running') {
+      title = currentPage ? '正在采集：' + currentPage.title : '正在采集文档集';
+      detail = processed + '/' + total + ' · 成功 ' + (task.completed || 0) + ' · 跳过 ' + (task.skipped || 0) + ' · 失败 ' + (task.failed || 0);
+    } else if (task.status === 'paused') {
+      title = '已暂停：' + title;
+      detail = processed + '/' + total + (task.error ? ' · ' + task.error : '');
+    } else {
+      title = task.status === 'failed' ? '文档集采集失败' : '文档集采集完成';
+      detail = '成功 ' + (task.completed || 0) + ' · 跳过 ' + (task.skipped || 0) + ' · 失败 ' + (task.failed || 0);
+      percent = 100;
+    }
+
+    $('collection-progress-title').textContent = title;
+    $('collection-progress-detail').textContent = detail;
+    $('collection-progress-bar').style.transform = 'scaleX(' + (percent / 100) + ')';
+    $('collection-progress-track').setAttribute('aria-valuenow', String(percent));
+    var toggle = $('btn-collection-toggle');
+    var cancel = $('btn-collection-cancel');
+    var active = task.status === 'running' || task.status === 'paused';
+    toggle.style.display = active ? '' : 'none';
+    cancel.style.display = active ? '' : 'none';
+    toggle.title = task.status === 'paused' ? '继续' : '暂停';
+    toggle.setAttribute('aria-label', task.status === 'paused' ? '继续文档集采集' : '暂停文档集采集');
+    toggle.querySelector('.collection-icon-pause').style.display = task.status === 'paused' ? 'none' : '';
+    toggle.querySelector('.collection-icon-play').style.display = task.status === 'paused' ? '' : 'none';
+    panel.classList.add('show');
+    syncFlipperHeight();
+  }
+
+  function loadDocumentCollectionTask() {
+    sendMsg({ type: 'GET_DOCUMENT_COLLECTION_TASK' }).then(function (resp) {
+      renderDocumentCollectionTask(resp && resp.data);
+    });
+  }
+
   $('btn-quick-note').addEventListener('click', function () {
     flipToNote();
   });
@@ -1141,6 +1198,97 @@
         }
         window.close();
       });
+    });
+  });
+
+  // === 文档集采集按钮 ===
+  $('btn-collection-clip').addEventListener('click', function () {
+    var button = $('btn-collection-clip');
+    if (!clipKbId) {
+      toast('请先选择保存知识库', 'error');
+      return;
+    }
+    if (documentCollectionTask && (documentCollectionTask.status === 'running' || documentCollectionTask.status === 'paused')) {
+      toast('已有文档集采集任务');
+      renderDocumentCollectionTask(documentCollectionTask);
+      return;
+    }
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+      if (!tabs || !tabs[0]) return;
+      var tab = tabs[0];
+      var url = tab.url || '';
+      if (/^(chrome|edge|about|chrome-extension):/i.test(url) || !url) {
+        toast('此页面不支持文档集采集', 'error');
+        return;
+      }
+      button.disabled = true;
+      button.setAttribute('data-tip', '正在识别文档目录');
+      toast('正在识别文档目录…');
+      sendMsg({
+        type: 'DISCOVER_DOCUMENT_COLLECTION',
+        payload: { tabId: tab.id, maxPages: 50 }
+      }).then(function (resp) {
+        button.disabled = false;
+        button.setAttribute('data-tip', '采集整个文档集');
+        if (!resp || !resp.success) {
+          toast((resp && resp.error) || '识别文档目录失败', 'error');
+          return;
+        }
+        var discovery = resp.data || {};
+        var pages = discovery.pages || [];
+        if (pages.length < 2) {
+          toast('未识别到侧栏中的其它文档', 'error');
+          return;
+        }
+        var limitHint = discovery.truncated ? '（已限制为前 50 篇）' : '';
+        var confirmed = window.confirm(
+          '已识别 ' + pages.length + ' 篇文档' + limitHint + '，将逐篇保存到「' + clipKbName + '」。\n\n是否开始采集？'
+        );
+        if (!confirmed) return;
+        sendMsg({
+          type: 'START_DOCUMENT_COLLECTION',
+          payload: {
+            title: discovery.title || tab.title || '文档集',
+            scope: discovery.scope || '',
+            pages: pages,
+            kbId: clipKbId,
+            kbName: clipKbName,
+            sourceTabId: tab.id
+          }
+        }).then(function (startResp) {
+          if (!startResp || !startResp.success) {
+            toast((startResp && startResp.error) || '启动采集任务失败', 'error');
+            if (startResp && startResp.data) renderDocumentCollectionTask(startResp.data);
+            return;
+          }
+          renderDocumentCollectionTask(startResp.data);
+          toast('文档集采集已开始', 'success');
+        });
+      });
+    });
+  });
+
+  $('btn-collection-toggle').addEventListener('click', function () {
+    if (!documentCollectionTask) return;
+    var type = documentCollectionTask.status === 'paused'
+      ? 'RESUME_DOCUMENT_COLLECTION'
+      : 'PAUSE_DOCUMENT_COLLECTION';
+    sendMsg({ type: type }).then(function (resp) {
+      if (resp && resp.success) renderDocumentCollectionTask(resp.data);
+      else toast((resp && resp.error) || '操作失败', 'error');
+    });
+  });
+
+  $('btn-collection-cancel').addEventListener('click', function () {
+    if (!window.confirm('确定取消当前文档集采集任务？已成功保存的文档会保留。')) return;
+    sendMsg({ type: 'CANCEL_DOCUMENT_COLLECTION' }).then(function (resp) {
+      if (resp && resp.success) {
+        renderDocumentCollectionTask(resp.data);
+        toast('采集任务已取消');
+      } else {
+        toast((resp && resp.error) || '取消失败', 'error');
+      }
     });
   });
 
@@ -2128,6 +2276,9 @@
   // === 监听 storage 变化，实时刷新最近剪藏列表 ===
   if (chrome && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener(function (changes, area) {
+      if (area === 'local' && changes.ka_document_collection_task) {
+        renderDocumentCollectionTask(changes.ka_document_collection_task.newValue);
+      }
       if (area === 'local' && (changes.ka_clips || changes.ka_notes)) {
         // 只在主界面可见时刷新（延迟等待后端同步）
         if (currentUser && $('pg-main').classList.contains('active') && !isFlipped) {
@@ -2146,6 +2297,9 @@
         openCompanyLogin();
         toast('凭证已失效，请重新填写 API Key', 'error');
       }
+      if (msg && msg.type === 'DOCUMENT_COLLECTION_UPDATED') {
+        renderDocumentCollectionTask(msg.payload);
+      }
     });
   }
 
@@ -2155,6 +2309,7 @@
   }
 
   (function init() {
+    loadDocumentCollectionTask();
     sendMsg({ type: 'GET_AUTH' }).then(function (resp) {
       if (resp && resp.success && resp.data) {
         var auth = resp.data;

@@ -1,6 +1,8 @@
 // background.js — Service Worker
 // 存储管理 + 消息路由 + 右键菜单 + API 通信
 
+importScripts('collection.js');
+
 var COMPANY_API_BASE = 'http://100.78.64.62:8080/api/v1';
 
 async function migrateToCompanyService() {
@@ -195,6 +197,453 @@ async function clearFrameExtraction(tabId, frameId) {
   return { success: true };
 }
 
+// === 文档集采集 ===
+var DOCUMENT_COLLECTION_TASK_KEY = 'ka_document_collection_task';
+var DOCUMENT_COLLECTION_HISTORY_KEY = 'ka_document_collection_history';
+var DOCUMENT_COLLECTION_ALARM = 'ka-document-collection-watchdog';
+var DOCUMENT_COLLECTION_MAX_PAGES = 50;
+var DOCUMENT_COLLECTION_MAX_ATTEMPTS = 2;
+var DOCUMENT_COLLECTION_CHUNK_SIZE = 512 * 1024;
+
+function collectionDelay(milliseconds) {
+  return new Promise(function (resolve) { setTimeout(resolve, milliseconds); });
+}
+
+async function getDocumentCollectionTask() {
+  var data = await chrome.storage.local.get(DOCUMENT_COLLECTION_TASK_KEY);
+  return data[DOCUMENT_COLLECTION_TASK_KEY] || null;
+}
+
+function updateCollectionBadge(task) {
+  if (!chrome.action || !chrome.action.setBadgeText) return;
+  var badgeText = '';
+  if (task && (task.status === 'running' || task.status === 'paused')) {
+    badgeText = String((task.completed || 0) + (task.failed || 0) + (task.skipped || 0)) + '/' + String(task.total || 0);
+  }
+  chrome.action.setBadgeBackgroundColor({ color: task && task.status === 'paused' ? '#8A8F98' : '#07C160' }).catch(function () {});
+  chrome.action.setBadgeText({ text: badgeText }).catch(function () {});
+}
+
+async function setDocumentCollectionTask(task) {
+  task.updatedAt = Date.now();
+  var payload = {};
+  payload[DOCUMENT_COLLECTION_TASK_KEY] = task;
+  await chrome.storage.local.set(payload);
+  updateCollectionBadge(task);
+  chrome.runtime.sendMessage({ type: 'DOCUMENT_COLLECTION_UPDATED', payload: task }).catch(function () {});
+  return task;
+}
+
+function normalizeCollectionPages(pages) {
+  var output = [];
+  var seen = new Set();
+  (pages || []).forEach(function (page) {
+    if (output.length >= DOCUMENT_COLLECTION_MAX_PAGES) return;
+    var url = globalThis.JiwaiCollection.canonicalizeUrl(page && page.url, page && page.url);
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    output.push({
+      url: url,
+      title: String(page.title || '未命名文档').trim().slice(0, 240) || '未命名文档',
+      navigationOnly: !!page.navigationOnly,
+      status: 'pending',
+      attempts: 0,
+      error: ''
+    });
+  });
+  return output;
+}
+
+function appendDiscoveredCollectionPages(task, pages) {
+  var seen = new Set(task.pages.map(function (page) { return page.url; }));
+  var added = 0;
+  (pages || []).forEach(function (page) {
+    if (task.pages.length >= DOCUMENT_COLLECTION_MAX_PAGES) return;
+    var url = globalThis.JiwaiCollection.canonicalizeUrl(page && page.url, page && page.url);
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    task.pages.push({
+      url: url,
+      title: String(page.title || '未命名文档').trim().slice(0, 240) || '未命名文档',
+      navigationOnly: !!page.navigationOnly,
+      status: 'pending',
+      attempts: 0,
+      error: ''
+    });
+    added++;
+  });
+  task.total = task.pages.length;
+  return added;
+}
+
+async function discoverCollectionPagesInTab(tabId, maxPages) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId, frameIds: [0] },
+      files: ['collection.js'],
+      world: 'MAIN'
+    });
+    var result = await chrome.scripting.executeScript({
+      target: { tabId: tabId, frameIds: [0] },
+      func: async function (maxPages) {
+        if (!window.JiwaiCollection) return null;
+        return window.JiwaiCollection.discoverDocumentLinks(document, location.href, { maxPages: maxPages });
+      },
+      args: [Math.max(1, Math.min(Number(maxPages) || DOCUMENT_COLLECTION_MAX_PAGES, DOCUMENT_COLLECTION_MAX_PAGES))],
+      world: 'MAIN'
+    });
+    return result[0] && result[0].result || { pages: [], total: 0, truncated: false };
+  } catch (error) {
+    return { pages: [], total: 0, truncated: false, error: error.message || '识别文档目录失败' };
+  }
+}
+
+async function createCollectionWorkerTab(task) {
+  var tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+  task.workerTabId = tab.id;
+  task.processing = false;
+  task.processingStartedAt = 0;
+  await setDocumentCollectionTask(task);
+  await chrome.tabs.update(tab.id, { url: task.pages[task.currentIndex].url });
+  return task;
+}
+
+async function startDocumentCollection(payload, sender) {
+  payload = payload || {};
+  if (!payload.kbId) return { success: false, error: '请先选择知识库' };
+  var pages = normalizeCollectionPages(payload.pages);
+  if (!pages.length) return { success: false, error: '未识别到可采集的文档页面' };
+
+  var current = await getDocumentCollectionTask();
+  if (current && (current.status === 'running' || current.status === 'paused')) {
+    return { success: false, error: '已有文档集采集任务，请先完成或取消当前任务', data: current };
+  }
+
+  var task = {
+    id: globalThis.JiwaiCollection.createTaskId(),
+    title: String(payload.title || '文档集').trim().slice(0, 240),
+    scope: String(payload.scope || ''),
+    kbId: payload.kbId,
+    kbName: String(payload.kbName || ''),
+    sourceTabId: payload.sourceTabId || (sender && sender.tab && sender.tab.id) || null,
+    workerTabId: null,
+    status: 'running',
+    pages: pages,
+    currentIndex: 0,
+    total: pages.length,
+    completed: 0,
+    failed: 0,
+    skipped: 0,
+    processing: false,
+    processingStartedAt: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    error: ''
+  };
+
+  await setDocumentCollectionTask(task);
+  await chrome.alarms.create(DOCUMENT_COLLECTION_ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
+  await createCollectionWorkerTab(task);
+  return { success: true, data: task };
+}
+
+async function readCollectionExtraction(tabId, pageUrl) {
+  var response = await extractAllFrames(tabId);
+  if (!response || !response.success || !response.data || !response.data[0]) {
+    throw new Error((response && response.error) || '未读取到页面正文');
+  }
+  var extraction = response.data[0];
+  var parts = [];
+  try {
+    for (var offset = 0; offset < extraction.markdownLength; offset += DOCUMENT_COLLECTION_CHUNK_SIZE) {
+      var chunk = await readFrameExtractionChunk(tabId, extraction.frameId, offset, DOCUMENT_COLLECTION_CHUNK_SIZE);
+      if (!chunk || !chunk.success) throw new Error((chunk && chunk.error) || '读取正文分块失败');
+      parts.push(chunk.data || '');
+    }
+  } finally {
+    await clearFrameExtraction(tabId, extraction.frameId);
+  }
+
+  var markdown = parts.join('').trim();
+  if (markdown.length < 40) throw new Error('页面正文过短，请确认页面已加载完成');
+  if (markdown.length < 5000 && /(当前页面需要登录查看|登录后查看完整内容|请先登录后查看|验证码验证)/.test(markdown)) {
+    throw new Error('页面需要登录或验证码验证，任务已暂停');
+  }
+  var title = String(extraction.title || '').replace(/\s*-\s*巨量[^-]*帮助中心\s*$/, '').trim() || '未命名文档';
+  var sourceUrl = globalThis.JiwaiCollection.canonicalizeUrl(pageUrl, pageUrl) || pageUrl;
+  var header = '';
+  if (extraction.author) header += '> 作者: ' + extraction.author + '\n';
+  if (extraction.site) header += '> 来源: [' + extraction.site + '](' + sourceUrl + ')\n';
+  if (extraction.published) header += '> 发布时间: ' + extraction.published + '\n';
+  if (header) header += '\n';
+  return {
+    title: title.replace(/\.+$/, ''),
+    content: header + markdown + '\n\n---\n来源: ' + sourceUrl,
+    url: sourceUrl,
+    adapterId: extraction.adapterId || 'generic',
+    imageCount: extraction.imageCount || 0,
+    blockCount: extraction.blockCount || 0
+  };
+}
+
+async function getCollectionHistory() {
+  var data = await chrome.storage.local.get(DOCUMENT_COLLECTION_HISTORY_KEY);
+  return data[DOCUMENT_COLLECTION_HISTORY_KEY] || {};
+}
+
+async function setCollectionHistory(history) {
+  var entries = Object.entries(history).sort(function (left, right) {
+    return (right[1].updatedAt || 0) - (left[1].updatedAt || 0);
+  }).slice(0, 1000);
+  var payload = {};
+  payload[DOCUMENT_COLLECTION_HISTORY_KEY] = Object.fromEntries(entries);
+  await chrome.storage.local.set(payload);
+}
+
+async function saveCollectionPage(task, page, extraction) {
+  var markedContent = '<!-- weknora-clip-type:collection-clip -->\n' + extraction.content;
+  var response = await autoApiRequest('POST', '/knowledge-bases/' + task.kbId + '/knowledge/manual', {
+    title: extraction.title || page.title,
+    content: markedContent,
+    status: 'publish',
+    channel: 'browser_extension'
+  });
+  if (!response || response.success === false || response.error) {
+    throw new Error((response && response.error) || '写入知识库失败');
+  }
+
+  var knowledgeId = response.data && response.data.id || '';
+  var stored = await chrome.storage.local.get('ka_clips');
+  var clips = stored.ka_clips || [];
+  clips.unshift({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    type: 'collection-clip',
+    title: extraction.title || page.title,
+    content: extraction.content.slice(0, 4000),
+    contentTruncated: extraction.content.length > 4000,
+    createdAt: new Date().toISOString(),
+    knowledgeId: knowledgeId,
+    knowledgeBaseId: task.kbId,
+    meta: {
+      url: extraction.url,
+      collectionId: task.id,
+      collectionTitle: task.title,
+      adapterId: extraction.adapterId,
+      imageCount: extraction.imageCount,
+      blockCount: extraction.blockCount
+    }
+  });
+  await chrome.storage.local.set({ ka_clips: clips.slice(0, 200) });
+
+  var history = await getCollectionHistory();
+  var historyKey = task.kbId + '|' + extraction.url;
+  history[historyKey] = {
+    knowledgeId: knowledgeId,
+    title: extraction.title || page.title,
+    contentHash: globalThis.JiwaiCollection.simpleHash(extraction.content),
+    updatedAt: Date.now()
+  };
+  await setCollectionHistory(history);
+  return knowledgeId;
+}
+
+async function finishDocumentCollection(task) {
+  task.status = task.failed > 0 && task.completed === 0 ? 'failed' : 'completed';
+  task.processing = false;
+  task.processingStartedAt = 0;
+  task.completedAt = Date.now();
+  await setDocumentCollectionTask(task);
+  await chrome.alarms.clear(DOCUMENT_COLLECTION_ALARM);
+  if (task.workerTabId) {
+    try { await chrome.tabs.remove(task.workerTabId); } catch (error) {}
+  }
+  if (task.sourceTabId) {
+    var summary = '文档集采集完成：成功 ' + task.completed + '，跳过 ' + task.skipped + '，失败 ' + task.failed;
+    chrome.tabs.sendMessage(task.sourceTabId, {
+      type: 'SHOW_NOTIFICATION',
+      payload: { msg: summary, status: task.failed ? 'info' : 'success' }
+    }).catch(function () {});
+  }
+  return task;
+}
+
+async function moveToNextCollectionPage(task) {
+  task.currentIndex++;
+  task.processing = false;
+  task.processingStartedAt = 0;
+  while (task.currentIndex < task.pages.length && task.pages[task.currentIndex].status !== 'pending') {
+    task.currentIndex++;
+  }
+  if (task.currentIndex >= task.pages.length) return finishDocumentCollection(task);
+  await setDocumentCollectionTask(task);
+  if (task.status !== 'running') return task;
+  await collectionDelay(1800);
+  await chrome.tabs.update(task.workerTabId, { url: task.pages[task.currentIndex].url });
+  return task;
+}
+
+async function processDocumentCollectionPage(sender, payload) {
+  var task = await getDocumentCollectionTask();
+  var tabId = sender && sender.tab && sender.tab.id;
+  if (!task || task.status !== 'running' || !tabId || tabId !== task.workerTabId) {
+    return { success: true, ignored: true };
+  }
+  if (task.processing && Date.now() - (task.processingStartedAt || 0) < 120000) {
+    return { success: true, ignored: true };
+  }
+
+  var page = task.pages[task.currentIndex];
+  if (!page) {
+    await finishDocumentCollection(task);
+    return { success: true };
+  }
+
+  task.processing = true;
+  task.processingStartedAt = Date.now();
+  page.status = 'processing';
+  page.attempts++;
+  page.error = '';
+  await setDocumentCollectionTask(task);
+
+  try {
+    var loadedUrl = payload && payload.url || page.url;
+    var nestedDiscovery = await discoverCollectionPagesInTab(tabId, DOCUMENT_COLLECTION_MAX_PAGES);
+    if (appendDiscoveredCollectionPages(task, nestedDiscovery.pages)) {
+      await setDocumentCollectionTask(task);
+    }
+
+    var latestTask = await getDocumentCollectionTask();
+    if (!latestTask || latestTask.id !== task.id || latestTask.status === 'cancelled') {
+      return { success: true, ignored: true };
+    }
+    task.status = latestTask.status;
+
+    if (page.navigationOnly) {
+      page.status = 'skipped';
+      page.error = '';
+      task.skipped++;
+      await setDocumentCollectionTask(task);
+      await moveToNextCollectionPage(task);
+      return { success: true, skipped: true, navigationOnly: true };
+    }
+
+    var history = await getCollectionHistory();
+    var historyKey = task.kbId + '|' + page.url;
+    if (history[historyKey]) {
+      page.status = 'skipped';
+      page.knowledgeId = history[historyKey].knowledgeId || '';
+      task.skipped++;
+      await setDocumentCollectionTask(task);
+      await moveToNextCollectionPage(task);
+      return { success: true, skipped: true };
+    }
+
+    var extraction = await readCollectionExtraction(tabId, loadedUrl);
+    var latest = await getDocumentCollectionTask();
+    if (!latest || latest.id !== task.id || latest.status === 'cancelled') {
+      return { success: true, ignored: true };
+    }
+    task.status = latest.status;
+    var knowledgeId = await saveCollectionPage(task, page, extraction);
+    latest = await getDocumentCollectionTask();
+    if (!latest || latest.id !== task.id || latest.status === 'cancelled') {
+      return { success: true, ignored: true };
+    }
+    task.status = latest.status;
+    page.status = 'completed';
+    page.title = extraction.title || page.title;
+    page.resolvedUrl = extraction.url;
+    page.knowledgeId = knowledgeId;
+    page.error = '';
+    task.completed++;
+    await setDocumentCollectionTask(task);
+    await moveToNextCollectionPage(task);
+    return { success: true, data: page };
+  } catch (error) {
+    page.error = error.message || '采集失败';
+    task.processing = false;
+    task.processingStartedAt = 0;
+    if (/(需要登录|验证码|无权访问|没有权限)/.test(page.error)) {
+      page.status = 'pending';
+      task.status = 'paused';
+      task.error = page.error;
+      await setDocumentCollectionTask(task);
+      if (task.sourceTabId) {
+        chrome.tabs.sendMessage(task.sourceTabId, {
+          type: 'SHOW_NOTIFICATION',
+          payload: { msg: page.error, status: 'error' }
+        }).catch(function () {});
+      }
+      return { success: false, paused: true, error: page.error };
+    }
+    if (page.attempts < DOCUMENT_COLLECTION_MAX_ATTEMPTS) {
+      page.status = 'pending';
+      await setDocumentCollectionTask(task);
+      await collectionDelay(2200);
+      await chrome.tabs.reload(tabId);
+      return { success: false, retrying: true, error: page.error };
+    }
+    page.status = 'failed';
+    task.failed++;
+    await setDocumentCollectionTask(task);
+    await moveToNextCollectionPage(task);
+    return { success: false, error: page.error };
+  }
+}
+
+async function pauseDocumentCollection() {
+  var task = await getDocumentCollectionTask();
+  if (!task || task.status !== 'running') return { success: false, error: '没有正在运行的采集任务' };
+  task.status = 'paused';
+  task.error = '';
+  await setDocumentCollectionTask(task);
+  return { success: true, data: task };
+}
+
+async function resumeDocumentCollection() {
+  var task = await getDocumentCollectionTask();
+  if (!task || (task.status !== 'paused' && task.status !== 'running')) return { success: true, ignored: true };
+  if (task.processing && Date.now() - (task.processingStartedAt || 0) < 120000) {
+    return { success: true, data: task };
+  }
+  task.status = 'running';
+  task.processing = false;
+  task.processingStartedAt = 0;
+  var page = task.pages[task.currentIndex];
+  if (!page) {
+    await finishDocumentCollection(task);
+    return { success: true, data: task };
+  }
+  if (page.status === 'processing') page.status = 'pending';
+  await setDocumentCollectionTask(task);
+  await chrome.alarms.create(DOCUMENT_COLLECTION_ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
+  try {
+    var tab = task.workerTabId ? await chrome.tabs.get(task.workerTabId) : null;
+    if (!tab) throw new Error('采集标签页不存在');
+    await chrome.tabs.update(task.workerTabId, { url: page.url });
+  } catch (error) {
+    await createCollectionWorkerTab(task);
+  }
+  return { success: true, data: task };
+}
+
+async function cancelDocumentCollection() {
+  var task = await getDocumentCollectionTask();
+  if (!task || (task.status !== 'running' && task.status !== 'paused')) {
+    return { success: false, error: '没有可取消的采集任务' };
+  }
+  task.status = 'cancelled';
+  task.processing = false;
+  task.processingStartedAt = 0;
+  task.completedAt = Date.now();
+  await setDocumentCollectionTask(task);
+  await chrome.alarms.clear(DOCUMENT_COLLECTION_ALARM);
+  if (task.workerTabId) {
+    try { await chrome.tabs.remove(task.workerTabId); } catch (error) {}
+  }
+  return { success: true, data: task };
+}
+
 // === chatbot.weixin.qq.com 扫码登录 API Helper ===
 // 独立于 WeKnora 后端的第二条认证链路
 // 扫码登录成功后，使用固定 API 地址 + Bearer token 访问接口
@@ -325,10 +774,30 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
   if (alarm.name === TOKEN_KEEPALIVE_ALARM) {
     stopTokenKeepalive();
   }
+  if (alarm.name === DOCUMENT_COLLECTION_ALARM) {
+    getDocumentCollectionTask().then(function (task) {
+      if (task && task.status === 'running') resumeDocumentCollection();
+    }).catch(function () {});
+  }
 });
 
 // SW 启动时检查是否需要保活
 startTokenKeepalive();
+getDocumentCollectionTask().then(function (task) {
+  if (task && task.status === 'running') resumeDocumentCollection();
+}).catch(function () {});
+
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  getDocumentCollectionTask().then(function (task) {
+    if (!task || task.workerTabId !== tabId || task.status !== 'running') return;
+    task.status = 'paused';
+    task.workerTabId = null;
+    task.processing = false;
+    task.processingStartedAt = 0;
+    task.error = '采集标签页已关闭，任务已暂停';
+    return setDocumentCollectionTask(task);
+  }).catch(function () {});
+});
 
 // === 右键菜单 ===
 // 防止并发注册
@@ -515,7 +984,7 @@ async function handleMessage(msg, sender) {
       try {
         var tabId = sender && sender.tab && sender.tab.id;
         if (!tabId) return { success: false, error: '无法获取标签页' };
-        var dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 90 });
+        var dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'jpeg', quality: 90 });
         return { success: true, dataUrl: dataUrl };
       } catch (err) {
         return { success: false, error: err.message || '截图失败' };
@@ -541,6 +1010,32 @@ async function handleMessage(msg, sender) {
     case 'CLEAR_FRAME_EXTRACTION':
       if (!sender || !sender.tab || !sender.tab.id) return { success: true };
       return clearFrameExtraction(sender.tab.id, msg.payload && msg.payload.frameId);
+
+    case 'GET_DOCUMENT_COLLECTION_TASK':
+      return { success: true, data: await getDocumentCollectionTask() };
+
+    case 'DISCOVER_DOCUMENT_COLLECTION': {
+      var discoveryTabId = msg.payload && msg.payload.tabId || sender && sender.tab && sender.tab.id;
+      if (!discoveryTabId) return { success: false, error: '无法获取当前标签页' };
+      var discovery = await discoverCollectionPagesInTab(discoveryTabId, msg.payload && msg.payload.maxPages);
+      if (discovery.error) return { success: false, error: discovery.error };
+      return { success: true, data: discovery };
+    }
+
+    case 'START_DOCUMENT_COLLECTION':
+      return startDocumentCollection(msg.payload, sender);
+
+    case 'PAUSE_DOCUMENT_COLLECTION':
+      return pauseDocumentCollection();
+
+    case 'RESUME_DOCUMENT_COLLECTION':
+      return resumeDocumentCollection();
+
+    case 'CANCEL_DOCUMENT_COLLECTION':
+      return cancelDocumentCollection();
+
+    case 'DOCUMENT_COLLECTION_PAGE_READY':
+      return processDocumentCollectionPage(sender, msg.payload || {});
 
     // === WeKnora API 相关 ===
     case 'VALIDATE_CONFIG':
@@ -1051,6 +1546,9 @@ async function syncClipToKb(clip) {
 
     // 构建要保存到知识库的内容（去掉截图数据，只同步文本）
     var contentForKb = clip.content || '';
+    if (clip.screenshot) {
+      contentForKb += '\n\n![网页截取](' + clip.screenshot + ')';
+    }
     var clipTypeMarker = '';
     if (clip && clip.type) {
       clipTypeMarker = '<!-- weknora-clip-type:' + clip.type + ' -->\n';

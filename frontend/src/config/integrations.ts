@@ -3,7 +3,7 @@ import type { DeploymentCapabilityKey } from './deploymentCapabilities'
 export const CHROME_EXTENSION_URL =
   'https://chromewebstore.google.com/detail/jpemjbopikggjlmikmclgbmkhhopjdgd?utm_source=item-share-cb'
 
-export const CHROME_EXTENSION_DOWNLOAD_URL = '/downloads/jiwai-knowledge-assistant-1.2.0.zip'
+export const CHROME_EXTENSION_DOWNLOAD_URL = '/downloads/jiwai-knowledge-assistant-1.3.0.zip'
 
 export const CLAWHUB_SKILL_URL = 'https://clawhub.ai/lyingbug/weknora'
 

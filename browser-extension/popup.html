@@ -522,7 +522,7 @@ body { width: 380px; max-height: 680px; font-family: -apple-system, "PingFang SC
 .clip-list-tag.tag-green { background: var(--primary-06); color: #3cc274; }
 .clip-list-tag.tag-gray { background: var(--border-light); color: #aab0ad; }
 
-/* ===== 3 操作入口 — 圆形图标按钮（卡片内底部） ===== */
+/* ===== 采集操作入口 ===== */
 .action-icons {
   display: flex;
   align-items: center;
@@ -570,6 +570,11 @@ body { width: 380px; max-height: 680px; font-family: -apple-system, "PingFang SC
 .action-icon-btn:active {
   transform: scale(0.93);
 }
+.action-icon-btn:focus-visible,
+.collection-progress-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 
 /* 中间主按钮（选择剪藏）— 稍大 + 绿色 */
 .action-icon-primary {
@@ -587,6 +592,73 @@ body { width: 380px; max-height: 680px; font-family: -apple-system, "PingFang SC
   background: var(--primary-dark);
   color: var(--white);
   box-shadow: 0 4px 16px var(--primary-30);
+}
+
+.action-icon-btn:disabled {
+  cursor: wait;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+}
+
+.collection-progress {
+  display: none;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border-light);
+  background: #f8faf9;
+}
+.collection-progress.show { display: block; }
+.collection-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.collection-progress-copy { flex: 1; min-width: 0; }
+.collection-progress-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.collection-progress-detail {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.collection-progress-actions { display: flex; gap: 3px; }
+.collection-progress-btn {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.collection-progress-btn:hover { color: var(--primary); background: var(--primary-04); }
+.collection-progress-btn svg { width: 14px; height: 14px; }
+.collection-progress-track {
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: #e5e9e7;
+  overflow: hidden;
+}
+.collection-progress-bar {
+  width: 100%;
+  height: 100%;
+  background: var(--primary);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.25s ease;
 }
 
 /* hover tooltip */
@@ -1179,9 +1251,30 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; font-weight: 600; }
             <button class="action-icon-btn action-icon-primary" id="btn-smart-clip" data-tip="智能剪藏">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             </button>
+            <button class="action-icon-btn" id="btn-collection-clip" data-tip="采集整个文档集" aria-label="采集整个文档集">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v5H6z"/><path d="M4 10h16v5H4z"/><path d="M2 17h20v4H2z"/></svg>
+            </button>
             <button class="action-icon-btn" id="btn-quick-note" data-tip="速记">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
             </button>
+          </div>
+          <div class="collection-progress" id="collection-progress" role="status" aria-live="polite">
+            <div class="collection-progress-row">
+              <div class="collection-progress-copy">
+                <div class="collection-progress-title" id="collection-progress-title">正在采集文档集</div>
+                <div class="collection-progress-detail" id="collection-progress-detail"></div>
+              </div>
+              <div class="collection-progress-actions">
+                <button class="collection-progress-btn" id="btn-collection-toggle" title="暂停" aria-label="暂停文档集采集">
+                  <svg class="collection-icon-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+                  <svg class="collection-icon-play" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M8 5v14l11-7z"/></svg>
+                </button>
+                <button class="collection-progress-btn" id="btn-collection-cancel" title="取消任务" aria-label="取消文档集采集">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="collection-progress-track" id="collection-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="collection-progress-bar" id="collection-progress-bar"></div></div>
           </div>
         </div>
 

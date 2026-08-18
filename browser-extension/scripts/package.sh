@@ -22,6 +22,7 @@ mkdir -p "${STAGING_DIR}/icons" "${OUTPUT_DIR}"
 cp \
   "${EXTENSION_DIR}/manifest.json" \
   "${EXTENSION_DIR}/background.js" \
+  "${EXTENSION_DIR}/collection.js" \
   "${EXTENSION_DIR}/content.js" \
   "${EXTENSION_DIR}/content.css" \
   "${EXTENSION_DIR}/defuddle.js" \
