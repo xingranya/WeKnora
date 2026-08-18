@@ -126,6 +126,50 @@ vm.runInContext(collectionSource, context, { filename: 'collection.js' })
 vm.runInContext(backgroundSource, context, { filename: 'background.js' })
 await new Promise((resolve) => setTimeout(resolve, 0))
 
+assert.ok(
+  context.scoreFrameExtractionCandidate({ adapterId: 'feishu', matchedSite: true, markdownLength: 10000 }) >
+  context.scoreFrameExtractionCandidate({ adapterId: 'oceanengine-shell', matchedSite: false, markdownLength: 500, incomplete: true }),
+  '完整飞书 frame 必须优先于巨量外壳'
+)
+
+let frameExtractionPass = 0
+chrome.scripting.executeScript = async (options) => {
+  if (options.files) return []
+  const source = options.func ? options.func.toString() : ''
+  if (source.includes('tt-docs-component')) {
+    return [{ frameId: 0, result: { hasEmbeddedDocument: true, frameReady: true } }]
+  }
+  frameExtractionPass++
+  const shell = {
+    frameId: 0,
+    result: {
+      adapterId: 'oceanengine-shell',
+      incomplete: true,
+      matchedSite: false,
+      markdownLength: 149
+    }
+  }
+  if (frameExtractionPass === 1) return [shell]
+  return [
+    shell,
+    {
+      frameId: 7,
+      result: {
+        adapterId: 'feishu',
+        incomplete: false,
+        matchedSite: true,
+        markdownLength: 7182,
+        blockCount: 88,
+        imageCount: 1
+      }
+    }
+  ]
+}
+const frameResult = await context.extractAllFrames(88)
+assert.equal(frameResult.success, true)
+assert.equal(frameResult.data[0].frameId, 7, '第二轮就绪的飞书 frame 应替代首轮巨量外壳')
+assert.equal(frameResult.data[0].adapterId, 'feishu')
+
 vm.runInContext(`
   collectionDelay = async function () {};
   var __nestedDiscoveryPending = true;

@@ -138,6 +138,8 @@
           '<tr><td><div data-block-type="text">归档</div></td><td><div data-block-type="text">每周完成</div></td></tr>',
           '</tbody></table></div>',
           '<div data-block-id="9" data-record-id="image" data-block-type="image"><img alt="流程图" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="></div>',
+          '<div data-block-id="10" data-record-id="view" data-block-type="view"><div data-block-id="10-1" data-record-id="file" data-block-type="file">附件不支持打印 加载失败，点击重试 产品说明书<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="></div></div>',
+          '<div data-block-id="11" data-record-id="placeholder" data-block-type="image">加载失败，点击重试 操作截图<img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="></div>',
           '</div>'
         ].join('');
         var result = await window.JiwaiPageExtractor.extract({
@@ -149,6 +151,20 @@
         assert(result.markdown.indexOf('> 💡 **重点提示**') !== -1, '飞书 Callout 或加粗样式未保留');
         assert(result.markdown.indexOf('| 项目 | 要求 |') !== -1, '飞书表格未保留');
         assert(result.markdown.indexOf('![流程图](data:image/gif;base64,') !== -1, '飞书图片未保留');
+        assert(result.markdown.indexOf('> 附件：产品说明书') !== -1, '飞书附件未转换为附件说明');
+        assert(result.markdown.indexOf('data:image/svg+xml') === -1, '加载失败占位图被错误内嵌');
+      }
+
+      async function testOceanEngineEmbeddedShell() {
+        var fixture = resetFixture();
+        fixture.innerHTML = '<main><h1>巨量外壳标题</h1><tt-docs-component src="https://example.feishu.cn/docx/test"></tt-docs-component><p>上一篇</p><p>下一篇</p></main>';
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: 'https://support.oceanengine.com/support/content/147621',
+          maxWaitMs: 300
+        });
+        assert(result.adapterId === 'oceanengine-shell', '巨量内嵌文档外壳未单独标记');
+        assert(result.incomplete === true, '巨量内嵌文档外壳未标记为不完整');
       }
 
       async function testDocumentCollectionDiscovery() {
@@ -209,6 +225,7 @@
       testEmbeddedOfficeHosts();
       testLarkOpenDocLinkSanitizing();
       await testFeishuBlockSemantics();
+      await testOceanEngineEmbeddedShell();
       await testDocumentCollectionDiscovery();
 
       var status = failures.length ? 'fail' : 'pass';

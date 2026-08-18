@@ -435,6 +435,13 @@
     return clean ? marker + clean + marker : '';
   }
 
+  function cleanEmbeddedPlaceholderLabel(value) {
+    return normalizeWhitespace(value)
+      .replace(/附件不支持打印|加载失败|点击重试/g, '')
+      .replace(/^[\s，,、:：-]+/, '')
+      .trim();
+  }
+
   async function blobToDataURL(blob) {
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
@@ -465,10 +472,35 @@
     }
   }
 
+  function getRichImageSource(image) {
+    if (!image) return '';
+    var candidates = [
+      image.currentSrc,
+      image.getAttribute('src'),
+      image.getAttribute('data-src'),
+      image.getAttribute('data-original'),
+      image.getAttribute('data-lazy-src')
+    ].filter(Boolean);
+    var priorities = [/^https?:|^blob:/i, /^data:image\/(?!svg\+xml)/i, /^data:image\/svg\+xml/i];
+    for (var priorityIndex = 0; priorityIndex < priorities.length; priorityIndex++) {
+      for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+        if (priorities[priorityIndex].test(candidates[candidateIndex])) return candidates[candidateIndex];
+      }
+    }
+    return candidates[0] || '';
+  }
+
   async function resolveRichImage(image, context, fallbackAlt) {
-    var source = image && (image.currentSrc || image.getAttribute('src') || image.getAttribute('data-src'));
+    var source = getRichImageSource(image);
     if (!source) return '';
     var alt = normalizeWhitespace((image.getAttribute('alt') || fallbackAlt || '图片').replace(/^飞书文档\s*-\s*/, '')) || '图片';
+    if (/^data:image\/svg\+xml/i.test(source) && /(附件不支持打印|加载失败|点击重试)/.test(alt)) {
+      if (context.placeholderSources.has(source)) return '';
+      context.placeholderSources.add(source);
+      context.imageCache.set(source, '');
+      var placeholderLabel = cleanEmbeddedPlaceholderLabel(alt);
+      return placeholderLabel ? '> 图片或附件未加载：' + placeholderLabel : '> 图片或附件未加载';
+    }
     if (context.imageCache.has(source)) {
       var cached = context.imageCache.get(source);
       return cached ? '![' + escapeMarkdown(alt) + '](' + cached + ')' : '> 图片：' + alt;
@@ -612,21 +644,48 @@
 
   async function serializeFeishuBlock(block, context) {
     var type = String(block.getAttribute('data-block-type') || '').toLowerCase();
+    if (type === 'file') {
+      var fileText = cleanEmbeddedPlaceholderLabel(block.innerText || block.textContent || '')
+        .replace(/没有权限访问/g, '')
+        .trim();
+      var fileLink = block.querySelector('a[href]');
+      var fileHref = fileLink && absoluteUrl(fileLink.getAttribute('href'), context.url);
+      var fileLine = fileHref && fileText
+        ? '> 附件：[' + escapeMarkdown(fileText) + '](' + fileHref + ')'
+        : (fileText ? '> 附件：' + escapeMarkdown(fileText) : '> 附件');
+      var coverImages = Array.prototype.slice.call(block.querySelectorAll('img'));
+      coverImages.sort(function (left, right) {
+        return (/^https?:|^blob:/i.test(getRichImageSource(right)) ? 1 : 0) -
+          (/^https?:|^blob:/i.test(getRichImageSource(left)) ? 1 : 0);
+      });
+      var cover = coverImages[0];
+      var coverMarkdown = cover && /^https?:|^blob:/i.test(getRichImageSource(cover))
+        ? await resolveRichImage(cover, context, fileText || '附件封面')
+        : '';
+      return coverMarkdown ? fileLine + '\n\n' + coverMarkdown : fileLine;
+    }
     var blockImages = Array.prototype.slice.call(block.querySelectorAll('img'));
     if (blockImages.length) {
       await Promise.all(blockImages.map(function (image) {
         return resolveRichImage(image, context, normalizeWhitespace(block.innerText || block.textContent || '') || '图片');
       }));
     }
-    if (type === 'page' || type === 'table_cell' || type === 'grid_column') {
+    if (type === 'page' || type === 'table_cell' || type === 'grid_column' || type === 'view') {
       return serializeFeishuContainer(block, context);
     }
     if (type === 'table') return serializeFeishuTable(block, context);
     if (type === 'grid') return serializeFeishuContainer(block, context);
     if (type === 'image') {
-      var image = block.querySelector('img');
+      var images = Array.prototype.slice.call(block.querySelectorAll('img'));
+      images.sort(function (left, right) {
+        return (/^https?:|^blob:/i.test(getRichImageSource(right)) ? 1 : 0) -
+          (/^https?:|^blob:/i.test(getRichImageSource(left)) ? 1 : 0);
+      });
+      var image = images[0];
       var imageAlt = normalizeWhitespace(block.innerText || block.textContent || '') || '图片';
-      return image ? resolveRichImage(image, context, imageAlt) : '> 图片：' + imageAlt;
+      if (image) return resolveRichImage(image, context, imageAlt);
+      var cleanedImageAlt = cleanEmbeddedPlaceholderLabel(imageAlt);
+      return cleanedImageAlt ? '> 图片未加载：' + cleanedImageAlt : '> 图片未加载';
     }
     if (/^heading[1-6]$/.test(type)) {
       var level = Number(type.slice(-1));
@@ -674,7 +733,8 @@
       imageCount: 0,
       totalImageChars: 0,
       maxImageChars: 24 * 1024 * 1024,
-      imagePayloads: []
+      imagePayloads: [],
+      placeholderSources: new Set()
     };
     var records = new Map();
     global.__jiwaiExtractionStage = { stage: 'scroll', blockCount: 0, imageCount: 0 };
@@ -689,15 +749,47 @@
           var blockID = Number(block.getAttribute('data-block-id'));
           var key = recordID || ('block-' + blockID + '-' + blockIndex);
           var existing = records.get(key);
-          var htmlLength = block.innerHTML.length;
-          if (!existing || htmlLength > existing.htmlLength) {
+          var clone = block.cloneNode(true);
+          var sourceImages = Array.prototype.slice.call(block.querySelectorAll('img'));
+          var clonedImages = Array.prototype.slice.call(clone.querySelectorAll('img'));
+          var imageQuality = 0;
+          for (var imageIndex = 0; imageIndex < sourceImages.length; imageIndex++) {
+            var resolvedSource = getRichImageSource(sourceImages[imageIndex]);
+            if (clonedImages[imageIndex] && resolvedSource) clonedImages[imageIndex].setAttribute('src', resolvedSource);
+            if (/^https?:|^blob:/i.test(resolvedSource)) imageQuality += 100000;
+            else if (/^data:image\/(?!svg\+xml)/i.test(resolvedSource)) imageQuality += 60000;
+            else if (/^data:image\/svg\+xml/i.test(resolvedSource)) imageQuality -= 5000;
+          }
+          var htmlLength = clone.innerHTML.length;
+          var quality = imageQuality + normalizeWhitespace(block.innerText || block.textContent || '').length * 100 + htmlLength;
+          if (!existing || quality > existing.quality) {
             records.set(key, {
               order: Number.isFinite(blockID) ? blockID : records.size + 100000,
               htmlLength: htmlLength,
-              node: block.cloneNode(true)
+              quality: quality,
+              node: clone
             });
           }
         }
+      }
+    }
+
+    async function waitForVisibleAssets() {
+      var stableRounds = 0;
+      var lastSignature = '';
+      for (var attempt = 0; attempt < 5; attempt++) {
+        var visibleImages = Array.prototype.slice.call(doc.querySelectorAll('.docx-page-block img')).filter(function (image) {
+          var rect = image.getBoundingClientRect();
+          return rect.bottom >= 0 && rect.top <= global.innerHeight;
+        });
+        var signature = visibleImages.map(function (image) {
+          return [image.currentSrc || image.getAttribute('src') || image.getAttribute('data-src') || '', image.complete ? 1 : 0, image.naturalWidth || 0].join('|');
+        }).join('::');
+        if (signature === lastSignature && visibleImages.every(function (image) { return image.complete; })) stableRounds++;
+        else stableRounds = 0;
+        lastSignature = signature;
+        if (stableRounds >= 2) break;
+        await delay(120);
       }
     }
 
@@ -710,20 +802,21 @@
       await delay(180);
     }
 
-    for (var step = 0; step < 120; step++) {
+    for (var step = 0; step < 240; step++) {
       captureVisibleBlocks();
       global.__jiwaiExtractionStage = { stage: 'scroll', blockCount: records.size, step: step };
       if (!scrollContainer) break;
       var maxTop = Math.max(scrollContainer.scrollHeight - scrollContainer.clientHeight, 0);
       if (scrollContainer.scrollTop >= maxTop - 2) {
-        await delay(220);
+        await waitForVisibleAssets();
         captureVisibleBlocks();
         break;
       }
-      var nextTop = Math.min(maxTop, scrollContainer.scrollTop + Math.max(scrollContainer.clientHeight * 2, 1200));
+      var nextTop = Math.min(maxTop, scrollContainer.scrollTop + Math.max(scrollContainer.clientHeight * 0.9, 420));
       scrollContainer.scrollTop = nextTop;
       scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await delay(550);
+      await delay(180);
+      await waitForVisibleAssets();
     }
 
     if (scrollContainer) {
@@ -740,7 +833,7 @@
     var seenImages = new Set();
     orderedRecords.forEach(function (record) {
       Array.prototype.slice.call(record.node.querySelectorAll('img')).forEach(function (image) {
-        var source = image.getAttribute('src') || image.getAttribute('data-src') || '';
+        var source = getRichImageSource(image);
         if (!source || seenImages.has(source)) return;
         seenImages.add(source);
         imageEntries.push({ image: image, alt: normalizeWhitespace(record.node.innerText || record.node.textContent || '') || '图片' });
@@ -821,8 +914,9 @@
         description: getMetaContent(doc, 'description') || '',
         site: adapter.name,
         published: getMetaContent(doc, 'article:published_time'),
-        matchedSite: true,
-        adapterId: adapter.id
+        matchedSite: false,
+        adapterId: 'oceanengine-shell',
+        incomplete: true
       };
     }
     var markdown = await materializeVirtualContent(selected.element, selected.roots, adapter, url);

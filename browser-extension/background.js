@@ -112,50 +112,108 @@ async function getConfigData() {
   };
 }
 
-async function extractAllFrames(tabId) {
+function scoreFrameExtractionCandidate(candidate) {
+  if (!candidate) return -Infinity;
+  var score = Number(candidate.markdownLength) || 0;
+  if (candidate.matchedSite) score += 100000;
+  if (candidate.adapterId === 'feishu') score += 300000;
+  if (candidate.incomplete) score -= 500000;
+  return score;
+}
+
+async function waitForEmbeddedDocumentFrame(tabId) {
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tabId, allFrames: true },
-      files: ['extractors.js']
-    });
-    var injections = await chrome.scripting.executeScript({
-      target: { tabId: tabId, allFrames: true },
+    var result = await chrome.scripting.executeScript({
+      target: { tabId: tabId, frameIds: [0] },
       func: async function () {
-        if (!window.JiwaiPageExtractor) return null;
-        try {
-          var result = await window.JiwaiPageExtractor.extract({
-            document: document,
-            url: location.href,
-            maxWaitMs: 5000
-          });
-          window.__jiwaiFrameExtraction = result;
-          return {
-            title: result.title || '',
-            author: result.author || '',
-            description: result.description || '',
-            site: result.site || '',
-            published: result.published || '',
-            matchedSite: !!result.matchedSite,
-            adapterId: result.adapterId || 'generic',
-            imageCount: result.imageCount || 0,
-            blockCount: result.blockCount || 0,
-            markdownLength: (result.markdown || '').length
-          };
-        } catch (error) {
-          return null;
+        var host = document.querySelector('tt-docs-component');
+        if (!host) return { hasEmbeddedDocument: false, frameReady: false };
+        for (var attempt = 0; attempt < 32; attempt++) {
+          var frame = host.shadowRoot && host.shadowRoot.querySelector('iframe');
+          if (frame && /^https?:/i.test(frame.src || '')) {
+            return { hasEmbeddedDocument: true, frameReady: true };
+          }
+          await new Promise(function (resolve) { setTimeout(resolve, 250); });
         }
+        return { hasEmbeddedDocument: true, frameReady: false };
       }
     });
-    var candidates = injections.map(function (injection) {
-      if (!injection.result || injection.result.markdownLength <= 80) return null;
-      return Object.assign({ frameId: injection.frameId }, injection.result);
-    }).filter(Boolean);
+    return result[0] && result[0].result || { hasEmbeddedDocument: false, frameReady: false };
+  } catch (error) {
+    return { hasEmbeddedDocument: false, frameReady: false };
+  }
+}
+
+async function runFrameExtractionPass(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tabId, allFrames: true },
+    files: ['extractors.js']
+  });
+  var injections = await chrome.scripting.executeScript({
+    target: { tabId: tabId, allFrames: true },
+    func: async function () {
+      if (!window.JiwaiPageExtractor) return null;
+      try {
+        var result = await window.JiwaiPageExtractor.extract({
+          document: document,
+          url: location.href,
+          maxWaitMs: 5000
+        });
+        window.__jiwaiFrameExtraction = result;
+        return {
+          title: result.title || '',
+          author: result.author || '',
+          description: result.description || '',
+          site: result.site || '',
+          published: result.published || '',
+          matchedSite: !!result.matchedSite,
+          adapterId: result.adapterId || 'generic',
+          incomplete: !!result.incomplete,
+          imageCount: result.imageCount || 0,
+          blockCount: result.blockCount || 0,
+          markdownLength: (result.markdown || '').length
+        };
+      } catch (error) {
+        return null;
+      }
+    }
+  });
+  return injections.map(function (injection) {
+    if (!injection.result || injection.result.markdownLength <= 80) return null;
+    return Object.assign({ frameId: injection.frameId }, injection.result);
+  }).filter(Boolean);
+}
+
+async function extractAllFrames(tabId) {
+  try {
+    var readiness = await waitForEmbeddedDocumentFrame(tabId);
+    var attempts = readiness.hasEmbeddedDocument ? 3 : 1;
+    var candidateByFrame = new Map();
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      var passCandidates = await runFrameExtractionPass(tabId);
+      passCandidates.forEach(function (candidate) {
+        var existing = candidateByFrame.get(candidate.frameId);
+        if (!existing || scoreFrameExtractionCandidate(candidate) > scoreFrameExtractionCandidate(existing)) {
+          candidateByFrame.set(candidate.frameId, candidate);
+        }
+      });
+      var completeEmbedded = passCandidates.some(function (candidate) {
+        return candidate.adapterId === 'feishu' && !candidate.incomplete && candidate.markdownLength > 1000;
+      });
+      if (!readiness.hasEmbeddedDocument || completeEmbedded) break;
+      await new Promise(function (resolve) { setTimeout(resolve, 900); });
+    }
+
+    var candidates = Array.from(candidateByFrame.values()).filter(function (candidate) {
+      return !candidate.incomplete;
+    });
     candidates.sort(function (left, right) {
-      var leftScore = left.markdownLength + (left.matchedSite ? 100000 : 0);
-      var rightScore = right.markdownLength + (right.matchedSite ? 100000 : 0);
-      return rightScore - leftScore;
+      return scoreFrameExtractionCandidate(right) - scoreFrameExtractionCandidate(left);
     });
     var best = candidates[0];
+    if (readiness.hasEmbeddedDocument && (!best || best.adapterId !== 'feishu')) {
+      return { success: false, error: '内嵌飞书文档尚未加载完成，请保持页面打开后重试' };
+    }
     if (!best) return { success: true, data: [] };
 
     return {

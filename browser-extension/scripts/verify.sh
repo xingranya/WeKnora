@@ -10,7 +10,7 @@ node --check "${EXTENSION_DIR}/content.js"
 node --check "${EXTENSION_DIR}/extractors.js"
 node --check "${EXTENSION_DIR}/popup.js"
 node --check "${EXTENSION_DIR}/sidepanel.js"
-jq -e '.manifest_version == 3 and .version == "1.3.0" and (.content_scripts[0].js | index("collection.js")) and (.content_scripts[0].js | index("extractors.js"))' \
+jq -e '.manifest_version == 3 and .version == "1.3.1" and (.content_scripts[0].js | index("collection.js")) and (.content_scripts[0].js | index("extractors.js"))' \
   "${EXTENSION_DIR}/manifest.json" >/dev/null
 
 node "${EXTENSION_DIR}/tests/run-background-test.mjs"

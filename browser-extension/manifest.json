@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqvFsG0/cD9+msSH5H8quM6j85MCesfPNpWOxNl1PhJznqyw9SAdCAV4obBO8ISxQ5Gz09zpg+S2tY3q/Yn0qyao7ES8TWY3+9T4B4PebQIxpfAqWSm+l3Fd4YvzeDRVHqyTY+36GHZVvgrT1Jjj2h42yJOb/ce5M47eXmt50pk0h6DCZ4rNnIig+4XxndnNerCVdENjuY82ABi7UsdsPYh/LSqUMVVlGeWkbwk3+2JDYxdR2h39rHHIAJD7evggCbiWg1xQ+ob1V7lAUyb7xdfDizYhRWW1wW2nNWg5PL/KFGWJ9hJ1UYSnTGak7RiN1g4iQhVMiwYC+A/4FGxS5nwIDAQAB",
   "name": "见外知识库助手",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "见外知识库浏览器插件，支持动态网页与文档集采集、侧边栏问答和 Markdown 笔记",
   "icons": {
     "16": "icons/icon16.png",

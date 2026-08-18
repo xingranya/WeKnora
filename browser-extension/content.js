@@ -2,7 +2,7 @@
   'use strict';
 
   // 防止重复注入 — 用版本号区分
-  var KA_VERSION = 13;
+  var KA_VERSION = 14;
   if (window.__kaContentVersion === KA_VERSION) {
     // 已注入过相同版本，但确保消息监听器仍然存在
     if (typeof window.ensureMessageListener === 'function') {
@@ -264,6 +264,10 @@
       } catch (e) {
         enhanced = null;
       }
+    }
+    if (enhanced && enhanced.incomplete) {
+      showNotification('内嵌文档尚未加载完成，请保持页面打开后重试', 'error');
+      return;
     }
     var defuddled = enhanced && enhanced.matchedSite ? null : extractWithDefuddle();
     var enhancedLength = enhanced && enhanced.markdown ? enhanced.markdown.length : 0;
