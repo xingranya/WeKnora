@@ -36,7 +36,7 @@ test('见外知识库安装包使用稳定的静态下载地址', () => {
 })
 
 test('见外浏览器插件使用公司品牌版本和独立下载地址', () => {
-  assert.equal(CHROME_EXTENSION_DOWNLOAD_URL, '/downloads/jiwai-knowledge-assistant-1.2.0.crx')
+  assert.equal(CHROME_EXTENSION_DOWNLOAD_URL, '/downloads/jiwai-knowledge-assistant-1.2.0.zip')
   for (const [localeName, locale] of Object.entries(localeBundles)) {
     assert.match(locale.integrations.chrome.storeMeta, /v1\.2\.0/, `${localeName} 插件版本不是 v1.2.0`)
   }

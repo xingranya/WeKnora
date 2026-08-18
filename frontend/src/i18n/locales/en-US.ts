@@ -6032,7 +6032,7 @@ export default {
         },
         install: {
           title: 'Install the extension',
-          desc: 'Download the CRX above, open chrome://extensions or edge://extensions, enable Developer mode, and drag the file onto the page.'
+          desc: 'Download and extract the ZIP package, open chrome://extensions or edge://extensions, enable Developer mode, select Load unpacked, and choose the folder containing manifest.json.'
         },
         connect: {
           title: 'Connect in the extension',
@@ -6043,9 +6043,9 @@ export default {
       copy: 'Copy',
       copySuccess: 'API URL copied',
       installCta: 'Download extension',
-      installCtaHint: 'Internal CRX package · follow the steps after download',
+      installCtaHint: 'ZIP package · extract and load the extension',
       storeMeta: '见外 Knowledge Base Assistant · v1.2.0',
-      installGuide: 'When prompted, confirm Add extension or Keep to finish the installation.'
+      installGuide: 'Extract the download, select Load unpacked on the extensions page, and choose the folder containing manifest.json.'
     },
     claw: {
       title: '见外知识库',

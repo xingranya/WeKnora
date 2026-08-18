@@ -355,9 +355,9 @@ export default {
       copy: '복사',
       copySuccess: 'API 주소가 복사되었습니다',
       installCta: '확장 프로그램 다운로드',
-      installCtaHint: '내부 CRX 파일 · 다운로드 후 아래 단계 진행',
+      installCtaHint: 'ZIP 설치 파일 · 압축 해제 후 확장 프로그램 로드',
       storeMeta: '见外 지식베이스 도우미 · v1.2.0',
-      installGuide: '확인 창이 나타나면 “확장 프로그램 추가” 또는 “유지”를 선택하세요.',
+      installGuide: '파일의 압축을 푼 뒤 확장 프로그램 페이지에서 “압축해제된 확장 프로그램을 로드합니다”를 선택하고 manifest.json이 있는 폴더를 지정하세요.',
       steps: {
         connect: {
           title: '확장에서 연결',
@@ -365,7 +365,7 @@ export default {
         },
         install: {
           title: 'Chrome 확장 설치',
-          desc: '위의 CRX 파일을 다운로드한 뒤 chrome://extensions 또는 edge://extensions를 열고 개발자 모드를 켠 다음 파일을 페이지로 끌어다 놓으세요.'
+          desc: 'ZIP 파일을 다운로드하고 압축을 푼 뒤 chrome://extensions 또는 edge://extensions를 열어 개발자 모드를 켜고 “압축해제된 확장 프로그램을 로드합니다”에서 manifest.json이 있는 폴더를 선택하세요.'
         },
         port: {
           title: '데스크톱: 고정 포트(권장)',
