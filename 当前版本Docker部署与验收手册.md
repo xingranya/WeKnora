@@ -1,6 +1,6 @@
 # WeKnora 当前版本 Docker 部署与验收手册
 
-最后现场核验：2026-08-18 13:45（Asia/Shanghai）
+最后现场核验：2026-08-18 18:03（Asia/Shanghai）
 
 本文记录见外传媒当前 WeKnora 分支在远端生产机上的 Docker 部署方式、配置边界、验收门槛和回滚方法。所有命令均不得包含 SSH 密码、API Key、数据库密码或模型凭据。
 
@@ -13,7 +13,7 @@
 | 远端仓库 | `/home/fox/WeKnora` |
 | Git 远端 | `https://github.com/xingranya/WeKnora.git` |
 | 生产分支 | `codex/jiwai-branding` |
-| 当前提交 | `deaa8ed7b16abffbe62d2f829533952c1c7acb3a` |
+| 生产功能提交 | `5b492baa5dbee50744c9532ccdc1623939287245` |
 | Compose 项目名 | `weknora` |
 | 前端地址 | `http://100.78.64.62:8081` |
 | 后端地址 | `http://100.78.64.62:8080` |
@@ -26,18 +26,18 @@
 
 | 服务 | Compose 期望标签 | 当前实际容器标签 | 状态 |
 | --- | --- | --- | --- |
-| app | `wechatopenai/weknora-app:deploy-deaa8ed7` | `deploy-eb02a753` | healthy，重启 0 |
-| frontend | `wechatopenai/weknora-ui:deploy-deaa8ed7` | `deploy-deaa8ed7` | running，重启 0 |
-| docreader | `wechatopenai/weknora-docreader:deploy-deaa8ed7` | `deploy-2be2572` | healthy，重启 0 |
+| app | `wechatopenai/weknora-app:deploy-5b492baa` | `deploy-eb02a753` | healthy，重启 0 |
+| frontend | `wechatopenai/weknora-ui:deploy-5b492baa` | `deploy-5b492baa` | running，重启 0 |
+| docreader | `wechatopenai/weknora-docreader:deploy-5b492baa` | `deploy-2be2572` | healthy，重启 0 |
 
-本次 `deaa8ed7` 发布浏览器插件 `v1.3.0`，增加文档集递归采集和可移动、可缩放的长网页截取。frontend 已切换到最终标签；app 与 docreader 未变化且未重启，当前健康镜像已增加 `deploy-deaa8ed7` 别名。
+本次 `5b492baa` 发布浏览器插件 `v1.3.1`，修复巨量引擎帮助中心通过 Shadow DOM 延迟挂载飞书 iframe 时只采集外壳的问题，并改进飞书虚拟滚动、附件与图片占位处理。frontend 已切换到最终标签，镜像清单摘要为 `sha256:03c812de6fe85e412ea924b2e2942c460cf61dc2fc1a20f617c3cdf400445230`；app 与 docreader 未变化且未重启，当前健康镜像已增加 `deploy-5b492baa` 别名。
 
 ### 1.2 当前关键环境开关
 
 远端 `.env` 已现场确认以下非敏感项：
 
 ```dotenv
-WEKNORA_VERSION=deploy-deaa8ed7
+WEKNORA_VERSION=deploy-5b492baa
 AUTO_MIGRATE=true
 STORAGE_TYPE=minio
 SSRF_WHITELIST_EXTRA=searxng,qdrant,milvus,weaviate,doris-fe,doris-be,host.docker.internal,minio,192.168.0.20
@@ -64,7 +64,9 @@ backups/
 
 - 见外传媒品牌、应用壳层和多语言文案。
 - Skill 页面、见外知识库 ZIP 下载和自动安装提示；当前版本为 `v1.2.1`，Windows 脚本使用 UTF-8 BOM 和 CRLF，兼容 Windows PowerShell 5.1 解析。
-- 见外知识库助手 `v1.3.0`，固定公司服务地址，用户只填写 API Key；普通用户默认下载 ZIP 解压安装，CRX3 仅保留给扩展商店和企业策略分发。
+- 见外知识库助手 `v1.3.1`，固定公司服务地址，用户只填写 API Key；普通用户默认下载 ZIP 解压安装，CRX3 仅保留给扩展商店和企业策略分发。
+- 巨量引擎帮助中心的外层 `tt-docs-component` 只作为待完成壳处理；后台等待 Shadow DOM 内跨域飞书 iframe 就绪并多轮读取，完整飞书结果优先于短外壳结果。
+- 飞书虚拟文档按约 0.9 个可视高度逐段滚动并等待可见资源稳定，保留真实附件封面和可访问图片；来源站自身的加载失败 SVG 不再膨胀为伪图片，而是转为明确的未加载说明。
 - 文档集采集可识别侧栏、折叠目录、组件树路由、分类页和虚拟滚动，递归发现同站正文并逐篇独立入库；支持暂停、继续、取消、重试、去重和重启恢复，默认最多 50 篇。
 - 手动框选支持选区移动、八向缩放和自动滚动长截图；截图以内嵌图片随 Markdown 一起写入知识库。
 - 动态网页采集支持 Shadow DOM、跨域 frame 聚合和完整虚拟滚动，按飞书块语义保留标题、表格、列表、Callout、链接和图片。
@@ -80,6 +82,7 @@ backups/
 关键提交：
 
 ```text
+5b492ba fix(browser-extension)：优化巨量文档加载与飞书内容采集
 deaa8ed feat(extension): 支持文档集与长网页采集
 eb02a75 fix(extension): 改用 ZIP 解压安装
 ed89212 fix(images): 扩大内嵌图片处理上限
@@ -180,6 +183,9 @@ cp -a .env ".env.before-deploy-${DEPLOY_TS}"
 /home/fox/WeKnora/.env.before-ssrf-20260818-111625
 /home/fox/WeKnora/backups/frontend-dist-before-deaa8ed7-20260818-133932
 /home/fox/WeKnora/.env.before-extension-v130-20260818-133932
+/home/fox/WeKnora/backups/frontend-dist-before-5b492baa-20260818-175734
+/home/fox/WeKnora/backups/frontend-dist-live-before-5b492baa-20260818-175734
+/home/fox/WeKnora/.env.before-extension-v131-20260818-175734
 ```
 
 ### 5.2 模型采用状态
@@ -450,25 +456,25 @@ curl -fsSI http://127.0.0.1:8081/ | head
 
 ```bash
 curl -fsSI http://127.0.0.1:8081/downloads/jiwai-knowledge-skill.zip | head
-curl -fsSI http://127.0.0.1:8081/downloads/jiwai-knowledge-assistant-1.3.0.crx | head
-curl -fsSI http://127.0.0.1:8081/downloads/jiwai-knowledge-assistant-1.3.0.zip | head
+curl -fsSI http://127.0.0.1:8081/downloads/jiwai-knowledge-assistant-1.3.1.crx | head
+curl -fsSI http://127.0.0.1:8081/downloads/jiwai-knowledge-assistant-1.3.1.zip | head
 ```
 
 当前基线：
 
 - Skill ZIP：HTTP 200，9416 字节，SHA256 为 `9ca6bffdb421ff3f9b231026ae3bb7d6d6265a62ebe7eb34a72a45621dad9a0f`。
-- 见外知识库助手 CRX：HTTP 200，296220 字节，SHA256 为 `fe3c33cb075c4eeb1a7151baf715d5c1d92e23c2f2ffa07849fbaf202ab51f89`。
-- 见外知识库助手 ZIP：HTTP 200，294369 字节，SHA256 为 `6f8042eef21c97a03458c1a8c200e26335fadaadc5b15bc9b4d682e5605137cc`。
+- 见外知识库助手 CRX：HTTP 200，297911 字节，SHA256 为 `a8cc4d76a4f92c0ba720934942730a935f67184cf4e789a173f83e217c1c68cc`。
+- 见外知识库助手 ZIP：HTTP 200，296014 字节，SHA256 为 `d8b6f6bfe1cda46ead943c6982f8ae83fb5e26ca025e4ae1049e1dc5c18e5d68`。
 - ZIP 的响应类型为 `application/zip`；CRX 的响应类型为 `application/x-chrome-extension`。
-- `v1.2.0` 安装包继续保留作为回滚资源；旧版 `1.1.0` 和 `1.0.0` 下载路径仍保留兼容。
+- `v1.3.0` 安装包继续保留作为直接回滚资源；`v1.2.0`、`1.1.0` 和 `1.0.0` 下载路径仍保留兼容。
 
 Skill ZIP 已从线上地址重新下载，并使用官方 PowerShell 容器执行 AST 解析，结果为 `DEPLOYED_POWERSHELL_PARSE_OK`。
-浏览器插件 ZIP 已从线上地址重新下载，线上与源码包 SHA256 一致；解析 Manifest 后确认品牌名、`v1.3.0`、`all_frames=true`、`unlimitedStorage=true`，并包含 `collection.js`。线上设置页构建产物只引用 `jiwai-knowledge-assistant-1.3.0.zip`。
+浏览器插件 ZIP 已从线上地址重新下载，线上与源码包 SHA256 一致；解析 Manifest 后确认品牌名、`v1.3.1`、`all_frames=true`、`unlimitedStorage=true`，并包含 `collection.js`。线上设置页构建产物只引用 `jiwai-knowledge-assistant-1.3.1.zip`。
 
 Edge 普通用户安装步骤：
 
 1. 删除被停用或提示来源未知的旧扩展。
-2. 下载 `jiwai-knowledge-assistant-1.3.0.zip`，解压到不会移动或删除的固定目录。
+2. 下载 `jiwai-knowledge-assistant-1.3.1.zip`，解压到不会移动或删除的固定目录。
 3. 打开 `edge://extensions`，开启开发人员模式。
 4. 选择「加载解压缩的扩展」，选中直接包含 `manifest.json` 的目录。
 5. 启用插件并填写 API Key。
@@ -478,6 +484,8 @@ Edge 普通用户安装步骤：
 官方参考：[本地加载扩展](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading)、[其它分发方式](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/alternate-distribution-options)、[企业扩展管理](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-manage-extensions-webstore)。
 
 浏览器运行时验收已通过 ego 完成：巨量引擎长文档 `content/140962` 的编辑器保存前包含 22 个标题、95 行 Markdown 表格、47 张图片和尾部附录；可编辑预览保留标题、Callout、表格和图片。
+
+`v1.3.1` 针对巨量引擎 `content/147621` 完成真实页面验收：旧逻辑只能得到 149 字符外壳；修复后约 25.9 秒完成 88 个内容块、7182 字符、27 个标题和 32 行 Markdown 表格，首段正文与尾部“在哪可以查看用户具体的搜索词”均存在。附件被清理为 `0731-线索行业搜索首位广告白皮书 .pdf`，保留来源站实际暴露的 1 张远程 PDF 封面，加载失败 SVG 占位图为 0。该查看器没有向页面暴露更多可访问原图时，插件会保留未加载说明，不伪造图片或把大段 SVG data URI 写入知识库。
 
 `v1.3.0` 目录发现运行验收：巨量帮助中心识别 59 篇并按上限返回 50 篇；NatureTunnel 文档分类页递归发现 17 篇，OAuth 文档提取 24942 字符和 106 行 Markdown 表格；抖音生活服务首页识别 28 个入口，商家分类页发现 20 篇课程。未登录课程页会识别“当前页面需要登录查看”并暂停任务。
 
