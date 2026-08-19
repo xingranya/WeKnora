@@ -664,7 +664,7 @@
 
     <!-- Image Preview -->
     <Teleport to="body">
-      <picturePreview v-if="imagePreviewVisible" :reviewImg="imagePreviewVisible" :reviewUrl="imagePreviewUrl"
+      <picturePreview :reviewImg="imagePreviewVisible" :reviewUrl="imagePreviewUrl"
         @closePreImg="closeImagePreview" />
     </Teleport>
 
