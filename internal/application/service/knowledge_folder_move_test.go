@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/assert"
@@ -19,10 +21,18 @@ type folderMoveRepoStub struct {
 	renameFrom  string
 	renameTo    string
 	renameCalls int
+	renameErr   error
+	deleteErr   error
+}
+
+func (r *folderMoveRepoStub) EnsureKnowledgeFolderPath(
+	_ context.Context, _ uint64, _ string, _ string, _ string,
+) error {
+	return nil
 }
 
 func (r *folderMoveRepoStub) UpdateKnowledgeFolderPath(
-	_ context.Context, _ uint64, _ string, ids []string, folderPath string,
+	_ context.Context, _ uint64, _ string, ids []string, folderPath, _ string,
 ) (int64, error) {
 	r.moveCalls++
 	r.movedIDs = ids
@@ -31,12 +41,18 @@ func (r *folderMoveRepoStub) UpdateKnowledgeFolderPath(
 }
 
 func (r *folderMoveRepoStub) RenameKnowledgeFolderPath(
-	_ context.Context, _ uint64, _ string, from string, to string,
+	_ context.Context, _ uint64, _ string, from string, to string, _ string,
 ) (int64, error) {
 	r.renameCalls++
 	r.renameFrom = from
 	r.renameTo = to
-	return 1, nil
+	return 1, r.renameErr
+}
+
+func (r *folderMoveRepoStub) DeleteEmptyKnowledgeFolderTree(
+	_ context.Context, _ uint64, _ string, _ string,
+) error {
+	return r.deleteErr
 }
 
 func folderMoveContext() context.Context {
@@ -111,4 +127,25 @@ func TestRenameKnowledgeFolderValidatesPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), affected)
 	assert.Equal(t, before, repo.renameCalls)
+}
+
+func TestKnowledgeFolderActiveUploadMapsToConflict(t *testing.T) {
+	repo := &folderMoveRepoStub{
+		renameErr: types.ErrKnowledgeFolderHasActiveUploads,
+		deleteErr: types.ErrKnowledgeFolderHasActiveUploads,
+	}
+	svc := &knowledgeService{repo: repo}
+	ctx := folderMoveContext()
+
+	_, err := svc.RenameKnowledgeFolder(ctx, "kb-1", "docs", "handbook")
+	appErr, ok := werrors.IsAppError(err)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusConflict, appErr.HTTPCode)
+	assert.Equal(t, "文件夹中仍有上传任务，请等待完成或先取消上传", appErr.Message)
+
+	err = svc.DeleteKnowledgeFolder(ctx, "kb-1", "docs")
+	appErr, ok = werrors.IsAppError(err)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusConflict, appErr.HTTPCode)
+	assert.Equal(t, "文件夹中仍有上传任务，请等待完成或先取消上传", appErr.Message)
 }

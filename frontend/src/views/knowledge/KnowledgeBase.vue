@@ -36,6 +36,8 @@ import {
   getKnowledgeSpans,
   getKnowledgeDetails,
   listKnowledgeFolders,
+  createKnowledgeFolder,
+  deleteKnowledgeFolder,
   moveKnowledgeToFolder,
   renameKnowledgeFolder,
   downKnowledgeDetails,
@@ -53,6 +55,7 @@ import BatchTagDialog from './components/BatchTagDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import { useUploadConfirmStore, type UploadConfirmResult } from '@/stores/uploadConfirm';
+import { useUploadQueueStore } from '@/stores/uploadQueue';
 import WikiBrowser from './wiki/WikiBrowser.vue';
 import { getWikiStats } from '@/api/wiki';
 import {
@@ -70,11 +73,13 @@ import {
   folderPathExists as folderExistsInTree,
   isFilteringDocuments,
   isFolderUpload,
+  joinFolderPath,
   ROOT_FOLDER_PATH,
 } from './folderTree';
 import { useI18n } from 'vue-i18n';
 import { useMarqueeSelect } from '@/hooks/useMarqueeSelect';
 import type { ParserEngineInfo } from '@/api/system';
+import { knowledgeDocumentActionVisibility, knowledgeMutationAllowed } from './knowledgePermissions';
 const route = useRoute();
 const { t } = useI18n();
 const kbId = computed(() => (route.params as any).kbId as string || '');
@@ -299,6 +304,9 @@ const canManage = computed(() => {
   if (authStore.hasRole('admin')) return true;
   return orgStore.canManageKB(kbId.value, false);
 });
+const documentActionVisibility = computed(() =>
+  knowledgeDocumentActionVisibility(canEdit.value, canManage.value, isViaShare.value),
+);
 
 // The activity feed exposes owner-side actor and configuration summaries.
 // It lives in KB settings (KnowledgeBaseEditorModal) for Owner/Admin in the home tenant.
@@ -311,11 +319,13 @@ const canManage = computed(() => {
 // the local tenant role is irrelevant — canEdit already encodes the share
 // grant, so trust it.
 const canMutateKnowledge = computed(() => {
-  if (!canEdit.value) return false;
-  if (isViaShare.value) return true;
-  if (isOwner.value) return true;
-  if (authStore.hasRole('admin')) return true;
-  return authStore.hasRole('contributor');
+  return knowledgeMutationAllowed(
+    canEdit.value,
+    isViaShare.value,
+    isOwner.value,
+    authStore.hasRole('admin'),
+    authStore.hasRole('contributor'),
+  );
 });
 
 // Effective permission: from direct org share list or from GET /knowledge-bases/:id (e.g. agent-visible KB)
@@ -638,7 +648,8 @@ const folderTreeCollapsed = ref(readStoredFlag(FOLDER_TREE_COLLAPSED_KEY));
 const hasFolders = computed(() => (folderTree.value?.folders?.length ?? 0) > 0);
 // The folder column only earns its space once the knowledge base actually has
 // folders, so knowledge bases filled with single-file uploads look unchanged.
-const showFolderTree = computed(() => !isFAQ.value && hasFolders.value);
+const showFolderTree = computed(() => !isFAQ.value);
+const folderTreeRef = ref<InstanceType<typeof KbFolderTree> | null>(null);
 // Browsing lists one folder's own contents; filtering searches its whole
 // subtree. There is no mode switch: the list follows what the user is doing.
 const isFiltering = computed(() =>
@@ -867,6 +878,42 @@ const handleFolderRename = async ({ from, to }: { from: string; to: string }) =>
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.renameFailed'));
   }
+};
+
+const handleFolderCreate = async ({ parentPath, name }: { parentPath: string; name: string }) => {
+  if (!kbId.value) return;
+  const requestKbId = kbId.value;
+  try {
+    const res: any = await createKnowledgeFolder(requestKbId, parentPath, name);
+    if (kbId.value !== requestKbId) return;
+    const path = res?.data?.path || joinFolderPath(parentPath, name);
+    await loadFolderTree(requestKbId);
+    selectedFolderPath.value = path;
+    MessagePlugin.success(t('knowledgeBase.folderTree.createSuccess'));
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.createFailed'));
+  }
+};
+
+const handleFolderDelete = async (path: string) => {
+  if (!kbId.value) return;
+  const requestKbId = kbId.value;
+  try {
+    await deleteKnowledgeFolder(requestKbId, path);
+    if (kbId.value !== requestKbId) return;
+    if (selectedFolderPath.value === path || selectedFolderPath.value.startsWith(`${path}/`)) {
+      selectedFolderPath.value = ROOT_FOLDER_PATH;
+    }
+    await loadFolderTree(requestKbId);
+    MessagePlugin.success(t('knowledgeBase.folderTree.deleteSuccess'));
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.deleteFailed'));
+  }
+};
+
+const startFolderCreate = () => {
+  if (folderTreeCollapsed.value) handleFolderTreeCollapsedChange(false);
+  nextTick(() => folderTreeRef.value?.startCreate(selectedFolderPath.value));
 };
 
 const handleFolderTreeCollapsedChange = (value: boolean) => {
@@ -1589,6 +1636,7 @@ const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'flac', 'ogg'];
 
 const uploadConfirmStore = useUploadConfirmStore();
+const uploadQueueStore = useUploadQueueStore();
 
 const getFolderUploadFileName = (file: File, targetFolder: string) =>
   buildUploadFileName(file, targetFolder);
@@ -1760,14 +1808,15 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
   const tagIds = result.tagIds || [];
 
   if (files.length > 0) {
-    const hasFolderPaths = files.some(isFolderUpload);
-    if (hasFolderPaths) {
-      MessagePlugin.info(t('knowledgeBase.uploadingFolder', { total: files.length }));
-    }
-    await executeUploadBatch(files, {
+    const targetFolder = result.targetFolder || ROOT_FOLDER_PATH;
+    uploadQueueStore.enqueueFiles({
+      kbId: kbId.value,
+      kbName: kbInfo.value?.name || t('knowledgeBase.title'),
+      files,
+      targetFolder,
+      fileNames: files.map(file => getFolderUploadFileName(file, targetFolder)),
       processConfig,
       tagIds,
-      targetFolder: result.targetFolder || ROOT_FOLDER_PATH,
     });
   }
 
@@ -2365,10 +2414,10 @@ async function createNewSession(value: string): Promise<void> {
 
       <template v-if="activeKbTab === 'documents' || !isWiki">
         <div class="knowledge-main">
-          <KbFolderTree v-if="showFolderTree && !folderTreeCollapsed" :tree="folderTree" :selected-path="selectedFolderPath"
-            :loading="folderTreeLoading" :can-edit="canEdit"
+          <KbFolderTree v-if="showFolderTree" ref="folderTreeRef" :tree="folderTree" :selected-path="selectedFolderPath"
+            :loading="folderTreeLoading" :can-edit="canManage" :collapsed="folderTreeCollapsed"
             @select="handleFolderSelect" @update:collapsed="handleFolderTreeCollapsedChange"
-            @rename="handleFolderRename" />
+            @rename="handleFolderRename" @create="handleFolderCreate" @delete="handleFolderDelete" />
           <div class="tag-content">
             <div class="doc-card-area">
               <nav v-if="showFolderTree" class="doc-folder-path"
@@ -2555,7 +2604,14 @@ async function createNewSession(value: string): Promise<void> {
                       </button>
                     </t-tooltip>
                   </div>
-                  <div v-if="canEdit" class="doc-filter-actions">
+                  <div v-if="documentActionVisibility.showDocumentActions" class="doc-filter-actions">
+                    <t-tooltip v-if="documentActionVisibility.showFolderManagement"
+                      :content="t('knowledgeBase.folderTree.create')" placement="top">
+                      <button type="button" class="content-bar-icon-btn"
+                        :aria-label="t('knowledgeBase.folderTree.create')" @click="startFolderCreate">
+                        <t-icon name="folder-add" size="16px" aria-hidden="true" />
+                      </button>
+                    </t-tooltip>
                     <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
                       :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="file-add"
                       trigger-class="content-bar-icon-btn" data-guide="kb-detail-add-doc"
@@ -2658,7 +2714,7 @@ async function createNewSession(value: string): Promise<void> {
               <div class="doc-batch-bar-anchor" v-show="batchMode || selectedIds.size > 0">
                 <DocumentBatchBar :count="selectedIds.size" :delete-loading="batchDeleting"
                   :reparse-loading="batchReparsing" :tag-loading="batchTagging" :visible="batchMode || selectedIds.size > 0"
-                  :show-move-to-folder="canEdit" :folder-options="folderOptions"
+                  :show-move-to-folder="canMutateKnowledge" :folder-options="folderOptions"
                   @cancel="handleBatchCancel" @delete="confirmBatchDelete" @reparse="confirmBatchReparse"
                   @batch-tag="handleBatchTag"
                   @move-to-folder="(path: string) => moveKnowledgeIntoFolder(Array.from(selectedIds), path)" />

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -282,7 +283,10 @@ func TestProcessImagesKeepsReferencedVariants(t *testing.T) {
 		"plain.jpg":   "data:image/png;base64," + b64,
 	}
 
-	refs, gotMarkdown := reader.processImages(mdContent, images)
+	refs, gotMarkdown, err := reader.processImages(mdContent, images)
+	if err != nil {
+		t.Fatalf("processImages() error: %v", err)
+	}
 
 	if gotMarkdown != mdContent {
 		t.Fatalf("processImages should not rewrite markdown content")
@@ -306,11 +310,52 @@ func TestProcessImagesMatchesPathsWithSpaces(t *testing.T) {
 		"第 1 页.jpg": "data:image/png;base64," + b64,
 	}
 
-	refs, _ := reader.processImages(mdContent, images)
+	refs, _, err := reader.processImages(mdContent, images)
+	if err != nil {
+		t.Fatalf("processImages() error: %v", err)
+	}
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 image ref for path with spaces, got %d", len(refs))
 	}
 	if refs[0].OriginalRef != "images/第 1 页.jpg" {
 		t.Fatalf("unexpected OriginalRef: %q", refs[0].OriginalRef)
+	}
+}
+
+func TestParseMinerUFileParseResponseRejectsOversizedMarkdownAndImageCount(t *testing.T) {
+	oversizedMarkdown, err := json.Marshal(map[string]any{
+		"results": map[string]any{
+			"document": map[string]any{"md_content": strings.Repeat("x", mineruMaxMarkdownBytes+1)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := parseMinerUFileParseResponse(oversizedMarkdown, "document.pdf"); err == nil {
+		t.Fatal("expected oversized markdown error")
+	}
+
+	images := make(map[string]string, mineruMaxImageCount+1)
+	for index := 0; index <= mineruMaxImageCount; index++ {
+		images[fmt.Sprintf("%d.png", index)] = "eA=="
+	}
+	tooManyImages, err := json.Marshal(map[string]any{
+		"results": map[string]any{"document": map[string]any{"images": images}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := parseMinerUFileParseResponse(tooManyImages, "document.pdf"); err == nil {
+		t.Fatal("expected image count error")
+	}
+}
+
+func TestProcessImagesRejectsDecodedImageLimit(t *testing.T) {
+	reader := &MinerUReader{}
+	encodedLen := base64.StdEncoding.EncodedLen(mineruMaxImageBytes + 1)
+	images := map[string]string{"too-large.png": strings.Repeat("A", encodedLen)}
+	_, _, err := reader.processImages("![](too-large.png)", images)
+	if err == nil {
+		t.Fatal("expected decoded image limit error")
 	}
 }

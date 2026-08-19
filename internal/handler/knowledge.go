@@ -27,6 +27,7 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
+	"gorm.io/gorm"
 )
 
 // KnowledgeHandler processes HTTP requests related to knowledge resources
@@ -231,7 +232,8 @@ func (h *KnowledgeHandler) resolveKnowledgeAndValidateKBAccess(c *gin.Context, k
 func (h *KnowledgeHandler) handleDuplicateKnowledgeError(c *gin.Context,
 	err error, knowledge *types.Knowledge, duplicateType string,
 ) bool {
-	if dupErr, ok := err.(*types.DuplicateKnowledgeError); ok {
+	var dupErr *types.DuplicateKnowledgeError
+	if goerrors.As(err, &dupErr) {
 		ctx := c.Request.Context()
 		logger.Warnf(ctx, "Detected duplicate %s: %s", duplicateType, secutils.SanitizeForLog(dupErr.Error()))
 		c.JSON(http.StatusConflict, gin.H{
@@ -436,6 +438,292 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 		"success": true,
 		"data":    knowledge,
 	})
+}
+
+type InitializeKnowledgeUploadRequest struct {
+	FileName         string                           `json:"file_name" binding:"required"`
+	FileSize         int64                            `json:"file_size" binding:"required"`
+	MIMEType         string                           `json:"mime_type"`
+	LastModified     int64                            `json:"last_modified"`
+	FolderPath       string                           `json:"folder_path"`
+	Metadata         map[string]string                `json:"metadata"`
+	TagIDs           []string                         `json:"tag_ids"`
+	Channel          string                           `json:"channel"`
+	ProcessConfig    *types.KnowledgeProcessOverrides `json:"process_config"`
+	EnableMultimodel *bool                            `json:"enable_multimodel"`
+}
+
+func uploadUserID(c *gin.Context) (string, error) {
+	value := strings.TrimSpace(types.SessionOwnerIDFromContext(c.Request.Context()))
+	if value == "" {
+		return "", errors.NewUnauthorizedError("Resumable upload requires a signed-in user")
+	}
+	return value, nil
+}
+
+// InitializeKnowledgeUpload 初始化知识库分片上传会话。
+// @Summary      初始化知识库分片上传
+// @Description  创建可续传上传会话。默认单文件上限 2 GiB、分片大小 4 MiB，会话默认保留 24 小时。
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                          true  "知识库ID"
+// @Param        request  body      InitializeKnowledgeUploadRequest true  "上传初始化请求"
+// @Success      201      {object}  map[string]interface{}           "上传会话"
+// @Failure      400      {object}  errors.AppError                  "请求参数错误"
+// @Failure      403      {object}  errors.AppError                  "权限不足"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/uploads [post]
+func (h *KnowledgeHandler) InitializeKnowledgeUpload(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, tenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to create knowledge"))
+		return
+	}
+	userID, err := uploadUserID(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	var request InitializeKnowledgeUploadRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.Error(errors.NewBadRequestError("Invalid request parameters: " + err.Error()))
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	session, err := h.kgService.InitializeKnowledgeUpload(ctx, kbID, userID, types.KnowledgeUploadInit{
+		FileName: request.FileName, FileSize: request.FileSize, MIMEType: request.MIMEType,
+		LastModified: request.LastModified, FolderPath: request.FolderPath,
+		Options: types.KnowledgeUploadOptions{
+			Metadata: request.Metadata, TagIDs: request.TagIDs, Channel: request.Channel,
+			ProcessConfig: request.ProcessConfig, EnableMultimodel: request.EnableMultimodel,
+		},
+	})
+	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": session})
+}
+
+// GetKnowledgeUpload 查询知识库分片上传会话。
+// @Summary      查询知识库分片上传会话
+// @Tags         知识管理
+// @Produce      json
+// @Param        id         path      string                true  "知识库ID"
+// @Param        upload_id  path      string                true  "上传会话ID"
+// @Success      200        {object}  map[string]interface{} "上传会话"
+// @Failure      404        {object}  errors.AppError        "上传会话不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/uploads/{upload_id} [get]
+func (h *KnowledgeHandler) GetKnowledgeUpload(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, tenantID, _, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	userID, err := uploadUserID(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	session, err := h.kgService.GetKnowledgeUpload(ctx, kbID, c.Param("upload_id"), userID)
+	if err != nil {
+		if goerrors.Is(err, gorm.ErrRecordNotFound) {
+			c.Error(errors.NewNotFoundError("Upload session not found"))
+		} else if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+		} else {
+			c.Error(errors.NewInternalServerError(err.Error()))
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": session})
+}
+
+func parseUploadContentRange(value string) (start, end, total int64, err error) {
+	raw := strings.TrimSpace(value)
+	if !strings.HasPrefix(raw, "bytes ") {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	bounds, totalText, ok := strings.Cut(strings.TrimPrefix(raw, "bytes "), "/")
+	if !ok || strings.Contains(totalText, "/") {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	startText, endText, ok := strings.Cut(bounds, "-")
+	if !ok || strings.Contains(endText, "-") {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	start, err = strconv.ParseInt(startText, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	end, err = strconv.ParseInt(endText, 10, 64)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	total, err = strconv.ParseInt(totalText, 10, 64)
+	if err != nil || start < 0 || end < start || total <= end {
+		return 0, 0, 0, fmt.Errorf("invalid Content-Range")
+	}
+	return start, end, total, nil
+}
+
+// WriteKnowledgeUploadPart 写入并校验一个知识库文件分片。
+// @Summary      上传知识库文件分片
+// @Description  使用原始请求体上传一个分片，必须提供 Content-Range 和 X-Chunk-SHA256；已确认分片可幂等重试。
+// @Tags         知识管理
+// @Accept       octet-stream
+// @Produce      json
+// @Param        id          path      string                true  "知识库ID"
+// @Param        upload_id   path      string                true  "上传会话ID"
+// @Param        part_number path      int                   true  "分片编号"
+// @Param        Content-Range    header    string            true  "字节范围，例如 bytes 0-4194303/8388608"
+// @Param        X-Chunk-SHA256  header    string            true  "分片 SHA256"
+// @Success      200         {object}  map[string]interface{} "上传进度"
+// @Failure      400         {object}  errors.AppError        "请求参数错误"
+// @Failure      409         {object}  errors.AppError        "分片顺序或校验冲突"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/uploads/{upload_id}/parts/{part_number} [put]
+func (h *KnowledgeHandler) WriteKnowledgeUploadPart(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, tenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to upload knowledge"))
+		return
+	}
+	userID, err := uploadUserID(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	partNumber, err := strconv.Atoi(c.Param("part_number"))
+	if err != nil {
+		c.Error(errors.NewBadRequestError("Invalid part number"))
+		return
+	}
+	start, end, total, err := parseUploadContentRange(c.GetHeader("Content-Range"))
+	if err != nil || end-start+1 > 16*1024*1024 {
+		c.Error(errors.NewBadRequestError("Invalid Content-Range"))
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16*1024*1024+1)
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	session, err := h.kgService.WriteKnowledgeUploadPart(
+		ctx, kbID, c.Param("upload_id"), userID, partNumber, start, end, total,
+		c.GetHeader("X-Chunk-SHA256"), c.Request.Body,
+	)
+	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": session})
+}
+
+// CompleteKnowledgeUpload 完成分片上传并创建知识。
+// @Summary      完成知识库分片上传
+// @Description  校验全部分片并以流式方式保存最终文件，创建知识条目并提交解析任务。
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id         path      string                true  "知识库ID"
+// @Param        upload_id  path      string                true  "上传会话ID"
+// @Success      200        {object}  map[string]interface{} "知识条目"
+// @Failure      409        {object}  errors.AppError        "分片未完成或文件重复"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/uploads/{upload_id}/complete [post]
+func (h *KnowledgeHandler) CompleteKnowledgeUpload(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, tenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to upload knowledge"))
+		return
+	}
+	userID, err := uploadUserID(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	knowledge, err := h.kgService.CompleteKnowledgeUpload(ctx, kbID, c.Param("upload_id"), userID)
+	if err != nil {
+		if h.handleDuplicateKnowledgeError(c, err, knowledge, "file") {
+			return
+		}
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": knowledge})
+}
+
+// CancelKnowledgeUpload 取消尚未完成的分片上传。
+// @Summary      取消知识库分片上传
+// @Tags         知识管理
+// @Produce      json
+// @Param        id         path      string                true  "知识库ID"
+// @Param        upload_id  path      string                true  "上传会话ID"
+// @Success      200        {object}  map[string]interface{} "取消成功"
+// @Failure      409        {object}  errors.AppError        "上传已经完成"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/uploads/{upload_id} [delete]
+func (h *KnowledgeHandler) CancelKnowledgeUpload(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, tenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to upload knowledge"))
+		return
+	}
+	userID, err := uploadUserID(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	if err := h.kgService.CancelKnowledgeUpload(ctx, kbID, c.Param("upload_id"), userID); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 // CreateKnowledgeFromURL godoc
@@ -1067,6 +1355,104 @@ func (h *KnowledgeHandler) ListKnowledgeFolders(c *gin.Context) {
 		"success": true,
 		"data":    tree,
 	})
+}
+
+type CreateKnowledgeFolderRequest struct {
+	ParentPath string `json:"parent_path"`
+	Name       string `json:"name" binding:"required"`
+}
+
+// CreateKnowledgeFolder 创建持久化知识库文件夹。
+// @Summary      创建知识库文件夹
+// @Description  创建持久化文件夹及缺失的祖先目录，空文件夹也会保留。
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                        true  "知识库ID"
+// @Param        request  body      CreateKnowledgeFolderRequest  true  "创建文件夹请求"
+// @Success      201      {object}  map[string]interface{}         "文件夹"
+// @Failure      400      {object}  errors.AppError                "请求参数错误"
+// @Failure      403      {object}  errors.AppError                "权限不足"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/folders [post]
+func (h *KnowledgeHandler) CreateKnowledgeFolder(c *gin.Context) {
+	ctx := c.Request.Context()
+	var req CreateKnowledgeFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(errors.NewBadRequestError("Invalid request parameters: " + err.Error()))
+		return
+	}
+	_, kbID, effectiveTenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to modify knowledge"))
+		return
+	}
+	if err := h.requireKBOwnershipOrAdmin(c, kbID); err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, effectiveTenantID)
+	folder, err := h.kgService.CreateKnowledgeFolder(ctx, kbID, req.ParentPath, req.Name)
+	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": folder})
+}
+
+// DeleteKnowledgeFolder 删除没有文档的文件夹子树。
+// @Summary      删除知识库文件夹
+// @Description  仅在整个文件夹子树没有文档时删除目录。
+// @Tags         知识管理
+// @Produce      json
+// @Param        id    path      string                true  "知识库ID"
+// @Param        path  query     string                true  "文件夹路径"
+// @Success      200   {object}  map[string]interface{} "删除成功"
+// @Failure      400   {object}  errors.AppError        "请求参数错误"
+// @Failure      403   {object}  errors.AppError        "权限不足"
+// @Failure      409   {object}  errors.AppError        "文件夹仍有文档"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/folders [delete]
+func (h *KnowledgeHandler) DeleteKnowledgeFolder(c *gin.Context) {
+	ctx := c.Request.Context()
+	path := c.Query("path")
+	if strings.TrimSpace(path) == "" {
+		c.Error(errors.NewBadRequestError("folder path is required"))
+		return
+	}
+	_, kbID, effectiveTenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to modify knowledge"))
+		return
+	}
+	if err := h.requireKBOwnershipOrAdmin(c, kbID); err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, effectiveTenantID)
+	if err := h.kgService.DeleteKnowledgeFolder(ctx, kbID, path); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 // MoveKnowledgeToFolderRequest is the body schema for POST /knowledge/folder.

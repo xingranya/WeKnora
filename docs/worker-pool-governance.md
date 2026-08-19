@@ -83,3 +83,16 @@ Increase a pool only when backlog age grows while its downstream dependency has
 headroom. Reallocate to enrichment when core stays underutilized and fan-out
 queues grow. Reduce core admission when DocReader CPU, memory, or latency is the
 bottleneck.
+
+## MinerU 解析并发
+
+MinerU 是独立于 Worker 数量的有限资源。平台配置 `mineru_max_concurrency`
+和环境变量 `WEKNORA_MINERU_MAX_CONCURRENCY` 控制实际请求上限，环境变量优先；
+默认值为 1。标准模式通过 Redis 对 `parser:mineru` 做跨 app 副本的分布式
+信号量，Lite 模式使用可动态收缩的进程内信号量。
+
+系统设置的运行时队列页会显示 MinerU 的 `active`、`waiting` 和 `limit`。
+当 `waiting` 持续增长时，应先检查 MinerU 的 CPU、RSS、可用内存、swap、
+错误率和 p95 延迟，不要只提高 Asynq Core Worker。生产上限必须来自同一
+MinerU 版本、同一后端模式和代表性文件集的阶梯压测，并与 systemd 的
+`MINERU_API_MAX_CONCURRENT_REQUESTS` 保持一致。

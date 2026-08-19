@@ -17,7 +17,7 @@ test('selects multiple document tags and returns them with the confirmation resu
 
 test('uses confirmed tags for file and URL imports instead of reading the list filter at upload time', () => {
   assert.match(knowledgeBase, /const tagIds = result\.tagIds \|\| \[\]/)
-  assert.match(knowledgeBase, /executeUploadBatch\(files, \{[\s\S]*?\btagIds,[\s\S]*?\}\)/)
+  assert.match(knowledgeBase, /uploadQueueStore\.enqueueFiles\(\{[\s\S]*?\btagIds,[\s\S]*?\}\)/)
   assert.match(knowledgeBase, /executeUrlImport\(url, processConfig, tagIds\)/)
   assert.doesNotMatch(
     knowledgeBase,
@@ -25,9 +25,7 @@ test('uses confirmed tags for file and URL imports instead of reading the list f
   )
 })
 
-// Browsing a folder pre-fills the upload destination, so the dialog must show it
-// and the batch must use the folder the user confirmed there — never the sidebar
-// selection as it stands when the uploads actually start.
+// 浏览文件夹时预填上传目录；确认弹窗应展示并使用用户最终确认的目录。
 test('takes the upload destination folder from the confirmation result', () => {
   assert.match(host, /:target-folder="uploadConfirmStore\.targetFolder"/)
   assert.match(host, /:folder-options="uploadConfirmStore\.folderOptions"/)
@@ -37,7 +35,7 @@ test('takes the upload destination folder from the confirmation result', () => {
   assert.match(dialog, /FolderPickerMenu/)
   assert.match(dialog, /onDestinationPicked/)
   assert.match(dialog, /targetFolder: localTargetFolder\.value/)
-  assert.match(knowledgeBase, /targetFolder: result\.targetFolder \|\| ROOT_FOLDER_PATH/)
+  assert.match(knowledgeBase, /const targetFolder = result\.targetFolder \|\| ROOT_FOLDER_PATH/)
   assert.match(knowledgeBase, /targetFolder: selectedFolderPath\.value/)
   assert.match(knowledgeBase, /folderOptions: folderOptions\.value/)
 })
@@ -77,4 +75,20 @@ test('uses section navigation with inline chunking controls and advanced options
   assert.match(dialog, /statusFull/)
   assert.match(dialog, /data-section="multimodal"/)
   assert.doesNotMatch(dialog, /<KBChunkingSettings/)
+})
+
+test('rejects files that exceed the selected parser engine capacity before upload', () => {
+  assert.match(dialog, /function parserEngineForFile/)
+  assert.match(dialog, /engine\?\.MaxFileSizeBytes \|\| fallback/)
+  assert.match(dialog, /file\.size > parser\.maxBytes/)
+  assert.match(dialog, /uploadConfirm\.parserFileSizeExceeded/)
+  assert.match(dialog, /editorResources\.ensureParserEngines\(\)/)
+})
+
+test('upload confirmation is modal and keeps keyboard focus inside', () => {
+  assert.match(dialog, /aria-modal="true"/)
+  assert.match(dialog, /ref="modalRef"/)
+  assert.match(dialog, /handleDialogKeydown/)
+  assert.match(dialog, /previouslyFocusedElement/)
+  assert.match(dialog, /event\.key !== 'Tab'/)
 })

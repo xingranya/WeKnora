@@ -3,6 +3,7 @@ package types
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,11 @@ func TestNormalizeKnowledgeFolderPathCapsDepthAndLength(t *testing.T) {
 
 	wide := strings.TrimSuffix(strings.Repeat(strings.Repeat("y", 100)+"/", 12), "/")
 	assert.LessOrEqual(t, len(NormalizeKnowledgeFolderPath(wide)), MaxKnowledgeFolderPathLength)
+
+	multibyte := strings.Repeat("文", MaxKnowledgeFolderSegmentLength)
+	multibyteNormalized := NormalizeKnowledgeFolderPath(multibyte)
+	assert.True(t, utf8.ValidString(multibyteNormalized))
+	assert.LessOrEqual(t, len(multibyteNormalized), MaxKnowledgeFolderSegmentLength)
 }
 
 func TestSplitKnowledgeRelativePath(t *testing.T) {

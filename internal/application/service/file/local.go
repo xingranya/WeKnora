@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -22,6 +23,22 @@ type localFileService struct {
 }
 
 const localScheme = "local://"
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
+}
 
 // CheckConnectivity verifies the local storage directory exists and is accessible.
 func (s *localFileService) CheckConnectivity(ctx context.Context) error {
@@ -55,25 +72,7 @@ func (s *localFileService) SaveFile(ctx context.Context,
 	logger.Infof(ctx, "File information: name=%s, size=%d, tenant ID=%d, knowledge ID=%s",
 		file.Filename, file.Size, tenantID, knowledgeID)
 
-	// Create storage directory with tenant and knowledge ID
-	dir := filepath.Join(s.baseDir, fmt.Sprintf("%d", tenantID), knowledgeID)
-	if _, err := secutils.SafePathUnderBase(s.baseDir, dir); err != nil {
-		logger.Errorf(ctx, "Path traversal denied for SaveFile dir: %v", err)
-		return "", fmt.Errorf("invalid path: %w", err)
-	}
-	logger.Infof(ctx, "Creating directory: %s", dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		logger.Errorf(ctx, "Failed to create directory: %v", err)
-		return "", fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Generate unique filename using timestamp
-	ext := filepath.Ext(file.Filename)
-	filename := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
-	filePath := filepath.Join(dir, filename)
-	logger.Infof(ctx, "Generated file path: %s", filePath)
-
-	// Open source file for reading
+	// 打开源文件并以流式方式读取。
 	logger.Info(ctx, "Opening source file")
 	src, err := file.Open()
 	if err != nil {
@@ -81,27 +80,84 @@ func (s *localFileService) SaveFile(ctx context.Context,
 		return "", fmt.Errorf("failed to open file: %w", err)
 	}
 	defer src.Close()
+	return s.SaveReader(ctx, src, file.Size, file.Filename, file.Header.Get("Content-Type"), tenantID, knowledgeID)
+}
 
-	// Create destination file for writing
+func (s *localFileService) SaveReader(
+	ctx context.Context, reader io.Reader, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID string,
+) (string, error) {
+	filePath, err := s.PrepareReaderPath(ctx, size, fileName, contentType, tenantID, knowledgeID)
+	if err != nil {
+		return "", err
+	}
+	if err := s.SaveReaderTo(ctx, reader, size, fileName, contentType, tenantID, knowledgeID, filePath); err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
+
+func (s *localFileService) PrepareReaderPath(
+	_ context.Context, _ int64, fileName, _ string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	dir := filepath.Join(s.baseDir, fmt.Sprintf("%d", tenantID), knowledgeID)
+	if _, err := secutils.SafePathUnderBase(s.baseDir, dir); err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	ext := filepath.Ext(fileName)
+	filePath := filepath.Join(dir, "source"+ext)
+	relPath, err := filepath.Rel(s.baseDir, filePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve local file path: %w", err)
+	}
+	return localScheme + filepath.ToSlash(relPath), nil
+}
+
+func (s *localFileService) SaveReaderTo(
+	ctx context.Context, reader io.Reader, _ int64, _ string, _ string,
+	tenantID uint64, knowledgeID, filePath string,
+) error {
+	candidate := s.normalizePathForBase(filePath)
+	resolved, err := secutils.SafePathUnderBase(s.baseDir, candidate)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+	expectedDir := filepath.Join(s.baseDir, fmt.Sprintf("%d", tenantID), knowledgeID)
+	if filepath.Dir(resolved) != expectedDir {
+		return fmt.Errorf("prepared local path does not match upload ownership")
+	}
+	if err := os.MkdirAll(expectedDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// 创建目标文件。
 	logger.Info(ctx, "Creating destination file")
-	dst, err := os.Create(filePath)
+	dst, err := os.Create(resolved)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to create destination file: %v", err)
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer dst.Close()
-
-	// Copy content from source to destination
+	// 复制时检查请求上下文，取消后删除不完整目标文件。
 	logger.Info(ctx, "Copying file content")
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err := io.Copy(dst, contextReader{ctx: ctx, reader: reader}); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(resolved)
 		logger.Errorf(ctx, "Failed to copy file content: %v", err)
-		return "", fmt.Errorf("failed to save file: %w", err)
+		return fmt.Errorf("failed to save file: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(resolved)
+		return fmt.Errorf("failed to close file: %w", err)
 	}
 
-	logger.Infof(ctx, "File saved successfully: %s", filePath)
-	// Return provider:// path format: local://{relative_path}
-	relPath, _ := filepath.Rel(s.baseDir, filePath)
-	return localScheme + filepath.ToSlash(relPath), nil
+	logger.Infof(ctx, "File saved successfully: %s", resolved)
+	return nil
+}
+
+func (s *localFileService) FinalizeReaderPath(
+	_ context.Context, _ int64, _ string, _ string, _ uint64, _ string, filePath string,
+) (string, error) {
+	return filePath, nil
 }
 
 // GetFile retrieves a file from the local file system by its path
@@ -145,6 +201,9 @@ func (s *localFileService) DeleteFile(ctx context.Context, filePath string) erro
 	}
 
 	err = os.Remove(resolved)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		logger.Errorf(ctx, "Failed to delete file: %v", err)
 		return fmt.Errorf("failed to delete file: %w", err)

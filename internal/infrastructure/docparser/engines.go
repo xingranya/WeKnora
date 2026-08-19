@@ -175,7 +175,7 @@ func (e *mineruEngine) Name() string { return MinerUEngineName }
 func (e *mineruEngine) Description() string { return "MinerU self-hosted service" }
 
 func (e *mineruEngine) FileTypes(_ bool) []string {
-	return []string{"pdf", "jpg", "jpeg", "png", "bmp", "tiff", "doc", "docx", "ppt", "pptx"}
+	return []string{"pdf", "jpg", "jpeg", "png", "bmp", "tiff", "docx", "pptx", "xlsx"}
 }
 
 func (e *mineruEngine) CheckAvailable(_ bool, overrides map[string]string) (bool, string) {
@@ -201,7 +201,7 @@ func (e *mineruCloudEngine) Name() string { return MinerUCloudEngineName }
 func (e *mineruCloudEngine) Description() string { return "MinerU Cloud API" }
 
 func (e *mineruCloudEngine) FileTypes(_ bool) []string {
-	return []string{"pdf", "jpg", "jpeg", "png", "bmp", "tiff", "doc", "docx", "ppt", "pptx"}
+	return []string{"pdf", "jpg", "jpeg", "png", "bmp", "tiff", "docx", "pptx", "xlsx"}
 }
 
 func (e *mineruCloudEngine) CheckAvailable(_ bool, overrides map[string]string) (bool, string) {

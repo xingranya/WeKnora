@@ -104,13 +104,19 @@ func RuntimeStats(ctx context.Context) ([]RuntimeStat, bool, error) {
 // worker pool against one provider, so we still cap concurrency locally.
 type localLimiter struct {
 	mu      sync.Mutex
-	sems    map[string]chan struct{}
+	sems    map[string]*localSemaphore
 	tracked map[string]*trackedSemaphore
+}
+
+type localSemaphore struct {
+	active int
+	limit  int
+	notify chan struct{}
 }
 
 // NewLocalLimiter builds an in-process per-key concurrency limiter.
 func NewLocalLimiter() ModelConcurrencyLimiter {
-	return &localLimiter{sems: make(map[string]chan struct{}), tracked: make(map[string]*trackedSemaphore)}
+	return &localLimiter{sems: make(map[string]*localSemaphore), tracked: make(map[string]*trackedSemaphore)}
 }
 
 func (l *localLimiter) Acquire(ctx context.Context, key string, limit int) (func(), error) {
@@ -119,31 +125,56 @@ func (l *localLimiter) Acquire(ctx context.Context, key string, limit int) (func
 	}
 
 	l.mu.Lock()
-	sem, ok := l.sems[key]
+	sem := l.sems[key]
 	tracked := l.tracked[key]
 	if tracked == nil {
 		tracked = &trackedSemaphore{}
 		l.tracked[key] = tracked
 	}
 	tracked.limit.Store(int64(limit))
-	if !ok {
-		// Capacity is fixed at first use for a key; the limit is a
-		// process-wide constant, so it never changes across acquires.
-		sem = make(chan struct{}, limit)
+	if sem == nil {
+		sem = &localSemaphore{limit: limit, notify: make(chan struct{})}
 		l.sems[key] = sem
+	} else if sem.limit != limit {
+		sem.limit = limit
+		close(sem.notify)
+		sem.notify = make(chan struct{})
 	}
 	l.mu.Unlock()
 	tracked.waiting.Add(1)
 	defer tracked.waiting.Add(-1)
 
-	select {
-	case sem <- struct{}{}:
-		var once sync.Once
-		return func() { once.Do(func() { <-sem }) }, nil
-	case <-ctx.Done():
-		// Fail open on cancellation, mirroring the Redis limiter.
-		return noop, nil
+	for {
+		l.mu.Lock()
+		if sem.active < sem.limit {
+			sem.active++
+			l.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					l.mu.Lock()
+					sem.active--
+					close(sem.notify)
+					sem.notify = make(chan struct{})
+					l.mu.Unlock()
+				})
+			}, nil
+		}
+		notify := sem.notify
+		l.mu.Unlock()
+		select {
+		case <-notify:
+		case <-ctx.Done():
+			return noop, nil
+		}
 	}
+}
+
+func (l *localLimiter) AcquireLease(
+	ctx context.Context, key string, limit int,
+) (context.Context, func(), error) {
+	release, err := l.Acquire(ctx, key, limit)
+	return ctx, release, err
 }
 
 func (l *localLimiter) RuntimeStats(_ context.Context) ([]RuntimeStat, error) {
@@ -153,7 +184,7 @@ func (l *localLimiter) RuntimeStats(_ context.Context) ([]RuntimeStat, error) {
 	for modelID, sem := range l.sems {
 		tracked := l.tracked[modelID]
 		name, _ := tracked.name.Load().(string)
-		stats = append(stats, RuntimeStat{ModelID: modelID, Name: name, Active: int64(len(sem)), Waiting: tracked.waiting.Load(), Limit: int(tracked.limit.Load())})
+		stats = append(stats, RuntimeStat{ModelID: modelID, Name: name, Active: int64(sem.active), Waiting: tracked.waiting.Load(), Limit: sem.limit})
 	}
 	sort.Slice(stats, func(i, j int) bool { return stats[i].ModelID < stats[j].ModelID })
 	return stats, nil

@@ -193,8 +193,9 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 	}
 	deleteExtractedImages(ctx, kbFileSvc, imageURLs)
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	tenantInfo.StorageUsed -= knowledge.StorageSize
-	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
+	quotaBytes := knowledge.QuotaStorageBytes()
+	tenantInfo.StorageUsed -= quotaBytes
+	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -quotaBytes); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
 	}
 	recordKBActivity(ctx, s.audit, tenantID, knowledge.KnowledgeBaseID, types.AuditActionKnowledgeDeleted,
@@ -653,7 +654,7 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
 			}
 		}
-		storageAdjust -= knowledge.StorageSize
+		storageAdjust -= knowledge.QuotaStorageBytes()
 	}
 	// Delete extracted images per KB
 	for kbID, urls := range kbImageURLs {

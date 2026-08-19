@@ -311,13 +311,36 @@ func mergeExtractConfig(base types.ExtractConfig, override *types.ExtractConfig)
 	return result
 }
 
-// MergeParserEngineOverrides merges upload overrides on top of tenant overrides safely.
+var uploadParserOverrideAllowlist = map[string]struct{}{
+	"pdf_force_scanned":                        {},
+	"xlsx_first_row_as_header":                 {},
+	"anydoc_extract_images":                    {},
+	"mineru_enable_formula":                    {},
+	"mineru_enable_table":                      {},
+	"mineru_enable_ocr":                        {},
+	"mineru_parse_method":                      {},
+	"mineru_language":                          {},
+	"mineru_cloud_enable_formula":              {},
+	"mineru_cloud_enable_table":                {},
+	"mineru_cloud_enable_ocr":                  {},
+	"mineru_cloud_language":                    {},
+	"paddleocr_vl_use_seal_recognition":        {},
+	"paddleocr_vl_use_chart_recognition":       {},
+	"paddleocr_vl_cloud_use_seal_recognition":  {},
+	"paddleocr_vl_cloud_use_chart_recognition": {},
+}
+
+// MergeParserEngineOverrides 仅允许上传覆盖文档行为参数。
+// 端点、凭证、模型后端和并发预算始终由平台配置持有。
 func MergeParserEngineOverrides(tenantOverrides map[string]string, uploadOverrides map[string]string) map[string]string {
 	merged := make(map[string]string)
 	for k, v := range tenantOverrides {
 		merged[k] = v
 	}
 	for k, v := range uploadOverrides {
+		if _, allowed := uploadParserOverrideAllowlist[k]; !allowed {
+			continue
+		}
 		merged[k] = v
 	}
 	return merged

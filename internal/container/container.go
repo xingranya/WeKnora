@@ -340,6 +340,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}
 	must(container.Provide(service.NewTemporaryDocumentService))
 	must(container.Invoke(startTemporaryDocumentCleanup))
+	must(container.Invoke(startKnowledgeUploadCleanup))
 
 	// Chat pipeline components for processing chat requests
 	logger.Debugf(ctx, "[Container] Registering chat pipeline plugins...")
@@ -1735,6 +1736,34 @@ func startTemporaryDocumentCleanup(svc interfaces.TemporaryDocumentService, clea
 		}
 	}()
 	cleaner.RegisterWithName("TemporaryDocumentCleanup", func() error {
+		close(stop)
+		return nil
+	})
+}
+
+func startKnowledgeUploadCleanup(svc interfaces.KnowledgeService, cleaner interfaces.ResourceCleaner) {
+	stop := make(chan struct{})
+	go func() {
+		cleanup := func() {
+			if count, err := svc.CleanupExpiredKnowledgeUploads(context.Background(), 500); err != nil {
+				logger.Warnf(context.Background(), "[KnowledgeUpload] cleanup failed: %v", err)
+			} else if count > 0 {
+				logger.Infof(context.Background(), "[KnowledgeUpload] cleaned %d expired sessions", count)
+			}
+		}
+		cleanup()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cleanup()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	cleaner.RegisterWithName("KnowledgeUploadCleanup", func() error {
 		close(stop)
 		return nil
 	})

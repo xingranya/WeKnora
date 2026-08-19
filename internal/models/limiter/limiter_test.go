@@ -154,6 +154,54 @@ func TestRedisLimiterFailsOpen(t *testing.T) {
 	}
 }
 
+func TestStrictRedisLimiterRejectsBackendFailure(t *testing.T) {
+	strict := NewStrictRedisLimiter(nil)
+	release, err := strict.Acquire(context.Background(), "parser:mineru", 1)
+	if err == nil || release != nil {
+		t.Fatalf("严格模式在 Redis 不可用时必须拒绝放行")
+	}
+
+	limiter, server, _ := newTestLimiter(t, time.Minute, 10*time.Millisecond)
+	limiter.strict = true
+	server.Close()
+	release, err = limiter.Acquire(context.Background(), "parser:mineru", 1)
+	if err == nil || release != nil {
+		t.Fatalf("严格模式在 Redis 请求失败时必须拒绝放行")
+	}
+}
+
+func TestStrictRedisLimiterLeaseLossCancelsContextWithoutRevivingToken(t *testing.T) {
+	limiter, _, rdb := newTestLimiter(t, 60*time.Millisecond, 5*time.Millisecond)
+	limiter.strict = true
+	leaseCtx, release, err := limiter.AcquireLease(context.Background(), "parser:mineru", 1)
+	if err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	defer release()
+
+	members, err := rdb.ZRange(context.Background(), keyPrefix+"parser:mineru", 0, -1).Result()
+	if err != nil || len(members) != 1 {
+		t.Fatalf("members = %v, err = %v", members, err)
+	}
+	if err := rdb.ZRem(context.Background(), keyPrefix+"parser:mineru", members[0]).Err(); err != nil {
+		t.Fatalf("remove lease token: %v", err)
+	}
+
+	select {
+	case <-leaseCtx.Done():
+		if context.Cause(leaseCtx) == nil {
+			t.Fatal("lease context must expose ownership-loss cause")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lease loss did not cancel strict context")
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	if got := zcard(t, rdb, "parser:mineru"); got != 0 {
+		t.Fatalf("lost token must not be revived, zcard = %d", got)
+	}
+}
+
 // TestRedisLimiterCancelledContextFailsOpen verifies a waiter whose context is
 // cancelled while blocked returns a usable (no-op) release rather than erroring.
 func TestRedisLimiterCancelledContextFailsOpen(t *testing.T) {

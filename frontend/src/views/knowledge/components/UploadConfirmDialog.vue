@@ -2,7 +2,8 @@
   <Teleport to="body">
     <Transition name="modal">
       <div v-if="dialogVisible" class="upload-confirm-overlay">
-        <div class="upload-confirm-modal" role="dialog" :aria-label="dialogTitle">
+        <div ref="modalRef" class="upload-confirm-modal" role="dialog" aria-modal="true"
+          :aria-label="dialogTitle" tabindex="-1" @keydown="handleDialogKeydown">
           <button class="close-btn" type="button" :aria-label="t('general.close')" @click="handleCancel">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <path d="M15 5L5 15M5 5L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -566,6 +567,7 @@ import KbUploadSourceDropdown from './KbUploadSourceDropdown.vue'
 import FolderPickerMenu, { type FolderOption } from './FolderPickerMenu.vue'
 import { folderOptionFromPath, sortFolderOptions } from '../folderTree'
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess'
+import { parserEngineDisplayName } from './parserEngineDisplay'
 import type {
   UploadConfirmManualSource,
   UploadConfirmMode,
@@ -653,6 +655,46 @@ const { t } = useI18n()
 const chatResources = useChatResourcesStore()
 const editorResources = useEditorResourcesStore()
 const uiStore = useUIStore()
+
+const modalRef = ref<HTMLElement | null>(null)
+let previouslyFocusedElement: HTMLElement | null = null
+
+const focusableSelector = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+const getFocusableElements = () => Array.from(
+  modalRef.value?.querySelectorAll<HTMLElement>(focusableSelector) || [],
+).filter(element => !element.hidden && element.offsetParent !== null)
+
+const handleDialogKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    handleCancel()
+    return
+  }
+  if (event.key !== 'Tab' || !modalRef.value) return
+  const focusable = getFocusableElements()
+  if (!focusable.length) {
+    event.preventDefault()
+    modalRef.value.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 const allModels = ref<any[]>([])
 const localFiles = ref<File[]>([])
@@ -746,6 +788,23 @@ function getFileExt(file: File): string {
   const dot = file.name.lastIndexOf('.')
   if (dot < 0) return ''
   return file.name.substring(dot + 1).toLowerCase()
+}
+
+function parserEngineForFile(file: File): { name: string; displayName: string; maxBytes: number } {
+  const ext = getFileExt(file)
+  const rule = (uiState.value.chunkingConfig.parserEngineRules || []).find(item =>
+    item.file_types.some(fileType => fileType.replace(/^\./, '').toLowerCase() === ext),
+  )
+  const name = rule?.engine || 'builtin'
+  const engine = editorResources.parserEngines.find(item => item.Name === name)
+  const fallback = name === 'mineru'
+    ? 2 * 1024 * 1024 * 1024
+    : name === 'builtin' ? 50 * 1024 * 1024 : 100 * 1024 * 1024
+  return {
+    name,
+    displayName: parserEngineDisplayName(name, key => t(key)),
+    maxBytes: engine?.MaxFileSizeBytes || fallback,
+  }
 }
 
 function getExtFromUrl(url: string): string {
@@ -1287,7 +1346,16 @@ async function loadTags() {
 watch(
   () => props.visible,
   (visible) => {
-    if (!visible) return
+    if (!visible) {
+      previouslyFocusedElement?.focus()
+      previouslyFocusedElement = null
+      return
+    }
+    previouslyFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    void nextTick(() => {
+      const first = getFocusableElements()[0]
+      ;(first || modalRef.value)?.focus()
+    })
     localFiles.value = props.mode === 'file' ? [...(props.files || [])] : []
     localUrls.value = props.mode === 'file' ? [...(props.urls || [])] : []
     selectedTagIds.value = props.mode === 'reparse' ? [] : [...(props.tagIds || [])]
@@ -1302,6 +1370,7 @@ watch(
     chunkingMoreOpen.value = false
     loadModels()
     loadSystemInfo()
+    editorResources.ensureParserEngines()
     loadTags()
   },
 )
@@ -1378,6 +1447,18 @@ const handleNodeExtractUpdate = (config: UploadUIState['nodeExtractConfig']) => 
 }
 
 const validateBeforeConfirm = (): boolean => {
+  for (const file of localFiles.value) {
+    const parser = parserEngineForFile(file)
+    if (file.size > parser.maxBytes) {
+      MessagePlugin.warning(t('uploadConfirm.parserFileSizeExceeded', {
+        file: file.name,
+        engine: parser.displayName,
+        size: Math.floor(parser.maxBytes / 1024 / 1024),
+      }))
+      goToSection('parser')
+      return false
+    }
+  }
   if (hasImages.value) {
     if (!uiState.value.multimodalConfig.enabled || !uiState.value.multimodalConfig.vllmModelId) {
       MessagePlugin.warning(t('uploadConfirm.vlmModelRequired'))

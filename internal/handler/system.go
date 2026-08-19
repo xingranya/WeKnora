@@ -1662,15 +1662,17 @@ type RuntimeWorkerPool struct {
 }
 
 type RuntimeQueuesResponse struct {
-	Available             bool                       `json:"available"`
-	UpstreamConcurrency   int                        `json:"upstream_concurrency"`
-	ParseConcurrency      int                        `json:"parse_concurrency"` // compatibility alias for upstream_concurrency
-	WikiConcurrency       int                        `json:"wiki_concurrency"`  // compatibility field
-	Pools                 []RuntimeWorkerPool        `json:"pools"`
-	Queues                []types.QueueStat          `json:"queues"`
-	ModelLimiterAvailable bool                       `json:"model_limiter_available"`
-	Models                []modellimiter.RuntimeStat `json:"models"`
-	Timestamp             int64                      `json:"timestamp"`
+	Available              bool                       `json:"available"`
+	UpstreamConcurrency    int                        `json:"upstream_concurrency"`
+	ParseConcurrency       int                        `json:"parse_concurrency"` // compatibility alias for upstream_concurrency
+	WikiConcurrency        int                        `json:"wiki_concurrency"`  // compatibility field
+	Pools                  []RuntimeWorkerPool        `json:"pools"`
+	Queues                 []types.QueueStat          `json:"queues"`
+	ModelLimiterAvailable  bool                       `json:"model_limiter_available"`
+	Models                 []modellimiter.RuntimeStat `json:"models"`
+	ParserLimiterAvailable bool                       `json:"parser_limiter_available"`
+	Parsers                []modellimiter.RuntimeStat `json:"parsers"`
+	Timestamp              int64                      `json:"timestamp"`
 }
 
 func aggregateRuntimeWorkerPools(pools []RuntimeWorkerPool, servers []types.WorkerServerStat) {
@@ -1787,6 +1789,12 @@ func (h *SystemHandler) GetRuntimeQueues(c *gin.Context) {
 	}
 	resp.ModelLimiterAvailable = modelSupported
 	resp.Models = modelStats
+	parserStats, parserSupported, parserErr := docparser.ParserConcurrencyStats(ctx)
+	if parserErr != nil {
+		logger.Errorf(ctx, "get parser concurrency stats failed: %v", parserErr)
+	}
+	resp.ParserLimiterAvailable = parserSupported
+	resp.Parsers = parserStats
 
 	c.JSON(http.StatusOK, resp)
 }

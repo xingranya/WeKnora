@@ -478,22 +478,40 @@ func TestMergeParserEngineOverrides(t *testing.T) {
 	merged := MergeParserEngineOverrides(nil, nil)
 	require.Empty(t, merged)
 
-	// 2. Tenant only
+	// 2. 平台配置完整保留
 	merged = MergeParserEngineOverrides(map[string]string{"k1": "v1"}, nil)
 	require.Equal(t, map[string]string{"k1": "v1"}, merged)
 
-	// 3. Upload only
-	merged = MergeParserEngineOverrides(nil, map[string]string{"k2": "v2"})
-	require.Equal(t, map[string]string{"k2": "v2"}, merged)
+	// 3. 上传只允许文档行为白名单
+	merged = MergeParserEngineOverrides(nil, map[string]string{
+		"pdf_force_scanned": "true",
+		"mineru_endpoint":   "https://attacker.example",
+	})
+	require.Equal(t, map[string]string{"pdf_force_scanned": "true"}, merged)
 
-	// 4. Overlap priority (upload override should take priority over tenant config)
-	tenant := map[string]string{"k1": "tenant_val", "k2": "v2"}
-	upload := map[string]string{"k1": "upload_val", "k3": "v3"}
+	// 4. 白名单键允许覆盖，敏感键和未知键保持平台值或被丢弃
+	tenant := map[string]string{
+		"pdf_force_scanned":      "false",
+		"mineru_endpoint":        "https://platform.example",
+		"mineru_api_key":         "platform-secret",
+		"mineru_model":           "pipeline",
+		"mineru_max_concurrency": "2",
+	}
+	upload := map[string]string{
+		"pdf_force_scanned":      "true",
+		"mineru_endpoint":        "https://attacker.example",
+		"mineru_api_key":         "attacker-secret",
+		"mineru_model":           "vlm-http-client",
+		"mineru_max_concurrency": "32",
+		"unknown":                "value",
+	}
 	merged = MergeParserEngineOverrides(tenant, upload)
 	require.Equal(t, map[string]string{
-		"k1": "upload_val",
-		"k2": "v2",
-		"k3": "v3",
+		"pdf_force_scanned":      "true",
+		"mineru_endpoint":        "https://platform.example",
+		"mineru_api_key":         "platform-secret",
+		"mineru_model":           "pipeline",
+		"mineru_max_concurrency": "2",
 	}, merged)
 }
 

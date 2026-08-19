@@ -108,6 +108,8 @@ export interface ParserEngineInfo {
   Available?: boolean
   UnavailableReason?: string
   CompanyPreset?: boolean
+  SupportsStreaming?: boolean
+  MaxFileSizeBytes?: number
 }
 
 /** 解析引擎配置（连接参数由平台统一维护；聊天附件解析策略在智能体中配置） */
@@ -126,6 +128,7 @@ export interface ParserEngineConfig {
   mineru_parse_method?: MinerUParseMethod
   mineru_enable_ocr?: boolean | null
   mineru_language?: string
+  mineru_max_concurrency?: number
   // MinerU 云 API 参数
   mineru_cloud_model?: string
   mineru_cloud_enable_formula?: boolean | null

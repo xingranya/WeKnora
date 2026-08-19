@@ -123,26 +123,63 @@ func (s *minioFileService) parseMinioFilePath(filePath string) (string, error) {
 func (s *minioFileService) SaveFile(ctx context.Context,
 	file *multipart.FileHeader, tenantID uint64, knowledgeID string,
 ) (string, error) {
-	// Generate object name
-	ext := filepath.Ext(file.Filename)
-	objectName := fmt.Sprintf("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
-
 	// Open file
 	src, err := file.Open()
 	if err != nil {
 		return "", fmt.Errorf("failed to open file: %w", err)
 	}
 	defer src.Close()
+	return s.SaveReader(ctx, src, file.Size, file.Filename, file.Header.Get("Content-Type"), tenantID, knowledgeID)
+}
 
-	// Upload file to MinIO
-	_, err = s.client.PutObject(ctx, s.bucketName, objectName, src, file.Size, minio.PutObjectOptions{
-		ContentType: file.Header.Get("Content-Type"),
-	})
+func (s *minioFileService) SaveReader(
+	ctx context.Context, reader io.Reader, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID string,
+) (string, error) {
+	filePath, err := s.PrepareReaderPath(ctx, size, fileName, contentType, tenantID, knowledgeID)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload file to MinIO: %w", err)
+		return "", err
 	}
+	if err := s.SaveReaderTo(ctx, reader, size, fileName, contentType, tenantID, knowledgeID, filePath); err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
 
+func (s *minioFileService) PrepareReaderPath(
+	_ context.Context, _ int64, fileName, _ string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	ext := filepath.Ext(fileName)
+	objectName := fmt.Sprintf("%d/%s/source%s", tenantID, knowledgeID, ext)
 	return fmt.Sprintf("minio://%s/%s", s.bucketName, objectName), nil
+}
+
+func (s *minioFileService) SaveReaderTo(
+	ctx context.Context, reader io.Reader, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID, filePath string,
+) error {
+	objectName, err := s.parseMinioFilePath(filePath)
+	if err != nil {
+		return err
+	}
+	expectedPrefix := fmt.Sprintf("%d/%s/", tenantID, knowledgeID)
+	if !strings.HasPrefix(objectName, expectedPrefix) {
+		return fmt.Errorf("prepared MinIO path does not match upload ownership")
+	}
+	ext := filepath.Ext(fileName)
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(ext)
+	}
+	if _, err := s.client.PutObject(ctx, s.bucketName, objectName, reader, size, minio.PutObjectOptions{ContentType: contentType}); err != nil {
+		return fmt.Errorf("failed to upload file to MinIO: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) FinalizeReaderPath(
+	_ context.Context, _ int64, _ string, _ string, _ uint64, _ string, filePath string,
+) (string, error) {
+	return filePath, nil
 }
 
 // GetFile gets a file from MinIO

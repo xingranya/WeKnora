@@ -29,3 +29,18 @@ type FileService interface {
 	// when srcPath belongs to a different storage provider than this service.
 	CopyFile(ctx context.Context, srcPath string, tenantID uint64, knowledgeID string) (string, error)
 }
+
+// StreamingFileService 直接从读取器保存文件，无需构造 multipart.FileHeader。
+// 可续传上传通过该接口完成大文件落盘，避免把整个文件加载到内存。
+type StreamingFileService interface {
+	SaveReader(ctx context.Context, reader io.Reader, size int64, fileName, contentType string, tenantID uint64, knowledgeID string) (string, error)
+}
+
+// PreparedStreamingFileService 先生成稳定存储路径，再向该路径流式写入。
+// 可续传上传先持久化路径，进程崩溃后才能定位并继续或清理最终对象。
+type PreparedStreamingFileService interface {
+	StreamingFileService
+	PrepareReaderPath(ctx context.Context, size int64, fileName, contentType string, tenantID uint64, knowledgeID string) (string, error)
+	SaveReaderTo(ctx context.Context, reader io.Reader, size int64, fileName, contentType string, tenantID uint64, knowledgeID, filePath string) error
+	FinalizeReaderPath(ctx context.Context, size int64, fileName, contentType string, tenantID uint64, knowledgeID, filePath string) (string, error)
+}

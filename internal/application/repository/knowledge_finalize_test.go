@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS knowledges (
     file_path TEXT,
     file_hash VARCHAR(64),
     storage_size BIGINT NOT NULL DEFAULT 0,
+    source_file_quota_bytes BIGINT NOT NULL DEFAULT 0,
     metadata TEXT,
     tag_id VARCHAR(36),
     summary_status VARCHAR(32) DEFAULT 'none',
@@ -67,6 +68,10 @@ func setupKnowledgeTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, db.Exec(knowledgesTestDDL).Error)
+	require.NoError(t, db.AutoMigrate(
+		&types.KnowledgeFolder{},
+		&types.KnowledgeUploadSession{},
+	))
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }

@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -170,6 +171,8 @@ type Knowledge struct {
 	FilePath string `json:"file_path"`
 	// Storage size of the knowledge
 	StorageSize int64 `json:"storage_size"`
+	// SourceFileQuotaSize 是已原子计入空间配额的原始文件字节数，不向客户端暴露。
+	SourceFileQuotaSize int64 `json:"-" gorm:"column:source_file_quota_bytes;not null;default:0"`
 	// Metadata of the knowledge
 	Metadata JSON `json:"metadata"           gorm:"type:json"`
 	// CustomMetadata is user-authored descriptive metadata. It is deliberately
@@ -402,6 +405,41 @@ func (p ManualKnowledgePayload) IsDraft() bool {
 }
 
 const metadataKeyProcessOverrides = "process_overrides"
+
+// SetSourceFileQuotaBytes 记录已原子计入空间配额的原始文件字节数。
+// StorageSize 继续只表示解析和索引占用，避免改变既有统计语义。
+func (k *Knowledge) SetSourceFileQuotaBytes(size int64) error {
+	if k == nil {
+		return nil
+	}
+	k.SourceFileQuotaSize = max(size, 0)
+	return nil
+}
+
+// SourceFileQuotaBytes 返回已计入空间配额的原始文件字节数。
+// 历史知识没有该标记，返回 0，避免删除时错误扣减未回填的数据。
+func (k *Knowledge) SourceFileQuotaBytes() int64 {
+	if k == nil {
+		return 0
+	}
+	return max(k.SourceFileQuotaSize, 0)
+}
+
+// QuotaStorageBytes 返回该知识已计入空间配额的总字节数。
+// StorageSize 保持解析/索引占用语义，原始文件计量通过专用数据库列维护。
+func (k *Knowledge) QuotaStorageBytes() int64 {
+	if k == nil {
+		return 0
+	}
+	sourceBytes := k.SourceFileQuotaBytes()
+	if k.StorageSize <= 0 {
+		return sourceBytes
+	}
+	if sourceBytes > math.MaxInt64-k.StorageSize {
+		return math.MaxInt64
+	}
+	return k.StorageSize + sourceBytes
+}
 
 // ProcessOverrides parses process config overrides from knowledge metadata.
 func (k *Knowledge) ProcessOverrides() (*KnowledgeProcessOverrides, error) {

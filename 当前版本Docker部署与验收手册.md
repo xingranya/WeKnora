@@ -41,9 +41,13 @@ WEKNORA_VERSION=deploy-5b492baa
 AUTO_MIGRATE=true
 STORAGE_TYPE=minio
 SSRF_WHITELIST_EXTRA=searxng,qdrant,milvus,weaviate,doris-fe,doris-be,host.docker.internal,minio,192.168.0.20
+KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=2048
+KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB=4
+KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS=24
+KNOWLEDGE_UPLOAD_TEMP_DIR=/data/files/upload-sessions
 ```
 
-其余 `.env` 内容包含数据库、Redis、MinIO、JWT、模型和集成凭据，不得写入 Git、命令参数、构建日志或本手册。
+`KNOWLEDGE_UPLOAD_*` 是知识库可续传上传的非敏感部署参数：默认单文件 2 GiB、单分片 4 MiB、会话保留 24 小时，暂存目录位于 app 的持久化 `/data/files` 卷内。其余 `.env` 内容包含数据库、Redis、MinIO、JWT、模型和集成凭据，不得写入 Git、命令参数、构建日志或本手册。
 
 ### 1.3 当前运行组件与专用文件
 
@@ -75,6 +79,7 @@ backups/
 - 公司预置模型权限、脱敏、系统管理员维护和模型测试限制。
 - `adopt_existing_model_ids` 声明式采用现有公司模型，保留数据库参数和加密凭据。
 - 平台级解析引擎配置及迁移 `000085`。
+- 持久化知识库文件夹、可续传上传会话及迁移 `000086`。
 - 知识库、临时文档、聊天附件统一使用平台解析配置。
 - 模型设置、解析引擎设置、API、国际化和回归测试更新。
 - Docker 构建支持 Debian、Rust 镜像参数。
@@ -103,9 +108,9 @@ a07a218 style(models): 格式化预置模型测试
 3. SSH 必须使用严格主机校验，禁止 `StrictHostKeyChecking=no`。
 4. 密码只在 SSH 交互提示中输入，禁止放入命令、脚本、文档或日志。
 5. `.env`、数据库和 Docker volume 属于运行数据，拉取代码时不得覆盖或删除。
-6. 构建成功前不切换运行容器；切换顺序固定为 app、frontend、docreader。
-7. app 未恢复 healthy 前不得继续切换其他服务。
-8. 任何模型采用、迁移和清理操作必须先生成可恢复备份。
+6. 构建成功前不切换运行容器；正式切换顺序固定为 `migration -> docreader -> app -> frontend`。其中 `migration` 使用当前 app 镜像内的 migrate 工具执行，完成后 app 使用 `AUTO_MIGRATE=false` 启动。
+7. `000086` 迁移必须 clean，docreader 必须先恢复 healthy，之后才能切换 app；app 未恢复 healthy 前不得继续切换 frontend。
+8. 任何模型采用、迁移和清理操作必须先生成可恢复备份；`000086` 的 down 迁移会删除文件夹和上传会话表，不能把它当作无损回滚。
 
 ## 4. 部署前检查
 
@@ -187,6 +192,14 @@ cp -a .env ".env.before-deploy-${DEPLOY_TS}"
 /home/fox/WeKnora/backups/frontend-dist-live-before-5b492baa-20260818-175734
 /home/fox/WeKnora/.env.before-extension-v131-20260818-175734
 ```
+
+本次知识库文件夹与可续传上传发布的完整回滚快照：
+
+```text
+/home/fox/WeKnora/backups/releases/20260819-154754
+```
+
+该目录约 13 GiB，包含 16 个运行镜像归档、10 个 `weknora_*` Docker 卷、PostgreSQL custom dump 与 globals、`.env`/Compose/config/frontend dist、Git bundle、MinerU systemd 配置和可恢复 Conda 环境。镜像归档为 `images/running-images-20260819-154754.tar.zst`，三个核心镜像另有不可覆盖回滚标签 `rollback-before-large-upload-20260819-154754`。回滚时先停止写入并按清单选择代码、镜像、数据库或卷恢复；不要直接覆盖运行中的数据卷，也不要把快照中的任何环境文件内容复制到命令、日志或文档中。
 
 ### 5.2 模型采用状态
 
@@ -352,10 +365,47 @@ chmod 600 "$ENV_TMP"
 mv "$ENV_TMP" .env
 ```
 
-### 8.2 切换 app
+### 8.2 执行 migration
+
+当前 Compose 没有独立的 migration 服务；迁移工具随 app 镜像放在 `/usr/local/bin/migrate`，迁移文件位于 `/app/migrations/versioned`。先使用新 app 镜像执行迁移，再按 `docreader -> app -> frontend` 切换运行服务。下面的命令只引用 Compose 已加载的环境变量，不在命令行填写或输出任何数据库凭据。
+
+`000086` 不会改写历史 `knowledges.folder_path`。它会在创建新表前只读预检可确定的结构边界；如果报告历史路径需要应用层规范化，必须立即停止，先备份并审计对应知识记录，禁止用临时 SQL 批量改写原路径后强行继续迁移。
 
 ```bash
-AUTO_MIGRATE=true WEKNORA_VERSION="$DEPLOY_TAG" \
+WEKNORA_VERSION="$DEPLOY_TAG" \
+docker compose -p weknora run --rm --no-deps \
+  --entrypoint /bin/sh app \
+  -lc 'DB_URL=$(python3 -c "import os, urllib.parse as u; e=os.environ; print(\"postgres://{}:{}@{}:{}/{}?sslmode=disable\".format(u.quote(e[\"DB_USER\"], safe=\"\"), u.quote(e[\"DB_PASSWORD\"], safe=\"\"), e[\"DB_HOST\"], e[\"DB_PORT\"], e[\"DB_NAME\"]))"); exec migrate -path /app/migrations/versioned -database "$DB_URL" up'
+```
+
+迁移命令返回成功后，必须确认 `000086_knowledge_folders_and_upload_sessions` 已应用且状态 clean：
+
+```bash
+docker exec WeKnora-postgres sh -lc \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+  "SELECT version, dirty FROM schema_migrations;"'
+```
+
+期望最后一行类似 `86|f`。如果迁移失败、版本为 dirty 或未达到 86，立即停止，不得继续切换服务。
+
+### 8.3 切换 docreader
+
+```bash
+WEKNORA_VERSION="$DEPLOY_TAG" \
+docker compose -p weknora up -d --no-deps docreader
+
+docker inspect WeKnora-docreader \
+  --format 'image={{.Config.Image}} state={{.State.Status}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+
+docker logs --since 2m WeKnora-docreader 2>&1 | tail -n 200
+```
+
+必须确认 docreader `healthy`、重启次数为 0，且日志无 `panic`、`FATAL`、`ERROR` 后再继续。
+
+### 8.4 切换 app
+
+```bash
+AUTO_MIGRATE=false WEKNORA_VERSION="$DEPLOY_TAG" \
 docker compose -p weknora up -d --no-deps app
 
 docker inspect WeKnora-app \
@@ -366,14 +416,15 @@ docker logs --since 2m WeKnora-app 2>&1 | tail -n 200
 
 必须确认 app `healthy`、重启次数为 0、日志无 `panic`、`FATAL`、`ERROR` 后再继续。
 
-### 8.3 切换 frontend 和 docreader
+### 8.5 切换 frontend
 
-仅在对应源码或运行配置变化时重建容器：
+仅在对应源码或运行配置变化时切换 frontend：
 
 ```bash
 docker compose -p weknora up -d --no-deps frontend
-docker compose -p weknora up -d --no-deps docreader
 ```
+
+切换完成后的服务顺序必须保持为 migration 已完成、docreader healthy、app healthy、frontend HTTP 200。不要使用普通的 `docker compose up -d` 让 Compose 依据 `depends_on` 自行重排发布顺序。
 
 不要为了标签显示而重启镜像 ID 未变化且健康的服务。
 
@@ -418,7 +469,7 @@ migrations/versioned/000085_platform_parser_engine_config.up.sql
 当前数据库状态：
 
 ```text
-schema_migrations: 85, dirty=false
+schema_migrations: 86, dirty=false
 platform_parser_engine_configs: 1 row
 ```
 
@@ -456,6 +507,23 @@ unsafe MinIO endpoint: SSRF validation failed
 当前公司模型服务 `http://192.168.0.20:8976/v1` 已按精确 IP 放行。app 容器中的 `SSRF_WHITELIST_EXTRA` 已确认包含 `192.168.0.20`，容器到 `/v1/models` 返回 HTTP 401，说明网络连通且目标接口要求认证。
 
 只允许可信的内部服务名或精确 IP 进入白名单，不要为单个服务放开整个私网 CIDR。
+
+### 9.4 持久化文件夹与可续传上传
+
+本次版本由 PostgreSQL 迁移 `migrations/versioned/000086_knowledge_folders_and_upload_sessions.up.sql` 创建持久化文件夹、上传会话和上传分片表，并回填已有知识条目的文件夹祖先目录；生产发布前已只读确认远端仍为 `85|f`，所以 `000086` 尚未在生产执行，不需要兼容性 `000087`。SQLite/Lite 使用 `migrations/sqlite/000005_knowledge_folders_and_uploads` 提供同等表和字段。上传会话保存 `final_file_path` 和 `finalize_stage`，用于服务重启后继续完成或清理已经写入最终存储的对象；`knowledges.source_file_quota_bytes` 专用列记录已计入空间配额的原始文件字节数。对应 API 位于 `/api/v1/knowledge-bases/:id/knowledge/folders` 和 `/api/v1/knowledge-bases/:id/knowledge/uploads`。
+
+当前非敏感配置为：
+
+```text
+KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=2048       # 2 GiB
+KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB=4             # 4 MiB
+KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS=24        # 24 小时
+KNOWLEDGE_UPLOAD_TEMP_DIR=/data/files/upload-sessions
+```
+
+`KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB` 只允许 1-16 的整数。当前 Compose 只持久化 `/data/files`，所以 `KNOWLEDGE_UPLOAD_TEMP_DIR` 必须位于该目录下；多 app 副本必须把同一绝对路径挂载为所有副本可读写的共享 RWX 存储。前端队列默认只运行一个活动上传任务，其他任务排队执行；当前已取消人为上传带宽限速。该单活动策略是用户界面队列的默认调度方式，不是新增的带宽限制。服务端同一用户最多保留 5 个未完成会话，同一空间最多保留 10 GiB 未完成上传暂存量；不能据此扩大并发或绕过会话过期清理。
+
+app 启动后立即扫描 `completing` 和 cleanup-pending 会话，之后每 5 分钟重试；恢复时必须加载会话所属空间的完整存储配置，不能回退到其他空间或进程默认后端。最终对象流程为“持久化物理准备路径 -> 流式写入 -> 幂等注册资源引用 -> 创建知识 -> 清理分片”，任一步骤重启后都从数据库阶段继续。
 
 ## 10. 验收
 
@@ -521,6 +589,31 @@ docker exec WeKnora-postgres sh -lc \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
   "SELECT version, dirty FROM schema_migrations;
    SELECT COUNT(*) FROM platform_parser_engine_configs;
+   SELECT to_regclass('"'"'public.knowledge_folders'"'"');
+   SELECT to_regclass('"'"'public.knowledge_upload_sessions'"'"');
+   SELECT to_regclass('"'"'public.knowledge_upload_parts'"'"');
+   SELECT character_maximum_length
+   FROM information_schema.columns
+   WHERE table_schema = '"'"'public'"'"'
+     AND table_name = '"'"'knowledge_upload_sessions'"'"'
+     AND column_name = '"'"'user_id'"'"';
+   SELECT COUNT(*)
+   FROM information_schema.columns
+   WHERE table_schema = '"'"'public'"'"'
+     AND table_name = '"'"'knowledge_upload_sessions'"'"'
+     AND column_name IN ('"'"'final_file_path'"'"', '"'"'finalize_stage'"'"');
+   SELECT COUNT(*)
+   FROM information_schema.columns
+   WHERE table_schema = '"'"'public'"'"'
+     AND table_name = '"'"'knowledges'"'"'
+     AND column_name = '"'"'source_file_quota_bytes'"'"';
+   SELECT indexdef LIKE '"'"'%completing%'"'"'
+      AND indexdef LIKE '"'"'%completed_cleanup_pending%'"'"'
+      AND indexdef LIKE '"'"'%cancelled_cleanup_pending%'"'"'
+      AND indexdef LIKE '"'"'%expired_cleanup_pending%'"'"'
+   FROM pg_indexes
+   WHERE schemaname = '"'"'public'"'"'
+     AND indexname = '"'"'idx_upload_sessions_expiry'"'"';
    SELECT COUNT(*), COUNT(*) FILTER (WHERE is_builtin = true)
    FROM models
    WHERE deleted_at IS NULL AND (tenant_id = 10002 OR is_builtin = true);"'
@@ -529,10 +622,19 @@ docker exec WeKnora-postgres sh -lc \
 期望输出：
 
 ```text
-85|f
+86|f
 1
+knowledge_folders
+knowledge_upload_sessions
+knowledge_upload_parts
+512
+2
+1
+t
 14|8
 ```
+
+还应通过真实 API 验收一次：创建一个测试文件夹，确认目录树能看到空文件夹；初始化一个唯一命名的可续传上传，上传至少一个 4 MiB 分片，查询 `received_bytes` 和 `received_parts`，然后取消会话并确认暂存记录已清理。测试数据必须使用专用知识库并在验收后删除。
 
 ### 10.4 页面与 API
 
@@ -544,6 +646,7 @@ docker exec WeKnora-postgres sh -lc \
 - 模型页显示 8 个公司预置模型。
 - 普通用户响应不得包含公司模型凭据、Base URL 或扩展配置。
 - `/api/v1/system/info` 返回当前提交号且 `db_migration_error` 为空。
+- `.env` 中 `LOG_FORMAT` 留空或使用包含 `%msg` 的模板，禁止写成 `json`，否则容器日志只会输出字面量 `json`。
 
 ### 10.5 端到端解析
 
@@ -561,18 +664,70 @@ docker exec WeKnora-postgres sh -lc \
 
 ## 11. 回滚
 
-### 11.1 回滚 app 镜像
+### 11.1 使用发布前快照回滚代码与镜像
 
-```bash
-cp -a .env ".env.failed-$(date +%Y%m%d-%H%M%S)"
+本次发布前快照为：
 
-WEKNORA_VERSION=deploy-2be2572 \
-docker compose -p weknora up -d --no-deps app
+```text
+/home/fox/WeKnora/backups/releases/20260819-154754
 ```
 
-若回滚镜像不包含当前数据库迁移，应临时传入 `AUTO_MIGRATE=false`，待确认迁移兼容后再恢复。
+回滚前先停止将要重建的服务，保留当前失败目录、`.env` 备份和 Docker 数据卷；不得直接覆盖生产目录，也不得删除未解释的运行数据。先只读确认快照：
 
-### 11.2 回滚公司模型采用
+```bash
+SNAPSHOT=/home/fox/WeKnora/backups/releases/20260819-154754
+test -d "$SNAPSHOT"
+find "$SNAPSHOT" -maxdepth 2 -type f -printf '%P\n' | sort
+zstd -t "$SNAPSHOT/images/running-images-20260819-154754.tar.zst"
+git bundle verify "$(find "$SNAPSHOT" -type f -name '*.bundle' -print -quit)"
+pg_restore --list "$(find "$SNAPSHOT" -type f -name '*.dump' -print -quit)" >/dev/null
+```
+
+确认快照清单、SHA256、镜像 archive、Git bundle 和 PostgreSQL dump 后，优先加载全量镜像归档并切换三个核心 rollback 标签。常规业务回滚不降数据库；只有确认数据或迁移损坏时，才停止全部写入并恢复 PostgreSQL dump、MinIO 及其他卷快照。恢复后仍按 `migration -> docreader -> app -> frontend` 的顺序验收。
+
+### 11.2 回滚 migration 000086
+
+只有在确认必须放弃持久化文件夹和可续传上传能力、且已经完成数据库备份后，才允许回滚 `000086`。该 migration 的 down 文件会删除 `knowledge_folders`、`knowledge_upload_sessions` 和 `knowledge_upload_parts` 表，相关空文件夹记录、上传会话和分片进度会丢失；已经落入正式文件存储的知识文件不会因为 down 迁移自动恢复旧业务状态。
+
+使用发布前不可覆盖的 app rollback 标签执行一次 down 迁移。发布前镜像不包含 `000086` 文件，因此只读挂载当前已审核的迁移目录；执行前必须确认数据库恰好位于 `86|f`。变量在本代码块内定义，全新 shell 会话不依赖部署阶段残留变量，也不会退化到 `latest`：
+
+```bash
+cd /home/fox/WeKnora
+ROLLBACK_TAG=rollback-before-large-upload-20260819-154754
+ROLLBACK_APP_IMAGE="wechatopenai/weknora-app:${ROLLBACK_TAG}"
+test -f migrations/versioned/000086_knowledge_folders_and_upload_sessions.down.sql
+ROLLBACK_APP_IMAGE_ID=$(docker image inspect "$ROLLBACK_APP_IMAGE" --format '{{.Id}}')
+test -n "$ROLLBACK_APP_IMAGE_ID"
+test "$(docker exec WeKnora-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT version, dirty FROM schema_migrations;"')" = '86|f'
+
+WEKNORA_VERSION="$ROLLBACK_TAG" \
+docker compose -p weknora run --rm --no-deps \
+  -v "$PWD/migrations/versioned:/app/migrations/versioned:ro" \
+  --entrypoint /bin/sh app \
+  -lc 'DB_URL=$(python3 -c "import os, urllib.parse as u; e=os.environ; print(\"postgres://{}:{}@{}:{}/{}?sslmode=disable\".format(u.quote(e[\"DB_USER\"], safe=\"\"), u.quote(e[\"DB_PASSWORD\"], safe=\"\"), e[\"DB_HOST\"], e[\"DB_PORT\"], e[\"DB_NAME\"]))"); exec migrate -path /app/migrations/versioned -database "$DB_URL" down 1'
+```
+
+回滚后必须确认 `schema_migrations` 为 `85|f`，并停止使用依赖 `000086` 的 app/frontend 镜像；如果只是回滚业务镜像而保留数据库迁移，应继续使用 `AUTO_MIGRATE=false`，先确认旧版本不会访问新表。
+
+### 11.3 回滚 app 镜像
+
+```bash
+cd /home/fox/WeKnora
+ROLLBACK_TAG=rollback-before-large-upload-20260819-154754
+ROLLBACK_APP_IMAGE="wechatopenai/weknora-app:${ROLLBACK_TAG}"
+ROLLBACK_APP_IMAGE_ID=$(docker image inspect "$ROLLBACK_APP_IMAGE" --format '{{.Id}}')
+test -n "$ROLLBACK_APP_IMAGE_ID"
+cp -a .env ".env.failed-$(date +%Y%m%d-%H%M%S)"
+
+AUTO_MIGRATE=false WEKNORA_VERSION="$ROLLBACK_TAG" \
+docker compose -p weknora up -d --no-deps app
+
+test "$(docker inspect WeKnora-app --format '{{.Image}}')" = "$ROLLBACK_APP_IMAGE_ID"
+```
+
+发布前 rollback 镜像不依赖 `000086`，因此 app 回滚固定使用 `AUTO_MIGRATE=false`。只有完成旧镜像与当前数据库结构的兼容性确认后，才能恢复自动迁移。
+
+### 11.4 回滚公司模型采用
 
 本次采用前 8 个公司模型均为 `is_builtin=false`。需要撤销时必须在事务中按 `config/builtin_models.yaml` 的 8 个 ID 明确更新，禁止按整个租户无条件批量操作：
 
@@ -597,7 +752,7 @@ COMMIT;
 
 执行前后都应与 `models-before-company-adoption-20260817-2336.csv` 对照。
 
-### 11.3 回滚源码目录
+### 11.5 回滚源码目录
 
 只有当前 Git 仓库损坏且无法通过正常 Git 操作恢复时，才使用：
 
@@ -622,12 +777,17 @@ COMMIT;
 - [ ] 远端 Git 工作树干净且 HEAD 正确。
 - [ ] `.env`、模型状态和旧镜像已备份。
 - [ ] app 镜像包含 anydoc、迁移、Skill 和当前提交号。
-- [ ] app 先切换并恢复 healthy。
-- [ ] frontend、docreader 仅在实际变化时切换。
-- [ ] 迁移版本 clean，平台解析配置存在。
+- [ ] migration 已应用到 000086 且状态 clean。
+- [ ] docreader 先切换并恢复 healthy。
+- [ ] app 在 docreader healthy 后切换并恢复 healthy，使用 `AUTO_MIGRATE=false`。
+- [ ] frontend 在 app healthy 后切换并返回 HTTP 200。
+- [ ] 平台解析配置存在，知识文件夹和上传会话表存在。
+- [ ] 可续传上传配置为 2 GiB、4 MiB、24 小时；前端默认单活动上传且没有人为带宽限速。
 - [ ] 公司预置模型数量正确且普通用户脱敏。
 - [ ] Skill ZIP、Chrome CRX 可下载。
 - [ ] 知识库和临时附件端到端解析通过。
+- [ ] 持久化空文件夹创建、目录树展示和空文件夹删除通过。
+- [ ] 可续传上传初始化、分片校验、进度查询、取消和清理通过。
 - [ ] 验收数据已清理。
 - [ ] 日志无 panic、FATAL、ERROR。
 - [ ] 回滚路径和备份文件可读。

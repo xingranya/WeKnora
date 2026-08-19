@@ -23,6 +23,12 @@ type createKnowledgeFileRepoStub struct {
 	createdKnowledge *types.Knowledge
 }
 
+func (r *createKnowledgeFileRepoStub) EnsureKnowledgeFolderPath(
+	_ context.Context, _ uint64, _ string, _ string, _ string,
+) error {
+	return nil
+}
+
 func (r *createKnowledgeFileRepoStub) CheckKnowledgeExists(
 	ctx context.Context,
 	tenantID uint64,

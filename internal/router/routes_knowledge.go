@@ -71,11 +71,18 @@ func RegisterKnowledgeRoutes(r *gin.RouterGroup, handler *handler.KnowledgeHandl
 	kbRead := kb.With(apiKeyRetrieve(apiKeyFullAccess()))
 	{
 		kb.POST("/file", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CreateKnowledgeFromFile)
+		kb.POST("/uploads", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.InitializeKnowledgeUpload)
+		kb.GET("/uploads/:upload_id", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.GetKnowledgeUpload)
+		kb.PUT("/uploads/:upload_id/parts/:part_number", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.WriteKnowledgeUploadPart)
+		kb.POST("/uploads/:upload_id/complete", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CompleteKnowledgeUpload)
+		kb.DELETE("/uploads/:upload_id", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CancelKnowledgeUpload)
 		kb.POST("/url", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CreateKnowledgeFromURL)
 		kb.POST("/manual", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CreateManualKnowledge)
 		kbRead.GET("", g.Viewer(), g.KBAccessRead("id"), handler.ListKnowledge)
 		kbRead.GET("/folders", g.Viewer(), g.KBAccessRead("id"), handler.ListKnowledgeFolders)
+		kb.POST("/folders", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.CreateKnowledgeFolder)
 		kb.PUT("/folders", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.RenameKnowledgeFolder)
+		kb.DELETE("/folders", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), handler.DeleteKnowledgeFolder)
 		// Clearing all contents under a KB is a destructive op; gate
 		// behind Admin instead of Contributor.
 		kb.With(apiKeyFullAccess()).DELETE("", g.Admin(), g.KBAccessWrite("id"), handler.ClearKnowledgeBaseContents)

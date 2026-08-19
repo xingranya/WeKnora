@@ -48,3 +48,17 @@ func TestSetProcessOverridesPreservesOtherMetadata(t *testing.T) {
 	require.NotNil(t, gotOverrides)
 	require.False(t, *gotOverrides.EnableMultimodel)
 }
+
+func TestSourceFileQuotaBytesPreservesStorageSizeSemantics(t *testing.T) {
+	knowledge := &Knowledge{StorageSize: 25}
+	require.NoError(t, knowledge.SetSourceFileQuotaBytes(75))
+	require.Equal(t, int64(75), knowledge.SourceFileQuotaBytes())
+	require.Equal(t, int64(25), knowledge.StorageSize)
+	require.Equal(t, int64(100), knowledge.QuotaStorageBytes())
+
+	require.NoError(t, knowledge.SetProcessOverrides(&KnowledgeProcessOverrides{
+		ParserEngineOverrides: map[string]string{"pdf_force_scanned": "true"},
+	}))
+	require.Equal(t, int64(75), knowledge.SourceFileQuotaBytes())
+	require.NotContains(t, string(knowledge.Metadata), "source_file_quota_bytes")
+}

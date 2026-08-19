@@ -141,3 +141,25 @@ func TestListKnowledgeFolderCounts(t *testing.T) {
 	assert.Equal(t, "docs", tree.Folders[0].Path)
 	assert.Equal(t, int64(2), tree.Folders[0].TotalCount)
 }
+
+func TestDeleteEmptyKnowledgeFolderTreeRejectsActiveUpload(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+
+	const tenantID = uint64(1)
+	const kbID = "kb-folder-delete"
+	require.NoError(t, repo.EnsureKnowledgeFolderPath(ctx, tenantID, kbID, "docs/spec", "user-1"))
+	session := newKnowledgeUploadTestSession(
+		"upload-delete-guard", tenantID, kbID, "user-1", 1024, types.KnowledgeUploadCreated,
+	)
+	session.FolderPath = "docs/spec"
+	require.NoError(t, repo.CreateKnowledgeUploadSession(ctx, session))
+
+	err := repo.DeleteEmptyKnowledgeFolderTree(ctx, tenantID, kbID, "docs")
+	require.ErrorIs(t, err, types.ErrKnowledgeFolderHasActiveUploads)
+
+	folders, err := repo.ListKnowledgeFolders(ctx, tenantID, kbID)
+	require.NoError(t, err)
+	assert.Len(t, folders, 2)
+}

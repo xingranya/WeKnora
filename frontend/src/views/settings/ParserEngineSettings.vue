@@ -228,6 +228,11 @@
             </t-select>
           </div>
           <div class="form-item">
+            <label class="form-label">{{ $t('settings.parser.maxConcurrency') }}</label>
+            <t-input-number v-model="config.mineru_max_concurrency" :min="1" :max="32" />
+            <p class="form-desc">{{ $t('settings.parser.maxConcurrencyHint') }}</p>
+          </div>
+          <div class="form-item">
             <label class="form-label">vLLM {{ $t('settings.parser.serverUrl') }}</label>
             <t-input
               v-model="config.mineru_vlm_server_url"
@@ -404,6 +409,7 @@ const DEFAULT_PARSER_CONFIG: ParserEngineConfig = {
   mineru_parse_method: 'auto',
   mineru_enable_ocr: true,
   mineru_language: 'ch',
+  mineru_max_concurrency: 1,
   mineru_cloud_model: 'pipeline',
   mineru_cloud_enable_formula: true,
   mineru_cloud_enable_table: true,
@@ -542,6 +548,7 @@ async function loadConfig() {
       mineru_parse_method: data?.mineru_parse_method ?? (data?.mineru_enable_ocr === false ? 'txt' : 'auto'),
       mineru_enable_ocr: data?.mineru_enable_ocr ?? DEFAULT_PARSER_CONFIG.mineru_enable_ocr ?? true,
       mineru_language: data?.mineru_language ?? DEFAULT_PARSER_CONFIG.mineru_language ?? 'ch',
+      mineru_max_concurrency: data?.mineru_max_concurrency ?? DEFAULT_PARSER_CONFIG.mineru_max_concurrency ?? 1,
       mineru_cloud_model: data?.mineru_cloud_model ?? DEFAULT_PARSER_CONFIG.mineru_cloud_model ?? '',
       mineru_cloud_enable_formula: data?.mineru_cloud_enable_formula ?? DEFAULT_PARSER_CONFIG.mineru_cloud_enable_formula ?? true,
       mineru_cloud_enable_table: data?.mineru_cloud_enable_table ?? DEFAULT_PARSER_CONFIG.mineru_cloud_enable_table ?? true,
@@ -585,6 +592,7 @@ function buildConfigPayload(): ParserEngineConfig {
     // Keep the legacy toggle during rolling upgrades. New servers prefer parse_method.
     mineru_enable_ocr: config.value.mineru_parse_method !== 'txt',
     mineru_language: config.value.mineru_language?.trim() ?? '',
+    mineru_max_concurrency: Math.max(1, Number(config.value.mineru_max_concurrency) || 1),
     mineru_cloud_model: config.value.mineru_cloud_model?.trim() ?? '',
     mineru_cloud_enable_formula: config.value.mineru_cloud_enable_formula,
     mineru_cloud_enable_table: config.value.mineru_cloud_enable_table,

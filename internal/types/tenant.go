@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -318,8 +319,9 @@ type ParserEngineConfig struct {
 	MinerUParseMethod   string `json:"mineru_parse_method,omitempty"`
 	// MinerUEnableOCR is retained for compatibility with configurations saved
 	// before parse_method supported auto/ocr/txt.
-	MinerUEnableOCR *bool  `json:"mineru_enable_ocr,omitempty"`
-	MinerULanguage  string `json:"mineru_language,omitempty"`
+	MinerUEnableOCR      *bool  `json:"mineru_enable_ocr,omitempty"`
+	MinerULanguage       string `json:"mineru_language,omitempty"`
+	MinerUMaxConcurrency int    `json:"mineru_max_concurrency,omitempty"`
 
 	// MinerU 云 API 解析参数
 	MinerUCloudModel         string `json:"mineru_cloud_model,omitempty"` // model_version: pipeline, vlm, MinerU-HTML
@@ -421,6 +423,9 @@ func (c *ParserEngineConfig) ToOverridesMap() map[string]string {
 	}
 	if c.MinerULanguage != "" {
 		m["mineru_language"] = c.MinerULanguage
+	}
+	if c.MinerUMaxConcurrency > 0 {
+		m["mineru_max_concurrency"] = strconv.Itoa(c.MinerUMaxConcurrency)
 	}
 	if c.MinerUCloudModel != "" {
 		m["mineru_cloud_model"] = c.MinerUCloudModel

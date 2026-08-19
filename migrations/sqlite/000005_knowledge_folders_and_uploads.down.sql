@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_upload_parts_session;
+DROP TABLE IF EXISTS knowledge_upload_parts;
+DROP INDEX IF EXISTS idx_upload_sessions_expiry;
+DROP INDEX IF EXISTS idx_upload_sessions_kb;
+DROP INDEX IF EXISTS idx_upload_sessions_owner;
+DROP TABLE IF EXISTS knowledge_upload_sessions;
+DROP INDEX IF EXISTS idx_knowledge_folders_kb;
+DROP INDEX IF EXISTS uniq_knowledge_folders_active_path;
+DROP TABLE IF EXISTS knowledge_folders;
+ALTER TABLE knowledges DROP COLUMN source_file_quota_bytes;

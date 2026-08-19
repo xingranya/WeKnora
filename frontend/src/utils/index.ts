@@ -7,6 +7,7 @@ declare global {
   interface Window {
     __RUNTIME_CONFIG__?: {
       MAX_FILE_SIZE_MB?: number;
+      KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB?: number;
       DEFAULT_LOCALE?: string;
     };
   }
@@ -18,6 +19,10 @@ export const MAX_FILE_SIZE_MB = window.__RUNTIME_CONFIG__?.MAX_FILE_SIZE_MB
   || Number(import.meta.env.VITE_MAX_FILE_SIZE_MB) 
   || 50;
 export const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+export const KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB = window.__RUNTIME_CONFIG__?.KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB
+  || Number(import.meta.env.VITE_KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB)
+  || 2048;
+export const KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_BYTES = KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024;
 
 export function generateRandomString(length: number) {
   let result = "";
@@ -62,5 +67,9 @@ export function kbFileTypeVerification(file: any, silent = false, validTypes?: S
     }
     return true;
   }
-  return fileSizeVerification(file, silent);
+  if (file.size <= KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_BYTES) return false;
+  if (!silent) {
+    MessagePlugin.error(i18n.global.t('error.fileSizeExceeded', { size: KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB }));
+  }
+  return true;
 }

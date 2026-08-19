@@ -15,6 +15,7 @@ package limiter
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -97,10 +98,25 @@ end
 return 0
 `)
 
+var renewSemaphoreScript = redis.NewScript(`
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not score then
+    return 0
+end
+if tonumber(score) <= tonumber(ARGV[2]) then
+    redis.call('ZREM', KEYS[1], ARGV[1])
+    return 0
+end
+redis.call('ZADD', KEYS[1], ARGV[2] + ARGV[3], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[3] * 2)
+return 1
+`)
+
 type redisLimiter struct {
 	rdb          *redis.Client
 	ttl          time.Duration
 	pollInterval time.Duration
+	strict       bool
 	tracked      sync.Map // model ID -> *trackedSemaphore
 }
 
@@ -114,9 +130,39 @@ func NewRedisLimiter(rdb *redis.Client) ModelConcurrencyLimiter {
 	}
 }
 
+// NewStrictRedisLimiter 创建后端故障时拒绝放行的分布式并发限制器。
+func NewStrictRedisLimiter(rdb *redis.Client) ModelConcurrencyLimiter {
+	return &redisLimiter{
+		rdb:          rdb,
+		ttl:          defaultLeaseTTL,
+		pollInterval: defaultPollInterval,
+		strict:       true,
+	}
+}
+
 func (l *redisLimiter) Acquire(ctx context.Context, key string, limit int) (func(), error) {
-	if l == nil || l.rdb == nil || limit <= 0 || key == "" {
-		return noop, nil
+	_, release, err := l.acquire(ctx, key, limit, false)
+	return release, err
+}
+
+// AcquireLease 返回一个在严格租约丢失时会被取消的上下文。
+func (l *redisLimiter) AcquireLease(
+	ctx context.Context, key string, limit int,
+) (context.Context, func(), error) {
+	return l.acquire(ctx, key, limit, true)
+}
+
+func (l *redisLimiter) acquire(
+	ctx context.Context, key string, limit int, observeLease bool,
+) (context.Context, func(), error) {
+	if l == nil || limit <= 0 || key == "" {
+		return ctx, noop, nil
+	}
+	if l.rdb == nil {
+		if l.strict {
+			return nil, nil, fmt.Errorf("distributed limiter backend is unavailable")
+		}
+		return ctx, noop, nil
 	}
 
 	zkey := keyPrefix + key
@@ -143,24 +189,42 @@ func (l *redisLimiter) Acquire(ctx context.Context, key string, limit int) (func
 		res, err := acquireScript.Run(ctx, l.rdb, []string{zkey},
 			now, limit, token, ttlMs).Int()
 		if err != nil {
-			// Fail open: a limiter outage must never block model traffic.
+			if l.strict {
+				return nil, nil, fmt.Errorf("acquire distributed concurrency slot: %w", err)
+			}
+			// 模型调用保持故障开放，避免 Redis 故障中断普通模型流量。
 			logger.Warnf(ctx, "[ModelLimiter] acquire failed for key=%s, failing open: %v", key, err)
-			return noop, nil
+			return ctx, noop, nil
 		}
 		if res == 1 {
-			return l.hold(zkey, token), nil
+			leaseCtx := ctx
+			var cancelLease context.CancelCauseFunc
+			if observeLease {
+				leaseCtx, cancelLease = context.WithCancelCause(ctx)
+			}
+			return leaseCtx, l.hold(zkey, token, cancelLease), nil
 		}
 
 		timer.Reset(l.pollInterval)
 		select {
 		case <-ctx.Done():
-			// Fail open on cancellation too: let the inner call observe the
-			// cancelled context and return its own error, rather than us
-			// synthesising one here.
-			return noop, nil
+			if l.strict {
+				return nil, nil, ctx.Err()
+			}
+			return ctx, noop, nil
 		case <-timer.C:
 		}
 	}
+}
+
+func (l *redisLimiter) renewSemaphoreLease(zkey, token string, now int64) (bool, error) {
+	renewed, err := renewSemaphoreScript.Run(
+		context.Background(), l.rdb, []string{zkey}, token, now, l.ttl.Milliseconds(),
+	).Int()
+	if err != nil {
+		return false, err
+	}
+	return renewed == 1, nil
 }
 
 func (l *redisLimiter) RuntimeStats(ctx context.Context) ([]RuntimeStat, error) {
@@ -198,9 +262,11 @@ func (l *redisLimiter) SetModelName(modelID, name string) {
 
 // hold starts a heartbeat that refreshes the lease and returns an idempotent
 // release that stops the heartbeat and drops the slot.
-func (l *redisLimiter) hold(zkey, token string) func() {
+func (l *redisLimiter) hold(zkey, token string, cancelLease context.CancelCauseFunc) func() {
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(l.ttl / 3)
 		defer t.Stop()
 		for {
@@ -209,22 +275,25 @@ func (l *redisLimiter) hold(zkey, token string) func() {
 				return
 			case <-t.C:
 				now := time.Now().UnixMilli()
-				// Detached ctx: the heartbeat must outlive request ctx up to
-				// release. Best-effort; a failed refresh just risks early
-				// reclamation, which the limit already tolerates.
-				//
-				// Refresh BOTH the member lease score AND the ZSET key's own
-				// TTL. The acquire script only PEXPIREs the key on admission,
-				// so a semaphore that stays saturated with no slot turnover
-				// would otherwise let the whole key expire after ttl*2 —
-				// dropping every live lease and admitting over the limit. The
-				// heartbeat pushes the key TTL out in lockstep with the lease.
-				bg := context.Background()
-				_ = l.rdb.ZAdd(bg, zkey, redis.Z{
-					Score:  float64(now + l.ttl.Milliseconds()),
-					Member: token,
-				}).Err()
-				_ = l.rdb.PExpire(bg, zkey, l.ttl*2).Err()
+				renewed, err := l.renewSemaphoreLease(zkey, token, now)
+				if err != nil {
+					leaseErr := fmt.Errorf("distributed concurrency lease renewal failed: %w", err)
+					if cancelLease != nil {
+						cancelLease(leaseErr)
+					} else {
+						logger.Warnf(context.Background(), "[ModelLimiter] %v", leaseErr)
+					}
+					return
+				}
+				if !renewed {
+					leaseErr := fmt.Errorf("distributed concurrency lease ownership lost")
+					if cancelLease != nil {
+						cancelLease(leaseErr)
+					} else {
+						logger.Warnf(context.Background(), "[ModelLimiter] %v", leaseErr)
+					}
+					return
+				}
 			}
 		}
 	}()
@@ -233,7 +302,13 @@ func (l *redisLimiter) hold(zkey, token string) func() {
 	return func() {
 		once.Do(func() {
 			close(stop)
-			_ = l.rdb.ZRem(context.Background(), zkey, token).Err()
+			<-done
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = l.rdb.ZRem(releaseCtx, zkey, token).Err()
+			cancel()
+			if cancelLease != nil {
+				cancelLease(nil)
+			}
 		})
 	}
 }

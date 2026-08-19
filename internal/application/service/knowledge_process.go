@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,25 +39,26 @@ func (s *knowledgeService) cloneKnowledge(
 	}
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	dst := &types.Knowledge{
-		ID:               uuid.New().String(),
-		TenantID:         targetKB.TenantID,
-		KnowledgeBaseID:  targetKB.ID,
-		Type:             src.Type,
-		Channel:          src.Channel,
-		Title:            src.Title,
-		Description:      src.Description,
-		Source:           src.Source,
-		ParseStatus:      "processing",
-		EnableStatus:     "disabled",
-		EmbeddingModelID: targetKB.EmbeddingModelID,
-		FileName:         src.FileName,
-		FolderPath:       src.FolderPath,
-		FileType:         src.FileType,
-		FileSize:         src.FileSize,
-		FileHash:         src.FileHash,
-		FilePath:         src.FilePath,
-		StorageSize:      src.StorageSize,
-		Metadata:         src.Metadata,
+		ID:                  uuid.New().String(),
+		TenantID:            targetKB.TenantID,
+		KnowledgeBaseID:     targetKB.ID,
+		Type:                src.Type,
+		Channel:             src.Channel,
+		Title:               src.Title,
+		Description:         src.Description,
+		Source:              src.Source,
+		ParseStatus:         "processing",
+		EnableStatus:        "disabled",
+		EmbeddingModelID:    targetKB.EmbeddingModelID,
+		FileName:            src.FileName,
+		FolderPath:          src.FolderPath,
+		FileType:            src.FileType,
+		FileSize:            src.FileSize,
+		FileHash:            src.FileHash,
+		FilePath:            src.FilePath,
+		StorageSize:         src.StorageSize,
+		SourceFileQuotaSize: src.SourceFileQuotaSize,
+		Metadata:            src.Metadata,
 	}
 
 	// Deep-copy the source document file into an object owned by the destination
@@ -99,8 +102,9 @@ func (s *knowledgeService) cloneKnowledge(
 		logger.GetLogger(ctx).WithField("error", err).Errorf("MoveKnowledge create knowledge failed")
 		return
 	}
-	tenantInfo.StorageUsed += dst.StorageSize
-	if err = s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, dst.StorageSize); err != nil {
+	quotaBytes := dst.QuotaStorageBytes()
+	tenantInfo.StorageUsed += quotaBytes
+	if err = s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, quotaBytes); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("MoveKnowledge update tenant storage used failed")
 		return
 	}
@@ -3621,6 +3625,25 @@ func (s *knowledgeService) convert(
 
 	logger.Infof(ctx, "[convert] kb=%s fileType=%s isURL=%v engine=%q rules=%+v",
 		kb.ID, fileType, isURL, parserEngine, eff.ChunkingConfig.ParserEngineRules)
+	parserConcurrency := 1
+	if raw := strings.TrimSpace(mergedOverrides["mineru_max_concurrency"]); raw != "" {
+		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value > 0 {
+			parserConcurrency = value
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("WEKNORA_MINERU_MAX_CONCURRENCY")); raw != "" {
+		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value > 0 {
+			parserConcurrency = value
+		}
+	}
+	if parserEngine == docparser.MinerUEngineName {
+		leaseCtx, release, gateErr := docparser.GateParser(ctx, parserEngine, parserConcurrency)
+		if gateErr != nil {
+			return nil, fmt.Errorf("acquire MinerU concurrency slot: %w", gateErr)
+		}
+		defer release()
+		ctx = leaseCtx
+	}
 
 	var reader interfaces.DocReader = s.resolveDocReader(ctx, parserEngine, fileType, isURL, mergedOverrides)
 	if reader == nil {
@@ -3651,15 +3674,27 @@ func (s *knowledgeService) convert(
 			return s.failKnowledge(ctx, knowledge, isLastRetry, "failed to get file: %v", err)
 		}
 		defer fileReader.Close()
-		contentBytes, err := io.ReadAll(fileReader)
-		if err != nil {
-			s.failStage(ctx, knowledge.ID, types.StageDocReader,
-				werrors.ErrCodeDocReaderParseFailed, "failed to read file", err)
-			return s.failKnowledge(ctx, knowledge, isLastRetry, "failed to read file: %v", err)
-		}
-		req.FileContent = contentBytes
 		req.FileName = payload.FileName
 		req.FileType = fileType
+		req.FileSize = knowledge.FileSize
+		if parserEngine == docparser.MinerUEngineName {
+			req.FileReader = fileReader
+		} else {
+			const maxBufferedParserFile = int64(100 * 1024 * 1024)
+			if knowledge.FileSize > maxBufferedParserFile {
+				err := fmt.Errorf("parser %q does not support streaming files larger than 100MB", parserEngine)
+				s.failStage(ctx, knowledge.ID, types.StageDocReader,
+					werrors.ErrCodeDocReaderParseFailed, "selected parser cannot stream this large file", err)
+				return s.failKnowledge(ctx, knowledge, isLastRetry, "%v", err)
+			}
+			contentBytes, err := io.ReadAll(io.LimitReader(fileReader, maxBufferedParserFile+1))
+			if err != nil {
+				s.failStage(ctx, knowledge.ID, types.StageDocReader,
+					werrors.ErrCodeDocReaderParseFailed, "failed to read file", err)
+				return s.failKnowledge(ctx, knowledge, isLastRetry, "failed to read file: %v", err)
+			}
+			req.FileContent = contentBytes
+		}
 	}
 
 	result, err := s.callDocReaderWithTimeout(ctx, reader, req)

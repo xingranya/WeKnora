@@ -7,6 +7,13 @@
 | 方法   | 路径                                       | 描述                                       |
 | ------ | ------------------------------------------ | ------------------------------------------ |
 | POST   | `/knowledge-bases/:id/knowledge/file`      | 上传文件创建知识（multipart）             |
+| POST   | `/knowledge-bases/:id/knowledge/folders`   | 创建持久化文件夹（空文件夹也会保留）       |
+| DELETE | `/knowledge-bases/:id/knowledge/folders`   | 删除空的持久化文件夹及其空子目录           |
+| POST   | `/knowledge-bases/:id/knowledge/uploads`   | 初始化可续传上传会话                       |
+| GET    | `/knowledge-bases/:id/knowledge/uploads/:upload_id` | 查询可续传上传会话与已确认进度       |
+| PUT    | `/knowledge-bases/:id/knowledge/uploads/:upload_id/parts/:part_number` | 上传一个文件分片 |
+| POST   | `/knowledge-bases/:id/knowledge/uploads/:upload_id/complete` | 完成可续传上传并创建知识 |
+| DELETE | `/knowledge-bases/:id/knowledge/uploads/:upload_id` | 取消可续传上传会话                       |
 | POST   | `/knowledge-bases/:id/knowledge/url`       | 从 URL 创建知识（网页抓取或文件下载）       |
 | POST   | `/knowledge-bases/:id/knowledge/manual`    | 创建手工 Markdown 知识                     |
 | GET    | `/knowledge-bases/:id/knowledge`           | 列出知识库下的知识（支持分页/筛选）         |
@@ -34,13 +41,14 @@
 > **公共说明**：
 > - 路径中的 `:id`（知识库路径下）为**知识库 ID**，`/knowledge/:id` 中的 `:id` 为**知识 ID**。
 > - 所有写操作（创建、更新、删除、迁移、重新解析、取消解析）需要当前用户在知识库所属组织内具有 `editor` 或 `admin` 权限；清空知识库内容仅 KB **所有者**（admin 且空间匹配）可操作。
+> - 本文命令示例省略认证头；实际调用需使用当前登录会话或调用方已有的鉴权配置。本文不写入密码、API Key 或数据库凭据。
 > - 关键状态字段：`parse_status` 取值 `pending` / `processing` / `finalizing` / `completed` / `failed` / `cancelled`；`enable_status` 取值 `enabled` / `disabled`。
 > - `processing` 指 DocReader / 分块 / 向量化阶段；`finalizing` 指主解析已完成、仍在执行摘要 / 问题生成 / 图谱抽取等索引优化任务；只有当全部子任务到达终态后才进入 `completed`。
 > - `cancelled` 表示解析被用户主动取消，可通过 `reparse` 重新触发。`pending` / `processing` / `finalizing` 这三种状态都可通过 `cancel-parse` 终止。
 
 ## POST `/knowledge-bases/:id/knowledge/file` - 上传文件创建知识
 
-通过 `multipart/form-data` 上传文件创建知识条目。文件大小受 `MAX_FILE_SIZE_MB` 环境变量限制。
+通过 `multipart/form-data` 上传文件创建知识条目。文件大小受 `MAX_FILE_SIZE_MB` 环境变量限制。需要大文件、断点续传或浏览器刷新后继续上传时，应使用下面的可续传上传接口；可续传上传使用独立的 2 GiB 文件上限、4 MiB 分片和 24 小时会话保留时间。
 
 **路径参数**:
 
@@ -66,7 +74,6 @@
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/file' \
---header 'X-API-Key: sk-xxxxx' \
 --form 'file=@"/Users/xxxx/tests/彗星.txt"' \
 --form 'enable_multimodel="true"' \
 --form 'tag_id="tag-00000001"' \
@@ -137,7 +144,6 @@ URL 会经过 SSRF 安全校验，禁止指向内网/回环地址。
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "url": "https://github.com/Tencent/WeKnora",
@@ -149,7 +155,6 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/url' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "url": "https://example.com/papers/whitepaper.pdf",
@@ -211,7 +216,6 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/manual' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "产品使用指南",
@@ -287,8 +291,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_id=tag-00000001' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_id=tag-00000001'
 ```
 
 **响应**:
@@ -365,6 +368,262 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 }
 ```
 
+## POST `/knowledge-bases/:id/knowledge/folders` - 创建持久化文件夹
+
+创建知识库中的空文件夹。文件夹及缺失的祖先目录会写入数据库，即使当前没有文档也会在目录树中保留。需要 KB **创建者**或 Admin+，且对 KB 有 write 权限。
+
+**请求体**:
+
+| 字段          | 类型   | 必填 | 说明                                      |
+| ------------- | ------ | ---- | ----------------------------------------- |
+| `parent_path` | string | 否   | 父文件夹路径；省略或空字符串表示知识库根目录 |
+| `name`        | string | 是   | 当前文件夹名称，不能包含路径分隔符          |
+
+**请求**:
+
+```curl
+curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/folders' \
+--header 'Content-Type: application/json' \
+--data '{
+    "parent_path": "docs",
+    "name": "spec"
+}'
+```
+
+**响应**（HTTP 201）:
+
+```json
+{
+    "success": true,
+    "data": {
+        "tenant_id": 1,
+        "knowledge_base_id": "kb-00000001",
+        "path": "docs/spec",
+        "created_by": "user-00000001"
+    }
+}
+```
+
+上例只展示关键字段；接口返回对象还包含记录 ID 和时间字段，具体值以服务端落库结果为准。
+
+路径会按相对目录规范化：使用 `/` 分隔，去除首尾分隔符、`.` 和 `..` 段，并限制目录深度和路径长度。重复创建同一路径不会产生重复的活动记录。
+
+## DELETE `/knowledge-bases/:id/knowledge/folders` - 删除持久化文件夹
+
+删除指定文件夹及其空子目录。文件夹子树中仍有文档时返回 HTTP 409，必须先移动或删除文档；根目录不能删除。需要 KB **创建者**或 Admin+，且对 KB 有 write 权限。
+
+**查询参数**:
+
+| 字段   | 类型   | 必填 | 说明           |
+| ------ | ------ | ---- | -------------- |
+| `path` | string | 是   | 待删除的文件夹路径 |
+
+**请求**:
+
+```curl
+curl --location --request DELETE \
+  'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/folders?path=docs/spec'
+```
+
+**响应**:
+
+```json
+{
+    "success": true
+}
+```
+
+## POST `/knowledge-bases/:id/knowledge/uploads` - 初始化可续传上传
+
+创建一个持久化的上传会话。会话记录、已确认分片和暂存文件用于浏览器暂停、刷新或重新选择同一文件后继续上传；完成接口成功后，暂存文件会转存到知识库绑定的文件存储，并创建知识条目。
+
+当前默认限制如下：
+
+- 单个文件最大 **2 GiB**（`KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=2048`）。
+- 每个分片默认 **4 MiB**（`KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB=4`），部署配置只允许 **1-16 MiB** 的整数。
+- 上传会话默认保留 **24 小时**（`KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS=24`），超时后由后台清理任务持久化为 `expired` 并清理暂存文件。
+- 前端上传队列默认只运行一个活动上传任务，后续文件排队执行；当前已取消人为设置的上传带宽限速。该队列串行策略不等同于会话数量限制，服务端仍会保护未完成会话和空间暂存容量。
+
+暂存目录默认是 `/data/files/upload-sessions`。当前 Docker Compose 只持久化 `/data/files`，因此自定义 `KNOWLEDGE_UPLOAD_TEMP_DIR` 必须仍位于该持久卷下；多 app 副本部署必须让所有副本以同一绝对路径读写共享 RWX 存储，否则容器重建或请求切换副本后无法继续上传。
+
+PostgreSQL 使用版本化迁移 `000086`；SQLite/Lite 使用 `migrations/sqlite/000005_knowledge_folders_and_uploads`，两种模式均包含持久化文件夹、上传会话、分片记录和原始文件配额列。服务启动时立即恢复处于 `completing` 的会话，之后每 5 分钟重试完成恢复和过期清理。
+
+需要 KB **创建者**或 Admin+，且对 KB 有 write 权限。FAQ 类型知识库不支持此接口。
+
+**请求体**:
+
+| 字段                | 类型     | 必填 | 说明                                                        |
+| ------------------- | -------- | ---- | ----------------------------------------------------------- |
+| `file_name`         | string   | 是   | 文件名                                                      |
+| `file_size`         | integer  | 是   | 文件字节数，必须大于 0 且不超过 2 GiB                      |
+| `mime_type`         | string   | 否   | MIME 类型，未传时使用 `application/octet-stream`            |
+| `last_modified`     | integer  | 否   | 客户端文件最后修改时间                                      |
+| `folder_path`       | string   | 否   | 目标文件夹路径；省略或空字符串表示知识库根目录              |
+| `metadata`          | object   | 否   | 写入知识 metadata 的键值对                                  |
+| `tag_ids`           | string[] | 否   | 关联的标签 ID 列表                                          |
+| `channel`           | string   | 否   | 来源渠道，未传时按 `web` 处理                               |
+| `process_config`    | object   | 否   | 本次上传的解析配置覆盖                                      |
+| `enable_multimodel` | boolean  | 否   | 是否启用图文多模态解析                                      |
+
+**请求**:
+
+```curl
+curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/uploads' \
+--header 'Content-Type: application/json' \
+--data '{
+    "file_name": "大型报告.pdf",
+    "file_size": 8388608,
+    "mime_type": "application/pdf",
+    "last_modified": 1754970756171,
+    "folder_path": "docs/reports",
+    "channel": "web"
+}'
+```
+
+**响应**（HTTP 201）:
+
+```json
+{
+    "success": true,
+    "data": {
+        "id": "b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab",
+        "knowledge_base_id": "kb-00000001",
+        "file_name": "大型报告.pdf",
+        "file_size": 8388608,
+        "mime_type": "application/pdf",
+        "folder_path": "docs/reports",
+        "chunk_size": 4194304,
+        "received_bytes": 0,
+        "received_parts": [],
+        "status": "created",
+        "expires_at": "2026-08-20T15:00:00+08:00"
+    }
+}
+```
+
+文件大小、扩展名、解析配置、存储后端和空间暂存容量会在初始化阶段校验。服务端当前最多允许同一用户保留 5 个未完成会话，并限制同一空间的未完成上传总量为 10 GiB；这些是资源保护，不是人为上传带宽限速。
+
+## GET `/knowledge-bases/:id/knowledge/uploads/:upload_id` - 查询可续传上传进度
+
+查询当前用户在指定知识库中的上传会话。响应中的 `received_bytes` 和 `received_parts` 是服务端已经校验并持久化的进度，客户端应从 `received_bytes` 对应的下一个分片继续发送。后台清理任务会在跨实例上传锁保护下持久化过期状态并删除暂存文件。
+
+**请求**:
+
+```curl
+curl --location \
+  'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/uploads/b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab'
+```
+
+**响应**:
+
+```json
+{
+    "success": true,
+    "data": {
+        "id": "b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab",
+        "file_size": 8388608,
+        "chunk_size": 4194304,
+        "received_bytes": 4194304,
+        "received_parts": [0],
+        "status": "uploading",
+        "expires_at": "2026-08-20T15:00:00+08:00"
+    }
+}
+```
+
+`status` 的业务状态为 `created`、`uploading`、`completing`、`completed`、`failed`、`cancelled` 或 `expired`。服务端清理暂存文件与分片记录期间可能短暂返回 `completed_cleanup_pending`、`cancelled_cleanup_pending` 或 `expired_cleanup_pending`；客户端应继续调用对应完成/取消接口或等待后台清理，不得重新上传已确认分片。`completed` 和 `completed_cleanup_pending` 可使用响应中的 `knowledge_id` 关联已创建的知识条目。
+
+完成阶段会先持久化准备写入的物理路径，再流式写入、幂等注册资源引用，并把 `file_prepared` / `file_stored` / `knowledge_created` 阶段写入上传会话，用于服务重启后继续完成或清理，不向客户端暴露内部存储路径。
+成功创建知识时，原始文件字节数会原子计入空间配额，并记录在知识表的内部 `source_file_quota_bytes` 列；该字段不属于用户 metadata，也不会通过 API 暴露。
+
+## PUT `/knowledge-bases/:id/knowledge/uploads/:upload_id/parts/:part_number` - 上传文件分片
+
+使用原始二进制请求体上传一个分片。`part_number` 从 `0` 开始；除最后一个分片外，每个分片默认 4 MiB。当前服务端按已确认偏移顺序接收分片，已确认且内容一致的分片可以幂等重试。
+
+**请求头**:
+
+| 请求头             | 必填 | 说明                                                                 |
+| ------------------ | ---- | -------------------------------------------------------------------- |
+| `Content-Type`     | 是   | `application/octet-stream`                                          |
+| `Content-Range`    | 是   | `bytes start-end/total`；例如 `bytes 0-4194303/8388608`               |
+| `X-Chunk-SHA256`   | 是   | 当前分片原始字节的 SHA-256，使用 64 位小写十六进制字符串                 |
+
+`Content-Range` 的 `start` 必须等于 `part_number * chunk_size`，`total` 必须等于初始化时的 `file_size`，`end` 为当前分片最后一个字节。新分片必须从服务端返回的 `received_bytes` 继续；偏移不连续或同一分片的元数据不同会返回 HTTP 409。服务端会重新计算 SHA-256，校验失败返回 HTTP 400。
+
+**请求**:
+
+```curl
+curl --location --request PUT \
+  'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/uploads/b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab/parts/0' \
+  --header 'Content-Type: application/octet-stream' \
+  --header 'Content-Range: bytes 0-4194303/8388608' \
+  --header 'X-Chunk-SHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+  --data-binary '@/tmp/大型报告.part-00000'
+```
+
+**响应**:
+
+```json
+{
+    "success": true,
+    "data": {
+        "id": "b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab",
+        "received_bytes": 4194304,
+        "received_parts": [0],
+        "status": "uploading"
+    }
+}
+```
+
+## POST `/knowledge-bases/:id/knowledge/uploads/:upload_id/complete` - 完成可续传上传
+
+确认所有分片已经收到后完成上传。服务端会校验暂存文件大小，将文件流式保存到知识库的存储后端，创建文件类型知识并提交异步解析。上传会话 ID 会复用为最终知识 ID；分片未全部上传、暂存文件不完整或文件重复时返回 HTTP 409。完成接口可安全重试，已经完成的会话会返回关联的知识条目。
+
+**请求**:
+
+```curl
+curl --location --request POST \
+  'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/uploads/b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab/complete'
+```
+
+**响应**（HTTP 200）:
+
+```json
+{
+    "success": true,
+    "data": {
+        "id": "b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab",
+        "knowledge_base_id": "kb-00000001",
+        "type": "file",
+        "title": "大型报告.pdf",
+        "file_name": "大型报告.pdf",
+        "file_size": 8388608,
+        "folder_path": "docs/reports",
+        "parse_status": "pending",
+        "enable_status": "disabled"
+    }
+}
+```
+
+## DELETE `/knowledge-bases/:id/knowledge/uploads/:upload_id` - 取消可续传上传
+
+取消尚未完成的上传会话，删除暂存文件和已确认分片记录，并将会话标记为 `cancelled`。已经完成的会话不能取消；如需停止完成后的解析任务，应使用知识的 `cancel-parse` 接口。
+
+**请求**:
+
+```curl
+curl --location --request DELETE \
+  'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge/uploads/b1c2d3e4-f5a6-4b7c-8d9e-0123456789ab'
+```
+
+**响应**:
+
+```json
+{
+    "success": true
+}
+```
+
 ## PUT `/knowledge-bases/:id/knowledge/folders` - 重命名或移动文件夹
 
 把一个文件夹及其所有子目录改到新路径。目标路径已存在时两个文件夹合并；不能移动到自身子目录下。需要 KB **创建者**或 Admin+，且对 KB 有 write 权限。
@@ -421,8 +680,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge'
 ```
 
 **响应**（已入队）:
@@ -460,8 +718,7 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge-bases/k
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/batch?ids=9c8af585-ae15-44ce-8f73-45ad18394651&ids=4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'http://localhost:8080/api/v1/knowledge/batch?ids=9c8af585-ae15-44ce-8f73-45ad18394651&ids=4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5'
 ```
 
 **响应**:
@@ -507,8 +764,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge/batch?ids=9c8af585-ae15-
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5'
 ```
 
 **响应**:
@@ -554,7 +810,6 @@ curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-
 
 ```curl
 curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "彗星 - 天文百科",
@@ -578,8 +833,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-0
 **请求**:
 
 ```curl
-curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge/9c8af585-ae15-44ce-8f73-45ad18394651' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge/9c8af585-ae15-44ce-8f73-45ad18394651'
 ```
 
 **响应**:
@@ -599,7 +853,6 @@ curl --location --request DELETE 'http://localhost:8080/api/v1/knowledge/9c8af58
 
 ```curl
 curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/manual/5a3b2c1d-0e9f-4a8b-7c6d-5e4f3a2b1c0d' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "title": "产品使用指南 V2",
@@ -633,8 +886,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/manual/5a3
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/reparse' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/reparse'
 ```
 
 **响应**:
@@ -675,8 +927,7 @@ curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-
 **请求**:
 
 ```curl
-curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/cancel-parse' \
---header 'X-API-Key: sk-xxxxx'
+curl --location --request POST 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/cancel-parse'
 ```
 
 **响应**:
@@ -714,8 +965,7 @@ Content-Disposition: attachment; filename="彗星.txt"
 **请求**:
 
 ```curl
-curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/download' \
---header 'X-API-Key: sk-xxxxx'
+curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/download'
 ```
 
 响应体为文件二进制流。
@@ -732,7 +982,6 @@ curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/preview' \
---header 'X-API-Key: sk-xxxxx' \
 -D -
 ```
 
@@ -768,7 +1017,6 @@ Cache-Control: private, max-age=3600
 
 ```curl
 curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/image/4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5/df10b37d-cd05-4b14-ba8a-e1bd0eb3bbd7' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "image_info": "{\"description\":\"产品架构图\",\"alt_text\":\"WeKnora 系统架构\"}"
@@ -801,7 +1049,6 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/image/4c4e
 
 ```curl
 curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/tags' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "kb_id": "kb-00000001",
@@ -836,7 +1083,6 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge/tags' \
 
 ```curl
 curl --location --get 'http://localhost:8080/api/v1/knowledge/search' \
---header 'X-API-Key: sk-xxxxx' \
 --data-urlencode 'keyword=彗星' \
 --data-urlencode 'offset=0' \
 --data-urlencode 'limit=10' \
@@ -889,7 +1135,6 @@ curl --location --get 'http://localhost:8080/api/v1/knowledge/search' \
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge/batch-reparse' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "kb_id": "kb-00000001",
@@ -932,7 +1177,6 @@ HTTP 成功表示批处理包装任务已入队。后台会尝试提交列表中
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge/batch-delete' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "kb_id": "kb-00000001",
@@ -980,7 +1224,6 @@ curl --location 'http://localhost:8080/api/v1/knowledge/batch-delete' \
 
 ```curl
 curl --location 'http://localhost:8080/api/v1/knowledge/move' \
---header 'X-API-Key: sk-xxxxx' \
 --header 'Content-Type: application/json' \
 --data '{
     "knowledge_ids": ["4c4e7c1a-09cf-485b-a7b5-24b8cdc5acf5"],
@@ -1012,8 +1255,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge/move' \
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge/move/progress/kg_move_1_kb-00000001_xxxx' \
---header 'X-API-Key: sk-xxxxx'
+curl --location 'http://localhost:8080/api/v1/knowledge/move/progress/kg_move_1_kb-00000001_xxxx'
 ```
 
 **响应**:

@@ -42,3 +42,30 @@ func TestSQLiteMigrationsIncludeAutoTagConfig(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.True(t, found, "SQLite migrations must create knowledge_bases.auto_tag_config")
 }
+
+func TestSQLiteMigrationsIncludeKnowledgeFoldersAndResumableUploads(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	previousDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(repoRoot))
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+	dbPath := filepath.Join(t.TempDir(), "upload-migration.db")
+	require.NoError(t, RunMigrationsWithOptions("sqlite3://unused", MigrationOptions{SQLiteDBPath: dbPath}))
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, table := range []string{"knowledge_folders", "knowledge_upload_sessions", "knowledge_upload_parts"} {
+		var count int
+		require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count))
+		require.Equal(t, 1, count, "SQLite migration must create %s", table)
+	}
+	var sourceQuota int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('knowledges') WHERE name = 'source_file_quota_bytes'").Scan(&sourceQuota))
+	require.Equal(t, 1, sourceQuota)
+	var userIDType string
+	require.NoError(t, db.QueryRow("SELECT type FROM pragma_table_info('knowledge_upload_sessions') WHERE name = 'user_id'").Scan(&userIDType))
+	require.Equal(t, "VARCHAR(512)", userIDType)
+}

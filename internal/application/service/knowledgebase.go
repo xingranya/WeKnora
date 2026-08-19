@@ -930,7 +930,7 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 					logger.Warnf(ctx, "Failed to delete file %s: %v", knowledge.FilePath, err)
 				}
 			}
-			storageAdjust -= knowledge.StorageSize
+			storageAdjust -= knowledge.QuotaStorageBytes()
 		}
 		deleteExtractedImages(ctx, s.fileSvc, imageURLs)
 		if storageAdjust != 0 {

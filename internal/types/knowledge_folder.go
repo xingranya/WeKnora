@@ -1,8 +1,18 @@
 package types
 
 import (
+	"errors"
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"gorm.io/gorm"
+)
+
+var (
+	ErrKnowledgeFolderNotEmpty         = errors.New("knowledge folder is not empty")
+	ErrKnowledgeFolderHasActiveUploads = errors.New("knowledge folder has active uploads")
 )
 
 const (
@@ -49,7 +59,7 @@ func NormalizeKnowledgeFolderPath(raw string) string {
 			continue
 		}
 		if len(segment) > MaxKnowledgeFolderSegmentLength {
-			segment = strings.TrimSpace(segment[:MaxKnowledgeFolderSegmentLength])
+			segment = strings.TrimSpace(truncateUTF8Bytes(segment, MaxKnowledgeFolderSegmentLength))
 		}
 		if segment == "" {
 			continue
@@ -65,6 +75,20 @@ func NormalizeKnowledgeFolderPath(raw string) string {
 		path = strings.Join(segments, "/")
 	}
 	return path
+}
+
+func truncateUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 // SplitKnowledgeRelativePath splits an upload path such as
@@ -109,6 +133,20 @@ type KnowledgeFolderCount struct {
 	FolderPath string `json:"folder_path" gorm:"column:folder_path"`
 	Count      int64  `json:"count"       gorm:"column:count"`
 }
+
+// KnowledgeFolder 表示持久化目录，即使没有文档也会保留。
+type KnowledgeFolder struct {
+	ID              string         `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64         `json:"tenant_id" gorm:"not null;index"`
+	KnowledgeBaseID string         `json:"knowledge_base_id" gorm:"type:varchar(36);not null;index"`
+	Path            string         `json:"path" gorm:"type:varchar(1024);not null"`
+	CreatedBy       string         `json:"created_by" gorm:"type:varchar(36);not null;default:''"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+func (KnowledgeFolder) TableName() string { return "knowledge_folders" }
 
 // KnowledgeFolderNode is a node of the knowledge base folder tree exposed to
 // clients. DocumentCount counts entries stored directly in this folder;

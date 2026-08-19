@@ -69,6 +69,7 @@ type knowledgeService struct {
 	imageResolver   *docparser.ImageResolver
 	taskPendingRepo interfaces.TaskPendingOpsRepository
 	parserConfigSvc interfaces.PlatformParserEngineConfigService
+	uploadRuntimes  sync.Map // upload ID -> *knowledgeUploadRuntime
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -122,6 +123,16 @@ func NewKnowledgeService(
 	audit interfaces.AuditLogService,
 	parserConfigSvc interfaces.PlatformParserEngineConfigService,
 ) (interfaces.KnowledgeService, error) {
+	if _, err := knowledgeUploadTempRoot(); err != nil {
+		return nil, err
+	}
+	if _, err := knowledgeUploadChunkBytes(); err != nil {
+		return nil, err
+	}
+	if err := validateKnowledgeUploadTempStorage(context.Background(), redisClient); err != nil {
+		return nil, err
+	}
+	docparser.ConfigureConcurrency(redisClient)
 	return &knowledgeService{
 		config:          config,
 		repo:            repo,
@@ -577,7 +588,37 @@ func (s *knowledgeService) ListKnowledgeFolderTree(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	folders, err := s.repo.ListKnowledgeFolders(ctx,
+		ctx.Value(types.TenantIDContextKey).(uint64), kbID)
+	if err != nil {
+		return nil, err
+	}
+	for _, folder := range folders {
+		counts = append(counts, &types.KnowledgeFolderCount{FolderPath: folder.Path})
+	}
 	return types.BuildKnowledgeFolderTree(counts), nil
+}
+
+func (s *knowledgeService) CreateKnowledgeFolder(
+	ctx context.Context, kbID, parentPath, name string,
+) (*types.KnowledgeFolder, error) {
+	parent := types.NormalizeKnowledgeFolderPath(parentPath)
+	segment := types.NormalizeKnowledgeFolderPath(name)
+	if segment == "" || strings.Contains(segment, "/") {
+		return nil, werrors.NewValidationError("文件夹名称不能为空或包含路径分隔符")
+	}
+	target, err := normalizeTargetFolderPath(ctx, strings.Trim(strings.Join([]string{parent, segment}, "/"), "/"))
+	if err != nil || target == "" {
+		return nil, werrors.NewValidationError("文件夹名称无效")
+	}
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	createdBy, _ := ctx.Value(types.UserIDContextKey).(string)
+	if err := s.repo.EnsureKnowledgeFolderPath(ctx, tenantID, kbID, target, createdBy); err != nil {
+		return nil, err
+	}
+	return &types.KnowledgeFolder{
+		TenantID: tenantID, KnowledgeBaseID: kbID, Path: target, CreatedBy: createdBy,
+	}, nil
 }
 
 // MoveKnowledgeToFolder re-files knowledge entries under folderPath. Since
@@ -594,7 +635,8 @@ func (s *knowledgeService) MoveKnowledgeToFolder(ctx context.Context,
 		return 0, err
 	}
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	affected, err := s.repo.UpdateKnowledgeFolderPath(ctx, tenantID, kbID, ids, normalized)
+	createdBy, _ := ctx.Value(types.UserIDContextKey).(string)
+	affected, err := s.repo.UpdateKnowledgeFolderPath(ctx, tenantID, kbID, ids, normalized, createdBy)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to move knowledge to folder %q: %v", normalized, err)
 		return 0, err
@@ -629,14 +671,37 @@ func (s *knowledgeService) RenameKnowledgeFolder(ctx context.Context,
 	}
 
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	affected, err := s.repo.RenameKnowledgeFolderPath(ctx, tenantID, kbID, source, target)
+	createdBy, _ := ctx.Value(types.UserIDContextKey).(string)
+	affected, err := s.repo.RenameKnowledgeFolderPath(ctx, tenantID, kbID, source, target, createdBy)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to rename folder %q to %q: %v", source, target, err)
+		if errors.Is(err, types.ErrKnowledgeFolderHasActiveUploads) {
+			return 0, werrors.NewConflictError("文件夹中仍有上传任务，请等待完成或先取消上传")
+		}
 		return 0, err
+	}
+	if affected == 0 {
+		return 0, nil
 	}
 	logger.Infof(ctx, "Renamed folder %q to %q in kb %s, %d entries affected",
 		source, target, kbID, affected)
 	return affected, nil
+}
+
+func (s *knowledgeService) DeleteKnowledgeFolder(ctx context.Context, kbID, folderPath string) error {
+	path := types.NormalizeKnowledgeFolderPath(folderPath)
+	if path == "" {
+		return werrors.NewBadRequestError("根目录不能删除")
+	}
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	err := s.repo.DeleteEmptyKnowledgeFolderTree(ctx, tenantID, kbID, path)
+	if errors.Is(err, types.ErrKnowledgeFolderHasActiveUploads) {
+		return werrors.NewConflictError("文件夹中仍有上传任务，请等待完成或先取消上传")
+	}
+	if errors.Is(err, types.ErrKnowledgeFolderNotEmpty) {
+		return werrors.NewConflictError("文件夹中仍有文档，请先移动或删除文档")
+	}
+	return err
 }
 
 // normalizeTargetFolderPath canonicalizes a caller-supplied destination folder

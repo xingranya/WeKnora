@@ -91,6 +91,37 @@ func TestLocalLimiterIndependentKeys(t *testing.T) {
 	rb()
 }
 
+func TestLocalLimiterAppliesUpdatedLimit(t *testing.T) {
+	limiter := NewLocalLimiter()
+	first, _ := limiter.Acquire(context.Background(), "parser:mineru", 2)
+	second, _ := limiter.Acquire(context.Background(), "parser:mineru", 2)
+
+	done := make(chan func(), 1)
+	go func() {
+		release, _ := limiter.Acquire(context.Background(), "parser:mineru", 1)
+		done <- release
+	}()
+	select {
+	case <-done:
+		t.Fatal("降低并发上限后，已有两个活动任务时新任务不应立即通过")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	first()
+	select {
+	case <-done:
+		t.Fatal("降低到 1 后仍有一个活动任务，新任务必须继续等待")
+	case <-time.After(50 * time.Millisecond):
+	}
+	second()
+	select {
+	case release := <-done:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("释放活动任务后，等待者应获得更新后的并发槽位")
+	}
+}
+
 // TestLocalLimiterFailOpen verifies degraded inputs pass through.
 func TestLocalLimiterFailOpen(t *testing.T) {
 	l := NewLocalLimiter()

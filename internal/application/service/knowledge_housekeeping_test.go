@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS knowledges (
     type            TEXT NOT NULL DEFAULT 'document',
     embedding_model_id TEXT NOT NULL DEFAULT '',
     storage_size    BIGINT NOT NULL DEFAULT 0,
+    source_file_quota_bytes BIGINT NOT NULL DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     deleted_at      DATETIME

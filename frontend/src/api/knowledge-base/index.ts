@@ -230,6 +230,78 @@ export function uploadKnowledgeFile(
   return postUpload(`/api/v1/knowledge-bases/${kbId}/knowledge/file`, formData, onProgress);
 }
 
+export interface KnowledgeUploadSession {
+  id: string
+  knowledge_base_id: string
+  file_name: string
+  file_size: number
+  mime_type: string
+  last_modified: number
+  folder_path: string
+  chunk_size: number
+  received_bytes: number
+  received_parts: number[]
+  received_part_hashes?: Record<string, string>
+  status: 'created' | 'uploading' | 'completing' |
+    'completed_cleanup_pending' | 'cancelled_cleanup_pending' | 'expired_cleanup_pending' |
+    'completed' | 'failed' | 'cancelled' | 'expired'
+  knowledge_id?: string
+  error_message?: string
+  expires_at: string
+}
+
+export interface InitializeKnowledgeUploadPayload {
+  file_name: string
+  file_size: number
+  mime_type?: string
+  last_modified?: number
+  folder_path?: string
+  metadata?: Record<string, string>
+  tag_ids?: string[]
+  channel?: string
+  process_config?: KnowledgeProcessOverrides
+  enable_multimodel?: boolean
+}
+
+export function initializeKnowledgeUpload(kbId: string, data: InitializeKnowledgeUploadPayload) {
+  return post(`/api/v1/knowledge-bases/${kbId}/knowledge/uploads`, data);
+}
+
+export function getKnowledgeUpload(kbId: string, uploadId: string) {
+  return get(`/api/v1/knowledge-bases/${kbId}/knowledge/uploads/${uploadId}`);
+}
+
+export function uploadKnowledgePart(
+  kbId: string,
+  uploadId: string,
+  partNumber: number,
+  data: Blob,
+  start: number,
+  total: number,
+  sha256: string,
+  signal?: AbortSignal,
+  onProgress?: (loaded: number) => void,
+) {
+  return put(`/api/v1/knowledge-bases/${kbId}/knowledge/uploads/${uploadId}/parts/${partNumber}`, data, {
+    timeout: 0,
+    signal,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Range': `bytes ${start}-${start + data.size - 1}/${total}`,
+      'X-Chunk-SHA256': sha256,
+    },
+    onUploadProgress: (event: any) => onProgress?.(Number(event.loaded) || 0),
+  });
+}
+
+export function completeKnowledgeUpload(kbId: string, uploadId: string) {
+  return post(`/api/v1/knowledge-bases/${kbId}/knowledge/uploads/${uploadId}/complete`, undefined, { timeout: 0 });
+}
+
+export function cancelKnowledgeUpload(kbId: string, uploadId: string) {
+  return del(`/api/v1/knowledge-bases/${kbId}/knowledge/uploads/${uploadId}`);
+}
+
 // 从URL创建知识
 // data.tag_ids: 可选，指定知识所属的多个标签 ID
 export function createKnowledgeFromURL(
@@ -317,6 +389,18 @@ export interface KnowledgeFolderTree {
 
 export function listKnowledgeFolders(kbId: string) {
   return get(`/api/v1/knowledge-bases/${kbId}/knowledge/folders`);
+}
+
+export function createKnowledgeFolder(kbId: string, parentPath: string, name: string) {
+  return post(`/api/v1/knowledge-bases/${kbId}/knowledge/folders`, {
+    parent_path: parentPath,
+    name,
+  });
+}
+
+export function deleteKnowledgeFolder(kbId: string, path: string) {
+  const query = new URLSearchParams({ path });
+  return del(`/api/v1/knowledge-bases/${kbId}/knowledge/folders?${query.toString()}`);
 }
 
 /**

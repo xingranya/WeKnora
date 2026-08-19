@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"mime/multipart"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
@@ -24,6 +25,12 @@ type KnowledgeService interface {
 		channel string,
 		processOverrides *types.KnowledgeProcessOverrides,
 	) (*types.Knowledge, error)
+	InitializeKnowledgeUpload(ctx context.Context, kbID, userID string, init types.KnowledgeUploadInit) (*types.KnowledgeUploadSession, error)
+	GetKnowledgeUpload(ctx context.Context, kbID, uploadID, userID string) (*types.KnowledgeUploadSession, error)
+	WriteKnowledgeUploadPart(ctx context.Context, kbID, uploadID, userID string, partNumber int, offset, end, total int64, sha256 string, body io.Reader) (*types.KnowledgeUploadSession, error)
+	CompleteKnowledgeUpload(ctx context.Context, kbID, uploadID, userID string) (*types.Knowledge, error)
+	CancelKnowledgeUpload(ctx context.Context, kbID, uploadID, userID string) error
+	CleanupExpiredKnowledgeUploads(ctx context.Context, limit int) (int, error)
 	// CreateKnowledgeFromURL creates knowledge from a URL.
 	// When fileName or fileType is provided (or the URL path has a known file extension),
 	// the URL is treated as a direct file download instead of a web page crawl.
@@ -88,6 +95,8 @@ type KnowledgeService interface {
 	// folder_path of every knowledge entry in a knowledge base, with per-folder
 	// document counts. It powers the document sidebar tree.
 	ListKnowledgeFolderTree(ctx context.Context, kbID string) (*types.KnowledgeFolderTree, error)
+	// CreateKnowledgeFolder 持久化空文件夹及其缺失的祖先目录。
+	CreateKnowledgeFolder(ctx context.Context, kbID string, parentPath string, name string) (*types.KnowledgeFolder, error)
 	// MoveKnowledgeToFolder re-files knowledge entries under the given folder
 	// path (empty means the knowledge base top level). Folders are derived from
 	// the stored paths, so a path that does not exist yet is created implicitly.
@@ -99,6 +108,8 @@ type KnowledgeService interface {
 	) (int64, error)
 	// RenameKnowledgeFolder moves a folder and everything below it to a new path.
 	RenameKnowledgeFolder(ctx context.Context, kbID string, from string, to string) (int64, error)
+	// DeleteKnowledgeFolder 删除没有文档的文件夹子树。
+	DeleteKnowledgeFolder(ctx context.Context, kbID string, folderPath string) error
 	// DeleteKnowledge deletes knowledge by ID.
 	DeleteKnowledge(ctx context.Context, id string) error
 	// DeleteKnowledgeList deletes multiple knowledge entries by IDs.
@@ -229,6 +240,19 @@ type KnowledgeService interface {
 // KnowledgeRepository defines the interface for knowledge repositories.
 type KnowledgeRepository interface {
 	CreateKnowledge(ctx context.Context, knowledge *types.Knowledge) error
+	CreateKnowledgeUploadSession(ctx context.Context, session *types.KnowledgeUploadSession) error
+	CreateKnowledgeUploadSessionWithQuota(ctx context.Context, session *types.KnowledgeUploadSession, maxUserSessions, maxTenantBytes int64) error
+	GetKnowledgeUploadSession(ctx context.Context, tenantID uint64, kbID, userID, uploadID string) (*types.KnowledgeUploadSession, error)
+	CountActiveKnowledgeUploadSessions(ctx context.Context, tenantID uint64, userID string) (int64, error)
+	SumActiveKnowledgeUploadBytes(ctx context.Context, tenantID uint64) (int64, error)
+	GetKnowledgeUploadPart(ctx context.Context, tenantID uint64, kbID, userID, uploadID string, partNumber int) (*types.KnowledgeUploadPart, error)
+	ConfirmKnowledgeUploadPart(ctx context.Context, tenantID uint64, kbID, userID, uploadID string, part *types.KnowledgeUploadPart) (*types.KnowledgeUploadSession, error)
+	ClaimKnowledgeUploadForCompletion(ctx context.Context, tenantID uint64, kbID, userID, uploadID string) (*types.KnowledgeUploadSession, error)
+	CancelKnowledgeUploadSession(ctx context.Context, tenantID uint64, kbID, userID, uploadID string) (*types.KnowledgeUploadSession, error)
+	ExpireKnowledgeUploadSession(ctx context.Context, session *types.KnowledgeUploadSession) (bool, error)
+	UpdateKnowledgeUploadSession(ctx context.Context, session *types.KnowledgeUploadSession) error
+	ListExpiredKnowledgeUploadSessions(ctx context.Context, before time.Time, limit int) ([]*types.KnowledgeUploadSession, error)
+	DeleteKnowledgeUploadParts(ctx context.Context, tenantID uint64, kbID, userID, uploadID string) error
 	GetKnowledgeByID(ctx context.Context, tenantID uint64, id string) (*types.Knowledge, error)
 	// GetKnowledgeByIDOnly returns knowledge by ID without tenant filter (for permission resolution).
 	GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error)
@@ -263,6 +287,9 @@ type KnowledgeRepository interface {
 		tenantID uint64,
 		kbID string,
 	) ([]*types.KnowledgeFolderCount, error)
+	ListKnowledgeFolders(ctx context.Context, tenantID uint64, kbID string) ([]*types.KnowledgeFolder, error)
+	EnsureKnowledgeFolderPath(ctx context.Context, tenantID uint64, kbID, folderPath, createdBy string) error
+	DeleteEmptyKnowledgeFolderTree(ctx context.Context, tenantID uint64, kbID, folderPath string) error
 	// UpdateKnowledgeFolderPath files the given entries under folderPath.
 	UpdateKnowledgeFolderPath(
 		ctx context.Context,
@@ -270,6 +297,7 @@ type KnowledgeRepository interface {
 		kbID string,
 		ids []string,
 		folderPath string,
+		createdBy string,
 	) (int64, error)
 	// RenameKnowledgeFolderPath rewrites folder_path for a folder and all of its
 	// descendants. Renaming onto an existing path merges the folders.
@@ -279,6 +307,7 @@ type KnowledgeRepository interface {
 		kbID string,
 		from string,
 		to string,
+		createdBy string,
 	) (int64, error)
 	// AminusB returns the IDs of knowledge in A that have no counterpart in B,
 	// comparing file_hash as a multiset (so duplicate-count differences and

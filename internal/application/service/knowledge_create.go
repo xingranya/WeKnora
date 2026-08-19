@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/url"
@@ -160,6 +161,10 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 			return nil, werrors.NewValidationError("文件夹路径包含非法字符")
 		}
 		folderPath = types.NormalizeKnowledgeFolderPath(safeFolderPath)
+		createdBy, _ := ctx.Value(types.UserIDContextKey).(string)
+		if err := s.repo.EnsureKnowledgeFolderPath(ctx, tenantID, kbID, folderPath, createdBy); err != nil {
+			return nil, err
+		}
 	}
 
 	eff, err := resolveFileImportProcessConfig(ctx, kb, getFileType(safeFilename), processOverrides, enableMultimodel)
@@ -220,8 +225,16 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
 		return nil, err
 	}
+	return s.enqueueStoredKnowledge(ctx, kb, knowledge, eff)
+}
 
-	// Enqueue document processing task to Asynq
+func (s *knowledgeService) enqueueStoredKnowledge(
+	ctx context.Context, kb *types.KnowledgeBase, knowledge *types.Knowledge, eff types.EffectiveProcessConfig,
+) (*types.Knowledge, error) {
+	tenantID := knowledge.TenantID
+	kbID := knowledge.KnowledgeBaseID
+	filePath := knowledge.FilePath
+	safeFilename := knowledge.FileName
 	logger.Info(ctx, "Enqueuing document processing task to Asynq")
 	enableMultimodelValue := eff.EnableMultimodel
 
@@ -262,10 +275,17 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	task := asynq.NewTask(
 		types.TypeDocumentProcess,
 		payloadBytes,
-		documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
+		documentProcessTaskOptions(s.config,
+			asynq.MaxRetry(3),
+			asynq.TaskID("document-process-"+knowledge.ID),
+		)...,
 	)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
+		if errors.Is(err, asynq.ErrTaskIDConflict) || errors.Is(err, asynq.ErrDuplicateTask) {
+			logger.Infof(ctx, "Document processing task already exists for knowledge %s", knowledge.ID)
+			return knowledge, nil
+		}
 		logger.Errorf(ctx, "Failed to enqueue document process task: %v", err)
 		s.markKnowledgeEnqueueFailed(ctx, knowledge)
 		recordKBActivity(ctx, s.audit, knowledge.TenantID, kbID, types.AuditActionKnowledgeCreated,

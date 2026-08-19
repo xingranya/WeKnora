@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -106,6 +107,87 @@ func (s *resourceCatalogFileService) SaveFile(
 	return ref, nil
 }
 
+func (s *resourceCatalogFileService) SaveReader(
+	ctx context.Context, reader io.Reader, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID string,
+) (string, error) {
+	streaming, ok := s.inner.(interfaces.StreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support resumable uploads")
+	}
+	physical, err := streaming.SaveReader(ctx, reader, size, fileName, contentType, tenantID, knowledgeID)
+	if err != nil {
+		return "", err
+	}
+	ref, err := s.register(ctx, physical, tenantID, fileName, size, false, "")
+	if err != nil {
+		return "", err
+	}
+	if knowledgeID != "" {
+		if err := s.catalog.Bind(ctx, ref, "knowledge", knowledgeID, "source_file"); err != nil {
+			_ = s.DeleteFile(ctx, ref)
+			return "", fmt.Errorf("bind stored resource: %w", err)
+		}
+	}
+	return ref, nil
+}
+
+func (s *resourceCatalogFileService) PrepareReaderPath(
+	ctx context.Context, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID string,
+) (string, error) {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	physical, err := prepared.PrepareReaderPath(ctx, size, fileName, contentType, tenantID, knowledgeID)
+	if err != nil {
+		return "", err
+	}
+	return physical, nil
+}
+
+func (s *resourceCatalogFileService) SaveReaderTo(
+	ctx context.Context, reader io.Reader, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID, filePath string,
+) error {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	physical, _, err := s.resolve(ctx, filePath)
+	if err != nil {
+		return err
+	}
+	return prepared.SaveReaderTo(ctx, reader, size, fileName, contentType, tenantID, knowledgeID, physical)
+}
+
+func (s *resourceCatalogFileService) FinalizeReaderPath(
+	ctx context.Context, size int64, fileName, contentType string,
+	tenantID uint64, knowledgeID, filePath string,
+) (string, error) {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	physical, err := prepared.FinalizeReaderPath(
+		ctx, size, fileName, contentType, tenantID, knowledgeID, filePath,
+	)
+	if err != nil {
+		return "", err
+	}
+	ref, err := s.register(ctx, physical, tenantID, fileName, size, false, "")
+	if err != nil {
+		return "", err
+	}
+	if knowledgeID != "" {
+		if err := s.catalog.Bind(ctx, ref, "knowledge", knowledgeID, "source_file"); err != nil {
+			return "", fmt.Errorf("bind prepared resource: %w", err)
+		}
+	}
+	return ref, nil
+}
+
 func (s *resourceCatalogFileService) SaveBytes(
 	ctx context.Context,
 	data []byte,
@@ -154,7 +236,7 @@ func (s *resourceCatalogFileService) DeleteFile(ctx context.Context, filePath st
 	if err != nil {
 		return err
 	}
-	if err := s.inner.DeleteFile(ctx, physical); err != nil {
+	if err := s.inner.DeleteFile(ctx, physical); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if isResource {

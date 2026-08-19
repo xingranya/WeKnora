@@ -9,6 +9,7 @@ services:
       - "${FRONTEND_PORT:-80}:80"
     environment:
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=${KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB:-2048}
       - DEFAULT_LOCALE=${DEFAULT_LOCALE:-}
       - APP_HOST=${APP_HOST:-app}
       # APP_BACKEND_PORT: the port NGINX proxies to (default 8080).
@@ -303,6 +304,13 @@ services:
       - JWT_SECRET=${JWT_SECRET:-}
       # File size limit (in MB)
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=${KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB:-2048}
+      # 仅允许 1-16 MiB；frontend Nginx 与后端请求上限按最大 16 MiB 设计。
+      - KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB=${KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB:-4}
+      - KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS=${KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS:-24}
+      # 必须位于已挂载的 /data/files 下；多副本部署必须改用所有 app 共享的 RWX 路径。
+      - KNOWLEDGE_UPLOAD_TEMP_DIR=${KNOWLEDGE_UPLOAD_TEMP_DIR:-/data/files/upload-sessions}
+      - WEKNORA_MINERU_MAX_CONCURRENCY=${WEKNORA_MINERU_MAX_CONCURRENCY:-}
       # 文档处理任务总超时（Go duration，默认 2h）
       - WEKNORA_DOCUMENT_PROCESS_TIMEOUT=${WEKNORA_DOCUMENT_PROCESS_TIMEOUT:-}
       # 单次 DocReader RPC 超时（默认 30m，须小于上一项）

@@ -50,6 +50,54 @@ func (s *backendScopedFileService) SaveFile(ctx context.Context, f *multipart.Fi
 	}
 	return s.wrap(p), nil
 }
+func (s *backendScopedFileService) SaveReader(ctx context.Context, reader io.Reader, size int64, name, contentType string, tenantID uint64, knowledgeID string) (string, error) {
+	streaming, ok := s.inner.(interfaces.StreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support resumable uploads")
+	}
+	p, err := streaming.SaveReader(ctx, reader, size, name, contentType, tenantID, knowledgeID)
+	if err != nil {
+		return "", err
+	}
+	return s.wrap(p), nil
+}
+func (s *backendScopedFileService) PrepareReaderPath(ctx context.Context, size int64, name, contentType string, tenantID uint64, knowledgeID string) (string, error) {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	p, err := prepared.PrepareReaderPath(ctx, size, name, contentType, tenantID, knowledgeID)
+	if err != nil {
+		return "", err
+	}
+	return s.wrap(p), nil
+}
+func (s *backendScopedFileService) SaveReaderTo(ctx context.Context, reader io.Reader, size int64, name, contentType string, tenantID uint64, knowledgeID, filePath string) error {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	p, err := s.unwrap(filePath)
+	if err != nil {
+		return err
+	}
+	return prepared.SaveReaderTo(ctx, reader, size, name, contentType, tenantID, knowledgeID, p)
+}
+func (s *backendScopedFileService) FinalizeReaderPath(ctx context.Context, size int64, name, contentType string, tenantID uint64, knowledgeID, filePath string) (string, error) {
+	prepared, ok := s.inner.(interfaces.PreparedStreamingFileService)
+	if !ok {
+		return "", fmt.Errorf("storage backend does not support prepared resumable uploads")
+	}
+	p, err := s.unwrap(filePath)
+	if err != nil {
+		return "", err
+	}
+	finalized, err := prepared.FinalizeReaderPath(ctx, size, name, contentType, tenantID, knowledgeID, p)
+	if err != nil {
+		return "", err
+	}
+	return s.wrap(finalized), nil
+}
 func (s *backendScopedFileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, name string, temp bool) (string, error) {
 	p, err := s.inner.SaveBytes(ctx, data, tenantID, name, temp)
 	if err != nil {

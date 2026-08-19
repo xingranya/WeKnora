@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { MessagePlugin, NotifyPlugin } from 'tdesign-vue-next'
 import ManualKnowledgeEditor from '@/components/manual-knowledge-editor.vue'
 import UploadConfirmHost from '@/components/UploadConfirmHost.vue'
+import UploadQueueHost from '@/components/UploadQueueHost.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { getCurrentUser, userInfoFromApi } from '@/api/auth'
@@ -276,6 +277,7 @@ onUnmounted(() => {
       <RouterView />
       <ManualKnowledgeEditor />
       <UploadConfirmHost />
+      <UploadQueueHost />
     </div>
   </t-config-provider>
 </template>

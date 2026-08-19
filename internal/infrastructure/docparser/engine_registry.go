@@ -131,6 +131,8 @@ func ListAllEngines(
 			FileTypes:         fileTypes,
 			Available:         available,
 			UnavailableReason: reason,
+			SupportsStreaming: name == MinerUEngineName,
+			MaxFileSizeBytes:  engineMaxFileSize(name),
 		})
 	}
 
@@ -142,6 +144,17 @@ func ListAllEngines(
 	}
 
 	return result
+}
+
+func engineMaxFileSize(name string) int64 {
+	switch name {
+	case MinerUEngineName:
+		return 2 * 1024 * 1024 * 1024
+	case BuiltinEngineName:
+		return 50 * 1024 * 1024
+	default:
+		return 100 * 1024 * 1024
+	}
 }
 
 // errEngineUnavailable reports an engine that is registered but cannot run for

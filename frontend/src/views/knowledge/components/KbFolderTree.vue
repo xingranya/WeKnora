@@ -3,6 +3,12 @@
     <div class="kb-folder-tree__header">
       <template v-if="!collapsed">
         <span class="kb-folder-tree__title">{{ t('knowledgeBase.folderTree.title') }}</span>
+        <t-tooltip v-if="canEdit" :content="t('knowledgeBase.folderTree.create')" placement="top">
+          <button type="button" class="kb-folder-tree__icon-btn"
+            :aria-label="t('knowledgeBase.folderTree.create')" @click="startCreate(selectedPath)">
+            <t-icon name="folder-add" size="15px" aria-hidden="true" />
+          </button>
+        </t-tooltip>
         <t-tooltip :content="t('knowledgeBase.folderTree.collapse')" placement="top">
           <button
             type="button"
@@ -26,7 +32,15 @@
       </t-tooltip>
     </div>
 
-    <div v-if="!collapsed" class="kb-folder-tree__body">
+    <div v-if="!collapsed" class="kb-folder-tree__body" role="tree"
+      :aria-label="t('knowledgeBase.folderTree.title')">
+      <div v-if="creatingUnder !== null" class="kb-folder-tree__create" @click.stop>
+        <t-icon name="folder" aria-hidden="true" />
+        <input ref="createInputRef" v-model.trim="createValue"
+          :aria-label="t('knowledgeBase.folderTree.createPlaceholder')"
+          :placeholder="t('knowledgeBase.folderTree.createPlaceholder')"
+          @keydown.enter="commitCreate" @keydown.esc="cancelCreate" />
+      </div>
       <template v-if="loading && !tree">
         <div v-for="n in 5" :key="'folder-skel-' + n" class="kb-folder-tree__skeleton">
           <t-skeleton animation="gradient" :row-col="[{ width: '100%', height: '16px' }]" />
@@ -45,22 +59,25 @@
           }"
           :style="{ '--kb-folder-depth': row.depth }"
           :title="row.kind === 'root' ? t('knowledgeBase.folderTree.rootRowTip') : row.path"
-          role="button"
+          role="treeitem"
+          :aria-level="row.depth + 1"
+          :aria-selected="selectedPath === row.path"
+          :aria-expanded="row.hasChildren ? isExpanded(row.path) : undefined"
           tabindex="0"
           @click="emit('select', row.path)"
-          @keydown.enter="emit('select', row.path)"
+          @keydown="selectRowFromKeyboard($event, row.path)"
         >
-          <span
+          <button
             v-if="row.hasChildren"
+            type="button"
             class="kb-folder-row__toggle"
-            role="button"
             :aria-label="t(isExpanded(row.path)
               ? 'knowledgeBase.folderTree.collapseFolder'
               : 'knowledgeBase.folderTree.expandFolder')"
             @click.stop="toggle(row.path)"
           >
-            <t-icon :name="isExpanded(row.path) ? 'chevron-down' : 'chevron-right'" />
-          </span>
+            <t-icon :name="isExpanded(row.path) ? 'chevron-down' : 'chevron-right'" aria-hidden="true" />
+          </button>
           <span v-else class="kb-folder-row__toggle-placeholder" aria-hidden="true" />
 
           <t-icon
@@ -73,6 +90,7 @@
             ref="renameInputRef"
             v-model="renameValue"
             class="kb-folder-row__rename"
+            :aria-label="t('knowledgeBase.folderTree.renamePlaceholder')"
             :placeholder="t('knowledgeBase.folderTree.renamePlaceholder')"
             @click.stop
             @keydown.enter="commitRename(row)"
@@ -99,16 +117,26 @@
                   class="kb-folder-row__more"
                   :class="{ 'is-open': menuOpenPath === row.path }"
                   :aria-label="t('knowledgeBase.moreOptions')"
+                  aria-haspopup="menu"
+                  :aria-expanded="menuOpenPath === row.path"
                   @click.stop
                 >
-                  <t-icon name="more" />
+                  <t-icon name="more" aria-hidden="true" />
                 </button>
                 <template #content>
-                  <div class="popup-menu kb-folder-row__menu" @click.stop>
-                    <div class="popup-menu-item" @click="onFolderMenuRename(row)">
-                      <t-icon name="edit" class="menu-icon" />
+                  <div class="popup-menu kb-folder-row__menu" role="menu" @click.stop>
+                    <button type="button" class="popup-menu-item" role="menuitem" @click="onFolderMenuRename(row)">
+                      <t-icon name="edit" class="menu-icon" aria-hidden="true" />
                       <span>{{ t('knowledgeBase.folderTree.rename') }}</span>
-                    </div>
+                    </button>
+                    <button type="button" class="popup-menu-item" role="menuitem" @click="startCreate(row.path)">
+                      <t-icon name="folder-add" class="menu-icon" aria-hidden="true" />
+                      <span>{{ t('knowledgeBase.folderTree.createChild') }}</span>
+                    </button>
+                    <button type="button" class="popup-menu-item popup-menu-item--danger" role="menuitem" @click="onFolderMenuDelete(row)">
+                      <t-icon name="delete" class="menu-icon" aria-hidden="true" />
+                      <span>{{ t('knowledgeBase.folderTree.delete') }}</span>
+                    </button>
                   </div>
                 </template>
               </t-popup>
@@ -149,6 +177,8 @@ const emit = defineEmits<{
   select: [path: string]
   'update:collapsed': [collapsed: boolean]
   rename: [payload: { from: string; to: string }]
+  create: [payload: { parentPath: string; name: string }]
+  delete: [path: string]
 }>()
 
 const { t } = useI18n()
@@ -161,6 +191,9 @@ const renamingPath = ref<string | null>(null)
 const menuOpenPath = ref<string | null>(null)
 const renameValue = ref('')
 const renameInputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null)
+const creatingUnder = ref<string | null>(null)
+const createValue = ref('')
+const createInputRef = ref<HTMLInputElement | null>(null)
 
 const rows = computed(() => buildFolderRows(props.tree, expanded.value))
 
@@ -175,6 +208,12 @@ const toggle = (path: string) => {
   if (next.has(path)) next.delete(path)
   else next.add(path)
   expanded.value = next
+}
+
+const selectRowFromKeyboard = (event: KeyboardEvent, path: string) => {
+  if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return
+  event.preventDefault()
+  emit('select', path)
 }
 
 const startRename = async (row: FolderRow) => {
@@ -194,6 +233,35 @@ const onFolderMenuRename = async (row: FolderRow) => {
   menuOpenPath.value = null
   await startRename(row)
 }
+
+const startCreate = async (parentPath = ROOT_FOLDER_PATH) => {
+  menuOpenPath.value = null
+  creatingUnder.value = parentPath
+  createValue.value = ''
+  emit('update:collapsed', false)
+  await nextTick()
+  createInputRef.value?.focus()
+}
+
+const cancelCreate = () => {
+  creatingUnder.value = null
+  createValue.value = ''
+}
+
+const commitCreate = () => {
+  const name = createValue.value.trim()
+  if (!name || creatingUnder.value === null) return
+  const parentPath = creatingUnder.value
+  cancelCreate()
+  emit('create', { parentPath, name })
+}
+
+const onFolderMenuDelete = (row: FolderRow) => {
+  menuOpenPath.value = null
+  emit('delete', row.path)
+}
+
+defineExpose({ startCreate })
 
 const cancelRename = () => {
   renamingPath.value = null
@@ -313,6 +381,25 @@ watch(
   }
 }
 
+.kb-folder-tree__create {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+
+  input {
+    min-width: 0;
+    height: 26px;
+    padding: 0 7px;
+    border: 1px solid var(--td-brand-color);
+    border-radius: 4px;
+    background: var(--td-bg-color-container);
+    color: var(--td-text-color-primary);
+    outline: none;
+  }
+}
+
 .kb-folder-tree__skeleton {
   padding: 7px 8px;
 }
@@ -371,6 +458,9 @@ watch(
 }
 
 .kb-folder-row__toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
   cursor: pointer;
 
   &:hover {
@@ -455,6 +545,14 @@ watch(
 
 .kb-folder-row__menu {
   min-width: 140px;
+
+  .popup-menu-item {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+  }
 }
 
 .kb-folder-row__rename {

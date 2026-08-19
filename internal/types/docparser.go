@@ -1,11 +1,16 @@
 package types
 
-import "strings"
+import (
+	"io"
+	"strings"
+)
 
 // ReadRequest is the unified transport-agnostic request for document reading.
 // Set FileContent for file mode, URL for URL mode.
 type ReadRequest struct {
 	FileContent           []byte
+	FileReader            io.Reader
+	FileSize              int64
 	FileName              string
 	FileType              string
 	URL                   string
@@ -48,6 +53,8 @@ type ParserEngineInfo struct {
 	Available         bool
 	UnavailableReason string
 	CompanyPreset     bool
+	SupportsStreaming bool
+	MaxFileSizeBytes  int64
 }
 
 // --- Internal types used by chunking pipeline ---
