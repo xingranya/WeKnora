@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -4602,25 +4600,12 @@ func (s *knowledgeService) convert(
 
 	logger.Infof(ctx, "[convert] kb=%s fileType=%s isURL=%v engine=%q rules=%+v",
 		kb.ID, fileType, isURL, parserEngine, eff.ChunkingConfig.ParserEngineRules)
-	parserConcurrency := 1
-	if raw := strings.TrimSpace(mergedOverrides["mineru_max_concurrency"]); raw != "" {
-		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value > 0 {
-			parserConcurrency = value
-		}
+	leaseCtx, release, gateErr := gateParserRead(ctx, parserEngine, mergedOverrides)
+	if gateErr != nil {
+		return nil, fmt.Errorf("acquire MinerU concurrency slot: %w", gateErr)
 	}
-	if raw := strings.TrimSpace(os.Getenv("WEKNORA_MINERU_MAX_CONCURRENCY")); raw != "" {
-		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value > 0 {
-			parserConcurrency = value
-		}
-	}
-	if parserEngine == docparser.MinerUEngineName {
-		leaseCtx, release, gateErr := docparser.GateParser(ctx, parserEngine, parserConcurrency)
-		if gateErr != nil {
-			return nil, fmt.Errorf("acquire MinerU concurrency slot: %w", gateErr)
-		}
-		defer release()
-		ctx = leaseCtx
-	}
+	defer release()
+	ctx = leaseCtx
 
 	var reader interfaces.DocReader = s.resolveDocReader(ctx, parserEngine, fileType, isURL, mergedOverrides)
 	if reader == nil {

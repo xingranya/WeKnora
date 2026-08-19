@@ -36,10 +36,31 @@ func GateParser(ctx context.Context, engine string, limit int) (context.Context,
 		AcquireLease(context.Context, string, int) (context.Context, func(), error)
 	}
 	if aware, ok := limiter.(leaseAware); ok {
-		return aware.AcquireLease(ctx, "parser:"+engine, limit)
+		leaseCtx, release, err := aware.AcquireLease(ctx, "parser:"+engine, limit)
+		if err != nil {
+			return nil, nil, err
+		}
+		if release == nil {
+			release = func() {}
+		}
+		if leaseCtx == nil {
+			leaseCtx = ctx
+		}
+		if err := leaseCtx.Err(); err != nil {
+			release()
+			return nil, nil, err
+		}
+		return leaseCtx, release, nil
 	}
 	release, err := limiter.Acquire(ctx, "parser:"+engine, limit)
-	if err != nil || release == nil {
+	if err != nil {
+		return nil, nil, err
+	}
+	if release == nil {
+		release = func() {}
+	}
+	if err := ctx.Err(); err != nil {
+		release()
 		return nil, nil, err
 	}
 	return ctx, release, nil

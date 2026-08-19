@@ -2,6 +2,7 @@ package docparser
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -42,5 +43,24 @@ func TestGateParserLimitsAndReportsLocalRuntime(t *testing.T) {
 		release()
 	case <-time.After(time.Second):
 		t.Fatal("释放并发槽位后，等待任务应继续执行")
+	}
+}
+
+func TestGateParserReturnsCancelledWaitInsteadOfFailingOpen(t *testing.T) {
+	ConfigureConcurrency(nil)
+	_, first, err := GateParser(context.Background(), MinerUEngineName, 1)
+	if err != nil {
+		t.Fatalf("acquire first parser slot: %v", err)
+	}
+	defer first()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	leaseCtx, release, err := GateParser(ctx, MinerUEngineName, 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled parser wait error = %v, want context.Canceled", err)
+	}
+	if leaseCtx != nil || release != nil {
+		t.Fatal("cancelled parser wait must not return a usable lease")
 	}
 }

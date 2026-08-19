@@ -360,8 +360,9 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 	ext := document.FileType
 	var options types.TemporaryDocumentCreateOptions
 	_ = json.Unmarshal(document.ProcessingOptions, &options)
+	parserConfig := s.resolveParserConfig(ctx)
 	if options.ParserEngine == "" || options.ParserEngine == "auto" {
-		options.ParserEngine = s.resolveParserConfig(ctx).ResolveChatParserEngine(ext)
+		options.ParserEngine = parserConfig.ResolveChatParserEngine(ext)
 	}
 	if _, ok := temporaryTextExtensions[ext]; ok && (options.ParserEngine == "" || options.ParserEngine == "auto") {
 		return string(data), nil, map[string]string{"parser": "plain_text"}, nil
@@ -389,7 +390,7 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 		FileContent: data, FileName: document.FileName, FileType: strings.TrimPrefix(ext, "."),
 		ParserEngine: parserEngine,
 	}
-	request.ParserEngineOverrides = s.resolveParserConfig(ctx).ToOverridesMap()
+	request.ParserEngineOverrides = parserConfig.ToOverridesMap()
 	deps := docparser.ReaderDeps{Overrides: request.ParserEngineOverrides, Remote: s.documentReader}
 	if s.tenantService != nil {
 		deps.WeKnoraCloudCredentials = s.tenantService.GetWeKnoraCloudCredentials
@@ -398,7 +399,13 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("parse document: %w", err)
 	}
-	result, err := reader.Read(ctx, request)
+	result, err := readTemporaryDocumentWithParserGate(
+		ctx,
+		parserEngine,
+		request.ParserEngineOverrides,
+		reader,
+		request,
+	)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("parse document: %w", err)
 	}
@@ -442,6 +449,21 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 		metadata["image_understanding"] = "vlm"
 	}
 	return content, images, metadata, nil
+}
+
+func readTemporaryDocumentWithParserGate(
+	ctx context.Context,
+	parserEngine string,
+	overrides map[string]string,
+	reader interfaces.DocReader,
+	request *types.ReadRequest,
+) (*types.ReadResult, error) {
+	leaseCtx, release, err := gateParserRead(ctx, parserEngine, overrides)
+	if err != nil {
+		return nil, fmt.Errorf("acquire MinerU concurrency slot: %w", err)
+	}
+	defer release()
+	return reader.Read(leaseCtx, request)
 }
 
 func (s *temporaryDocumentService) resolveParserConfig(ctx context.Context) *types.ParserEngineConfig {
