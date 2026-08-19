@@ -12,6 +12,7 @@ import {
   type KnowledgeUploadSession,
 } from '@/api/knowledge-base'
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess'
+import { generateUUID } from '@/utils/randomUUID'
 import { sha256BlobHex } from '@/utils/sha256'
 
 export type UploadQueueStatus =
@@ -199,13 +200,13 @@ export const createUploadQueueStore = (
       processConfig?: KnowledgeProcessOverrides
     }) {
       this.hydrate()
-      const batchId = crypto.randomUUID()
+      const batchId = generateUUID()
       options.files.forEach((file, index) => {
         const qualifiedName = options.fileNames[index]
         const segments = qualifiedName?.split('/').filter(Boolean) || []
         const folderPath = segments.length > 1 ? segments.slice(0, -1).join('/') : options.targetFolder
         this.tasks.push({
-          id: crypto.randomUUID(), batchId, kbId: options.kbId, kbName: options.kbName,
+          id: generateUUID(), batchId, kbId: options.kbId, kbName: options.kbName,
           fileName: file.name, fileSize: file.size, mimeType: file.type || 'application/octet-stream',
           lastModified: file.lastModified, targetFolder: folderPath || '', status: 'queued',
           confirmedBytes: 0, displayBytes: 0, speedBps: 0, etaSeconds: null,

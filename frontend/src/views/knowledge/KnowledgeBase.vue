@@ -1843,8 +1843,12 @@ const openUploadConfirmDialog = async (files: File[], urls: string[] = []) => {
       folderOptions: folderOptions.value,
     });
     await handleUploadConfirmResult(result);
-  } catch {
-    // cancelled
+  } catch (error: any) {
+    // 用户取消时 Promise 没有拒绝原因；其他异常必须可见，避免队列初始化失败被静默吞掉。
+    if (error !== undefined) {
+      console.error('Failed to enqueue confirmed upload:', error);
+      MessagePlugin.error(error?.message || t('knowledgeBase.uploadFailed'));
+    }
   }
 };
 
