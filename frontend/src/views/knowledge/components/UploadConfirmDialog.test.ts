@@ -11,7 +11,7 @@ test('selects multiple document tags and returns them with the confirmation resu
   assert.match(host, /:tag-ids="uploadConfirmStore\.tagIds"/)
   assert.match(dialog, /v-model="selectedTagIds"/)
   assert.match(dialog, /multiple/)
-  assert.match(dialog, /listKnowledgeTags\(kbId, \{ page: 1, page_size: 1000 \}\)/)
+  assert.match(dialog, /listKnowledgeTags\(requestKbId, \{ page: 1, page_size: 1000 \}\)/)
   assert.match(dialog, /tagIds: \[\.\.\.selectedTagIds\.value\]/)
 })
 
@@ -104,4 +104,12 @@ test('rehydrates dialog-local fields when a newer confirmation supersedes the vi
   assert.match(host, /:request-revision="uploadConfirmStore\.requestRevision"/)
   assert.match(dialog, /\(\) => \[props\.visible, props\.requestRevision\] as const/)
   assert.match(dialog, /if \(!previous\?\.\[0\]\)/)
+})
+
+test('drops stale tag responses after the visible confirmation request changes', () => {
+  assert.match(dialog, /function isCurrentTagRequest\(requestRevision: number, kbId: string\)/)
+  assert.match(dialog, /props\.requestRevision === requestRevision/)
+  assert.match(dialog, /String\(props\.kbInfo\?\.id \|\| ''\) === kbId/)
+  assert.match(dialog, /if \(!isCurrentTagRequest\(requestRevision, requestKbId\)\) return/)
+  assert.match(dialog, /loadTags\(props\.requestRevision\)/)
 })

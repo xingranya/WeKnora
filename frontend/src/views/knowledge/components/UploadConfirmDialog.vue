@@ -1325,24 +1325,36 @@ async function loadSystemInfo() {
   }
 }
 
-async function loadTags() {
+function isCurrentTagRequest(requestRevision: number, kbId: string): boolean {
+  return props.visible
+    && props.requestRevision === requestRevision
+    && String(props.kbInfo?.id || '') === kbId
+}
+
+async function loadTags(requestRevision: number) {
   const kbId = props.kbInfo?.id
   availableTags.value = []
   tagsLoadFailed.value = false
+  tagsLoading.value = false
   if (!kbId || props.mode === 'reparse') return
+  const requestKbId = String(kbId)
 
   tagsLoading.value = true
   try {
-    const response: any = await listKnowledgeTags(kbId, { page: 1, page_size: 1000 })
+    const response: any = await listKnowledgeTags(requestKbId, { page: 1, page_size: 1000 })
+    if (!isCurrentTagRequest(requestRevision, requestKbId)) return
     const tags = response?.data?.data || []
     availableTags.value = tags.map((tag: any) => ({
       id: String(tag.id),
       name: String(tag.name || ''),
     }))
   } catch {
+    if (!isCurrentTagRequest(requestRevision, requestKbId)) return
     tagsLoadFailed.value = true
   } finally {
-    tagsLoading.value = false
+    if (isCurrentTagRequest(requestRevision, requestKbId)) {
+      tagsLoading.value = false
+    }
   }
 }
 
@@ -1376,7 +1388,7 @@ watch(
     loadModels()
     loadSystemInfo()
     editorResources.ensureParserEngines()
-    loadTags()
+    loadTags(props.requestRevision)
   },
 )
 
