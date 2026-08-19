@@ -275,6 +275,7 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 
 	// Register question generation handler
 	mux.HandleFunc(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)
+	mux.HandleFunc(types.TypeQuestionIndexCleanup, params.KnowledgeService.ProcessQuestionIndexCleanup)
 
 	// Register summary generation handler
 	mux.HandleFunc(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)

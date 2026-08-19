@@ -77,7 +77,7 @@ var queueDefinitions = []QueueDefinition{
 	}},
 	{Name: QueueMultimodal, Pool: WorkerPoolEnrichment, Weight: 1, SharedWeight: 1, TaskTypes: []string{TypeImageMultimodal}},
 	{Name: QueueGraph, Pool: WorkerPoolEnrichment, Weight: 1, SharedWeight: 1, TaskTypes: []string{TypeChunkExtract}},
-	{Name: QueueQuestion, Pool: WorkerPoolEnrichment, Weight: 1, SharedWeight: 1, TaskTypes: []string{TypeQuestionGeneration}},
+	{Name: QueueQuestion, Pool: WorkerPoolEnrichment, Weight: 1, SharedWeight: 1, TaskTypes: []string{TypeQuestionGeneration, TypeQuestionIndexCleanup}},
 	{Name: QueueMemory, Pool: WorkerPoolEnrichment, Weight: 1, SharedWeight: 1, TaskTypes: []string{TypeMemoryExtract}},
 	{Name: QueueSync, Pool: WorkerPoolMaintenance, Weight: 2, TaskTypes: []string{TypeDataSourceSync}},
 	{Name: QueueMaintenance, Pool: WorkerPoolMaintenance, Weight: 1, TaskTypes: []string{
@@ -236,6 +236,7 @@ const (
 	TypeDocumentProcess          = "document:process"           // 文档处理任务
 	TypeFAQImport                = "faq:import"                 // FAQ导入任务（包含dry run模式）
 	TypeQuestionGeneration       = "question:generation"        // 问题生成任务
+	TypeQuestionIndexCleanup     = "question:index_cleanup"     // 问题索引补偿清理任务
 	TypeSummaryGeneration        = "summary:generation"         // 摘要生成任务
 	TypeKBClone                  = "kb:clone"                   // 知识库复制任务
 	TypeIndexDelete              = "index:delete"               // 索引删除任务
@@ -353,6 +354,8 @@ type QuestionGenerationPayload struct {
 	// tasks queued before this field shipped, or callers without a
 	// tracker).
 	Attempt int `json:"attempt,omitempty"`
+	// OperationID remains stable for retries of one queued generation task.
+	OperationID string `json:"operation_id,omitempty"`
 	// ChunkIDs switches the handler into batched fan-out mode: the task
 	// generates questions for this ordered window of text chunks only.
 	// Batching (rather than one task per chunk) keeps the task count
@@ -380,6 +383,21 @@ type QuestionGenerationPayload struct {
 	// knowledge. Empty when the batch is at a document boundary.
 	PrevChunkID string `json:"prev_chunk_id,omitempty"`
 	NextChunkID string `json:"next_chunk_id,omitempty"`
+}
+
+// QuestionIndexCleanupPayload carries the durable source IDs that a failed
+// question generation attempt must remove from the retrieval index.
+type QuestionIndexCleanupPayload struct {
+	TracingContext
+	TenantID         uint64   `json:"tenant_id"`
+	KnowledgeBaseID  string   `json:"knowledge_base_id"`
+	KnowledgeID      string   `json:"knowledge_id"`
+	ChunkID          string   `json:"chunk_id"`
+	SourceIDs        []string `json:"source_ids"`
+	ExpectedRevision int      `json:"expected_revision"`
+	Stage            string   `json:"stage"`
+	OperationID      string   `json:"operation_id"`
+	PreviousMetadata JSON     `json:"previous_metadata,omitempty"`
 }
 
 // SummaryGenerationPayload represents the summary generation task payload

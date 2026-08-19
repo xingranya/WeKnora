@@ -24,3 +24,16 @@ func TestGeneratedQuestionSourceID(t *testing.T) {
 		t.Fatal("source ID hashing is not deterministic")
 	}
 }
+
+func TestGeneratedQuestionIDIsStableForContentRevision(t *testing.T) {
+	first := GeneratedQuestionID(3, "如何配置解析引擎？")
+	if first != GeneratedQuestionID(3, "如何配置解析引擎？") {
+		t.Fatal("generated question ID is not deterministic")
+	}
+	if first == GeneratedQuestionID(4, "如何配置解析引擎？") {
+		t.Fatal("content revision must participate in generated question ID")
+	}
+	if first == GeneratedQuestionID(3, "如何配置上传队列？") {
+		t.Fatal("question text must participate in generated question ID")
+	}
+}

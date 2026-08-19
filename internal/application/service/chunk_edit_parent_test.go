@@ -65,6 +65,18 @@ type imageSyncChunkRepo struct {
 	children []*types.Chunk
 }
 
+func (r *imageSyncChunkRepo) GetChunkByID(
+	_ context.Context, _ uint64, id string,
+) (*types.Chunk, error) {
+	for _, child := range r.children {
+		if child.ID == id {
+			copyOfChild := *child
+			return &copyOfChild, nil
+		}
+	}
+	return nil, errors.New("chunk not found")
+}
+
 func (r *imageSyncChunkRepo) ListChunkByParentID(
 	_ context.Context, _ uint64, _ string,
 ) ([]*types.Chunk, error) {
@@ -180,6 +192,64 @@ func TestUpdateDocumentChunkPreservesGeneratedQuestionsAcrossRevision(t *testing
 	}
 	if updatedMetadata.IsQuestionCurrent(updatedMetadata.GeneratedQuestions[0], updated.ContentRevision) {
 		t.Fatal("question should remain identifiable as based on the previous content revision")
+	}
+}
+
+func TestStabilizeGeneratedQuestionMetadataRestoresStagedSnapshot(t *testing.T) {
+	previous := &types.DocumentChunkMetadata{
+		GeneratedQuestions: []types.GeneratedQuestion{{ID: "old", Question: "old question"}},
+	}
+	previousJSON, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := &types.DocumentChunkMetadata{
+		GeneratedQuestions:                []types.GeneratedQuestion{{ID: "new", Question: "new question"}},
+		GeneratedQuestionIndexStatus:      "staged",
+		GeneratedQuestionOperationID:      "operation",
+		StagedGeneratedQuestionSourceIDs:  []string{"new-source"},
+		PreviousGeneratedQuestionMetadata: previousJSON,
+	}
+	stagedJSON, err := json.Marshal(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &editableChunkRepo{chunk: &types.Chunk{
+		ID: "chunk", TenantID: 1, KnowledgeBaseID: "kb", Metadata: stagedJSON,
+	}}
+	service := &chunkService{chunkRepository: repo, kbRepository: editableChunkKBRepo{}}
+	meta, err := service.stabilizeGeneratedQuestionMetadata(context.Background(), repo.chunk)
+	if err != nil {
+		t.Fatalf("stabilize staged metadata: %v", err)
+	}
+	if len(meta.GeneratedQuestions) != 1 || meta.GeneratedQuestions[0].ID != "old" {
+		t.Fatalf("staged snapshot was not restored: %+v", meta)
+	}
+}
+
+func TestStabilizeGeneratedQuestionMetadataCleansIndexedState(t *testing.T) {
+	indexed := &types.DocumentChunkMetadata{
+		GeneratedQuestions:                []types.GeneratedQuestion{{ID: "new", Question: "new question"}},
+		PendingGeneratedQuestionSourceIDs: []string{"old-source"},
+		GeneratedQuestionIndexStatus:      "indexed",
+		GeneratedQuestionOperationID:      "operation",
+		PreviousGeneratedQuestionMetadata: types.JSON(`{"generated_questions":[]}`),
+	}
+	indexedJSON, err := json.Marshal(indexed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &editableChunkRepo{chunk: &types.Chunk{
+		ID: "chunk", TenantID: 1, KnowledgeBaseID: "kb", Metadata: indexedJSON,
+	}}
+	service := &chunkService{chunkRepository: repo, kbRepository: editableChunkKBRepo{}}
+	meta, err := service.stabilizeGeneratedQuestionMetadata(context.Background(), repo.chunk)
+	if err != nil {
+		t.Fatalf("stabilize indexed metadata: %v", err)
+	}
+	if meta.GeneratedQuestionIndexStatus != "" || meta.GeneratedQuestionOperationID != "" ||
+		len(meta.PendingGeneratedQuestionSourceIDs) != 0 || len(meta.PreviousGeneratedQuestionMetadata) != 0 {
+		t.Fatalf("indexed recovery fields were not cleared: %+v", meta)
 	}
 }
 

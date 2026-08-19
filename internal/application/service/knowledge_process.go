@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
@@ -26,6 +27,7 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"golang.org/x/sync/errgroup"
 )
 
 func (s *knowledgeService) cloneKnowledge(
@@ -1007,7 +1009,11 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	// A newer attempt (re-upload / edit / reparse) has superseded this one:
 	// skip before opening the span or registering the FinalizeSubtask defer
 	// so we neither read stale chunks nor decrement the new attempt's counter.
-	if attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt) {
+	isSuperseded, attemptErr := attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt)
+	if attemptErr != nil {
+		return attemptErr
+	}
+	if isSuperseded {
 		logger.Infof(ctx, "summary: attempt %d superseded for %s, skipping stale enrichment",
 			payload.Attempt, payload.KnowledgeID)
 		return nil
@@ -1371,17 +1377,229 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		logger.Errorf(ctx, "Failed to unmarshal question generation payload: %v", err)
 		return nil // Don't retry on unmarshal error
 	}
+	if payload.OperationID == "" {
+		// 兼容旧任务时用 payload 内容派生稳定 ID，重试不会生成新的 fencing token。
+		payload.OperationID = uuid.NewSHA1(uuid.NameSpaceOID, t.Payload()).String()
+	}
 	if len(payload.ChunkIDs) > 0 || payload.ChunkID != "" {
 		return s.processQuestionGenerationForChunks(ctx, t, payload)
 	}
 	return s.processQuestionGenerationForKnowledge(ctx, t, payload)
 }
 
+// ProcessQuestionIndexCleanup consumes durable question-index compensation
+// state. Staged questions are removed together with their metadata; indexed
+// questions keep their new vectors while pending old vectors are deleted.
+func (s *knowledgeService) ProcessQuestionIndexCleanup(ctx context.Context, t *asynq.Task) error {
+	var payload types.QuestionIndexCleanupPayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+		return err
+	}
+	if payload.ChunkID == "" {
+		return nil
+	}
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	return withChunkIndexLock(ctx, s.redisClient, payload.TenantID, payload.ChunkID, func(lockCtx context.Context) error {
+		chunk, err := s.chunkRepo.GetChunkByID(lockCtx, payload.TenantID, payload.ChunkID)
+		if err != nil {
+			return err
+		}
+		meta, err := chunk.DocumentMetadata()
+		if err != nil || meta == nil {
+			return err
+		}
+		sameSourceIDs := func(have []string, want []string) bool {
+			if len(have) != len(want) {
+				return false
+			}
+			set := make(map[string]struct{}, len(have))
+			for _, id := range have {
+				set[id] = struct{}{}
+			}
+			for _, id := range want {
+				if _, ok := set[id]; !ok {
+					return false
+				}
+			}
+			return true
+		}
+		removeIDs := func(have []string, remove []string) []string {
+			set := make(map[string]struct{}, len(remove))
+			for _, id := range remove {
+				set[id] = struct{}{}
+			}
+			out := make([]string, 0, len(have))
+			for _, id := range have {
+				if _, ok := set[id]; !ok {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		var sourceIDs []string
+		if meta.GeneratedQuestionOperationID != payload.OperationID || chunk.ContentRevision != payload.ExpectedRevision {
+			return nil
+		}
+		if payload.Stage == "staged" {
+			if meta.GeneratedQuestionIndexStatus != "staged" || !sameSourceIDs(meta.StagedGeneratedQuestionSourceIDs, payload.SourceIDs) {
+				return nil
+			}
+			sourceIDs = payload.SourceIDs
+		} else {
+			if meta.GeneratedQuestionIndexStatus != "indexed" || !sameSourceIDs(meta.PendingGeneratedQuestionSourceIDs, payload.SourceIDs) {
+				return nil
+			}
+			sourceIDs = payload.SourceIDs
+		}
+		if len(sourceIDs) > 0 {
+			kb, err := s.kbService.GetKnowledgeBaseByID(lockCtx, chunk.KnowledgeBaseID)
+			if err != nil {
+				return err
+			}
+			embeddingModel, err := s.modelService.GetEmbeddingModel(lockCtx, kb.EmbeddingModelID)
+			if err != nil {
+				return err
+			}
+			engine, err := retriever.CreateRetrieveEngineForKB(lockCtx, s.retrieveEngine, s.ownership, payload.TenantID, kb.VectorStoreID)
+			if err != nil {
+				return err
+			}
+			if err := engine.DeleteBySourceIDList(lockCtx, sourceIDs, embeddingModel.GetDimensions(), kb.Type); err != nil {
+				return err
+			}
+		}
+		if payload.Stage == "staged" {
+			if len(payload.PreviousMetadata) == 0 {
+				return fmt.Errorf("staged question cleanup for %s is missing previous metadata", chunk.ID)
+			}
+			restoredChunk := *chunk
+			restoredChunk.Metadata = payload.PreviousMetadata
+			if err := s.updateChunkVector(lockCtx, restoredChunk.KnowledgeBaseID, []*types.Chunk{&restoredChunk}); err != nil {
+				return err
+			}
+			return s.chunkRepo.UpdateChunkMetadataIfRevision(
+				lockCtx, payload.TenantID, chunk.ID, payload.ExpectedRevision, payload.PreviousMetadata,
+			)
+		} else {
+			meta.PendingGeneratedQuestionSourceIDs = removeIDs(meta.PendingGeneratedQuestionSourceIDs, sourceIDs)
+			if len(meta.PendingGeneratedQuestionSourceIDs) == 0 {
+				meta.GeneratedQuestionIndexStatus = ""
+				meta.GeneratedQuestionOperationID = ""
+				meta.StagedGeneratedQuestionSourceIDs = nil
+				meta.PreviousGeneratedQuestionMetadata = nil
+			}
+		}
+		metadataJSON, err := chunkMetadataJSON(meta)
+		if err != nil {
+			return err
+		}
+		return s.chunkRepo.UpdateChunkMetadataIfRevision(lockCtx, payload.TenantID, chunk.ID, payload.ExpectedRevision, metadataJSON)
+	})
+}
+
+func (s *knowledgeService) enqueueQuestionIndexCleanup(ctx context.Context, payload types.QuestionGenerationPayload, pending []pendingQuestionMetadata) {
+	if s.task == nil || payload.KnowledgeID == "" {
+		return
+	}
+	for _, item := range pending {
+		stage := item.metadata.GeneratedQuestionIndexStatus
+		sourceIDs := item.metadata.StagedGeneratedQuestionSourceIDs
+		if stage == "indexed" {
+			sourceIDs = item.metadata.PendingGeneratedQuestionSourceIDs
+		}
+		previousMetadata := item.previousMetadata
+		if len(previousMetadata) == 0 {
+			previousMetadata = types.JSON(`{}`)
+		}
+		cleanupPayload, err := json.Marshal(types.QuestionIndexCleanupPayload{
+			TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID, KnowledgeID: payload.KnowledgeID,
+			ChunkID: item.chunkID, SourceIDs: sourceIDs, ExpectedRevision: item.expectedRevision, Stage: stage,
+			OperationID: item.metadata.GeneratedQuestionOperationID, PreviousMetadata: previousMetadata,
+		})
+		if err != nil {
+			continue
+		}
+		task := asynq.NewTask(types.TypeQuestionIndexCleanup, cleanupPayload,
+			asynq.Queue(types.QueueQuestion), asynq.MaxRetry(10), asynq.Timeout(10*time.Minute))
+		if _, err := s.task.Enqueue(task); err != nil {
+			logger.Warnf(ctx, "Failed to enqueue question index cleanup for %s/%s: %v", payload.KnowledgeID, item.chunkID, err)
+		}
+	}
+}
+
+// RecoverPendingQuestionIndexes re-enqueues durable compensation state left
+// by an interrupted process. The cleanup handler performs exact operation,
+// revision, stage, and source-ID fencing, so duplicate recovery is harmless.
+func (s *knowledgeService) RecoverPendingQuestionIndexes(ctx context.Context, limit int) error {
+	if s.task == nil {
+		return nil
+	}
+	chunks, err := s.chunkRepo.ListChunksWithPendingQuestionIndexes(ctx, limit)
+	if err != nil {
+		return err
+	}
+	var recoveryErr error
+	for _, chunk := range chunks {
+		if chunk == nil {
+			continue
+		}
+		meta, metaErr := chunk.DocumentMetadata()
+		if metaErr != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("read pending question metadata for %s: %w", chunk.ID, metaErr))
+			continue
+		}
+		if meta == nil || meta.GeneratedQuestionOperationID == "" {
+			continue
+		}
+		sourceIDs := meta.StagedGeneratedQuestionSourceIDs
+		if meta.GeneratedQuestionIndexStatus == "indexed" {
+			sourceIDs = meta.PendingGeneratedQuestionSourceIDs
+		}
+		previous := meta.PreviousGeneratedQuestionMetadata
+		if len(previous) == 0 {
+			previous = types.JSON(`{}`)
+		}
+		cleanupPayload, marshalErr := json.Marshal(types.QuestionIndexCleanupPayload{
+			TenantID: chunk.TenantID, KnowledgeBaseID: chunk.KnowledgeBaseID, KnowledgeID: chunk.KnowledgeID,
+			ChunkID: chunk.ID, SourceIDs: sourceIDs, ExpectedRevision: chunk.ContentRevision,
+			Stage: meta.GeneratedQuestionIndexStatus, OperationID: meta.GeneratedQuestionOperationID,
+			PreviousMetadata: previous,
+		})
+		if marshalErr != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("encode question cleanup for %s: %w", chunk.ID, marshalErr))
+			continue
+		}
+		task := asynq.NewTask(types.TypeQuestionIndexCleanup, cleanupPayload,
+			asynq.Queue(types.QueueQuestion), asynq.MaxRetry(10), asynq.Timeout(10*time.Minute))
+		if _, enqueueErr := s.task.Enqueue(task); enqueueErr != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("enqueue question cleanup for %s: %w", chunk.ID, enqueueErr))
+		}
+	}
+	return recoveryErr
+}
+
 // processQuestionGenerationForKnowledge is the legacy whole-knowledge handler:
 // it iterates every text chunk of the knowledge in one task. Retained for
 // in-flight tasks queued before per-chunk fan-out; new enqueues always set
 // payload.ChunkID and take the per-chunk path instead.
-func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) (retErr error) {
+func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) error {
+	lockCtx := context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	chunks, err := s.chunkRepo.ListChunksByKnowledgeID(lockCtx, payload.TenantID, payload.KnowledgeID)
+	if err != nil {
+		return err
+	}
+	chunkIDs := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk != nil && chunk.ChunkType == types.ChunkTypeText {
+			chunkIDs = append(chunkIDs, chunk.ID)
+		}
+	}
+	return withChunkIndexLocks(lockCtx, s.redisClient, payload.TenantID, chunkIDs, func(lockedCtx context.Context) error {
+		return s.processQuestionGenerationForKnowledgeLocked(lockedCtx, t, payload)
+	})
+}
+
+func (s *knowledgeService) processQuestionGenerationForKnowledgeLocked(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) (retErr error) {
 	taskStartedAt := time.Now()
 	retryCount, _ := asynq.GetRetryCount(ctx)
 	maxRetry, _ := asynq.GetMaxRetry(ctx)
@@ -1416,6 +1634,7 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	// FinalizeSubtask decrement so a stale task can't drain the new
 	// attempt's counter.
 	superseded := false
+	pendingMetadata := make([]pendingQuestionMetadata, 0)
 	// Decrement enrichment counter on terminal exit. Keyed on the value
 	// RETURNED to asynq (retErr), not qErr: some branches record a span
 	// failure (qErr != nil) yet `return nil` so asynq won't retry (KB /
@@ -1425,6 +1644,9 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	// final attempt. Runs AFTER the stats-log defer below — defers
 	// unwind LIFO, so this one declared first executes last.
 	defer func() {
+		if retErr != nil && !superseded && isFinalAsynqAttempt(ctx) {
+			s.enqueueQuestionIndexCleanup(ctx, payload, pendingMetadata)
+		}
 		finalizeSubtaskDetached(ctx, s.repo, payload.KnowledgeID, "question_legacy",
 			retErr, superseded, isFinalAsynqAttempt(ctx))
 	}()
@@ -1502,7 +1724,12 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	// A newer attempt has superseded this one: skip before opening the span
 	// so we don't read stale chunks. superseded suppresses the counter
 	// decrement in the defer above; qSpan stays nil so the stats defer no-ops.
-	if attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt) {
+	isSuperseded, attemptErr := attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt)
+	if attemptErr != nil {
+		qErr = attemptErr
+		return attemptErr
+	}
+	if isSuperseded {
 		superseded = true
 		exitStatus = "superseded"
 		logger.Infof(ctx, "question: attempt %d superseded for %s, skipping stale enrichment",
@@ -1648,9 +1875,49 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		return chunk.Content
 	}
 
-	// Generate questions for each chunk with context
+	checkLegacyGenerationState := func() (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		supersededAttempt, attemptErr := attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt)
+		if attemptErr != nil {
+			return false, attemptErr
+		}
+		if supersededAttempt {
+			superseded = true
+			exitStatus = "superseded"
+			return false, nil
+		}
+		currentKnowledge, stateErr := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+		if stateErr != nil {
+			return false, stateErr
+		}
+		if currentKnowledge == nil || currentKnowledge.ParseStatus == types.ParseStatusCancelled ||
+			currentKnowledge.ParseStatus == types.ParseStatusDeleting {
+			exitStatus = "knowledge_aborted"
+			return false, nil
+		}
+		return true, nil
+	}
+	if current, stateErr := checkLegacyGenerationState(); stateErr != nil {
+		qErr = stateErr
+		return stateErr
+	} else if !current {
+		return nil
+	}
+
+	// Generate questions for each chunk with context. Legacy tasks are kept
+	// compatible, but use the same conditional metadata write and stable IDs as
+	// the batched path so old queued jobs are also safe to retry.
 	var indexInfoList []*types.IndexInfo
+	pendingMetadata = make([]pendingQuestionMetadata, 0, len(textChunks))
 	for i, chunk := range textChunks {
+		if current, stateErr := checkLegacyGenerationState(); stateErr != nil {
+			qErr = stateErr
+			return stateErr
+		} else if !current {
+			return nil
+		}
 		if strings.TrimSpace(chunk.Content) == "" {
 			emptyContentChunks++
 			continue
@@ -1672,20 +1939,26 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		if err != nil {
 			llmCallFailed++
 			logger.Warnf(ctx, "Failed to generate questions for chunk %s: %v", chunk.ID, err)
-			continue
+			exitStatus = "question_generation_failed"
+			qErr = err
+			return err
 		}
 
 		if len(questions) == 0 {
 			llmCallEmpty++
-			continue
+		} else {
+			llmCallSuccess++
 		}
 		latestChunk, latestErr := s.chunkRepo.GetChunkByID(ctx, payload.TenantID, chunk.ID)
-		if latestErr != nil || latestChunk.ContentRevision != generationRevision {
+		if latestErr != nil {
+			qErr = fmt.Errorf("failed to reload chunk %s before question write: %w", chunk.ID, latestErr)
+			return qErr
+		}
+		if latestChunk == nil || latestChunk.ContentRevision != generationRevision {
 			logger.Infof(ctx, "Skipping stale generated questions for chunk %s (revision changed)", chunk.ID)
 			continue
 		}
 		chunk = latestChunk
-		llmCallSuccess++
 		generatedQuestionsTotal += len(questions)
 		if sampleQuestion == "" && len(questions) > 0 {
 			sampleQuestion = previewText(questions[0], 200)
@@ -1694,29 +1967,66 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		// Update chunk metadata with unique IDs for each question
 		generatedQuestions := make([]types.GeneratedQuestion, len(questions))
 		questionRevision := chunk.ContentRevision
+		newSourceIDs := make([]string, 0, len(questions))
 		for j, question := range questions {
-			questionID := fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j))
 			generatedQuestions[j] = types.GeneratedQuestion{
-				ID:              questionID,
+				ID:              types.GeneratedQuestionID(questionRevision, question),
 				Question:        question,
 				ContentRevision: &questionRevision,
 			}
+			newSourceIDs = append(newSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, generatedQuestions[j].ID))
+		}
+		oldMetadata, metadataErr := chunk.DocumentMetadata()
+		if metadataErr != nil {
+			qErr = fmt.Errorf("failed to read existing question metadata for chunk %s: %w", chunk.ID, metadataErr)
+			return qErr
+		}
+		oldSourceIDs := make([]string, 0)
+		if oldMetadata != nil {
+			oldSourceIDs = append(oldSourceIDs, oldMetadata.PendingGeneratedQuestionSourceIDs...)
+			for _, oldQuestion := range oldMetadata.GeneratedQuestions {
+				if strings.TrimSpace(oldQuestion.Question) != "" {
+					oldSourceIDs = append(oldSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, oldQuestion.ID))
+				}
+			}
+		}
+		oldSourceIDsToDelete := questionSourceIDsExcept(oldSourceIDs, newSourceIDs)
+		pendingSourceIDs := uniqueQuestionSourceIDs(oldSourceIDsToDelete, newSourceIDs)
+		stagedSourceIDs := questionSourceIDsExcept(newSourceIDs, oldSourceIDs)
+		previousMetadata := append(types.JSON(nil), chunk.Metadata...)
+		if oldMetadata != nil && oldMetadata.GeneratedQuestionOperationID == payload.OperationID &&
+			len(oldMetadata.PreviousGeneratedQuestionMetadata) > 0 {
+			previousMetadata = append(types.JSON(nil), oldMetadata.PreviousGeneratedQuestionMetadata...)
 		}
 		meta := &types.DocumentChunkMetadata{
-			GeneratedQuestions: generatedQuestions, GeneratedQuestionsRevision: chunk.ContentRevision,
+			GeneratedQuestions:                generatedQuestions,
+			GeneratedQuestionsRevision:        chunk.ContentRevision,
+			PendingGeneratedQuestionSourceIDs: pendingSourceIDs,
+			StagedGeneratedQuestionSourceIDs:  stagedSourceIDs,
+			GeneratedQuestionIndexStatus:      "staged",
+			GeneratedQuestionOperationID:      payload.OperationID,
+			PreviousGeneratedQuestionMetadata: previousMetadata,
+		}
+		cleanMeta := &types.DocumentChunkMetadata{
+			GeneratedQuestions:         generatedQuestions,
+			GeneratedQuestionsRevision: chunk.ContentRevision,
 		}
 		if err := chunk.SetDocumentMetadata(meta); err != nil {
 			chunkMetadataSetFailed++
 			logger.Warnf(ctx, "Failed to set document metadata for chunk %s: %v", chunk.ID, err)
-			continue
+			qErr = err
+			return qErr
 		}
-
-		// Update chunk in database
-		if err := s.chunkService.UpdateChunk(ctx, chunk); err != nil {
-			chunkUpdateFailed++
-			logger.Warnf(ctx, "Failed to update chunk %s: %v", chunk.ID, err)
-			continue
-		}
+		pendingMetadata = append(pendingMetadata, pendingQuestionMetadata{
+			chunkID:           chunk.ID,
+			expectedRevision:  generationRevision,
+			previousMetadata:  previousMetadata,
+			metadata:          meta,
+			cleanMetadata:     cleanMeta,
+			newSourceIDs:      newSourceIDs,
+			previousSourceIDs: oldSourceIDs,
+			oldSourceIDs:      oldSourceIDsToDelete,
+		})
 
 		// Create index entries for generated questions
 		for _, gq := range generatedQuestions {
@@ -1734,6 +2044,69 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		logger.Debugf(ctx, "Generated %d questions for chunk %s", len(questions), chunk.ID)
 	}
 	indexEntriesPrepared = len(indexInfoList)
+	restoreStagedMetadata := func() {
+		for _, item := range pendingMetadata {
+			previous := item.previousMetadata
+			if len(previous) == 0 {
+				previous = types.JSON(`{}`)
+			}
+			if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+				context.WithoutCancel(ctx), payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, previous,
+			); err != nil {
+				logger.Warnf(ctx, "Failed to restore staged question metadata for chunk %s: %v", item.chunkID, err)
+			}
+		}
+	}
+	for _, item := range pendingMetadata {
+		metadataJSON, marshalErr := chunkMetadataJSON(item.metadata)
+		if marshalErr != nil {
+			restoreStagedMetadata()
+			qErr = fmt.Errorf("failed to encode staged question metadata for chunk %s: %w", item.chunkID, marshalErr)
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, metadataJSON,
+		); err != nil {
+			restoreStagedMetadata()
+			qErr = fmt.Errorf("failed to stage question metadata for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+	}
+	deleteQuestionSources := func(sourceIDs []string) error {
+		if len(sourceIDs) == 0 {
+			return nil
+		}
+		// 任务取消后仍要完成补偿删除，不能让已取消的 context 直接阻断清理。
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
+		defer cancel()
+		return retrieveEngine.DeleteBySourceIDList(cleanupCtx, sourceIDs, embeddingModel.GetDimensions(), kb.Type)
+	}
+	cleanupNewQuestionItem := func(item pendingQuestionMetadata) error {
+		return deleteQuestionSources(item.metadata.StagedGeneratedQuestionSourceIDs)
+	}
+	cleanupNewQuestionIndexes := func() error {
+		allSourceIDs := make([]string, 0)
+		for _, item := range pendingMetadata {
+			allSourceIDs = append(allSourceIDs, item.metadata.StagedGeneratedQuestionSourceIDs...)
+		}
+		allSourceIDs = uniqueQuestionSourceIDs(allSourceIDs)
+		if len(allSourceIDs) == 0 {
+			return nil
+		}
+		return deleteQuestionSources(allSourceIDs)
+	}
+	metadataCommitted := make(map[string]bool, len(pendingMetadata))
+	cleanupUncommittedQuestionIndexes := func() error {
+		for _, item := range pendingMetadata {
+			if metadataCommitted[item.chunkID] {
+				continue
+			}
+			if err := cleanupNewQuestionItem(item); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	// Index generated questions
 	if len(indexInfoList) > 0 {
@@ -1741,13 +2114,212 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		if err := retrieveEngine.BatchIndex(ctx, embeddingModel, indexInfoList); err != nil {
 			exitStatus = "index_questions_failed"
 			logger.Errorf(ctx, "Failed to index generated questions: %v", err)
+			if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean partial generated question indexes: %v", cleanupErr)
+			}
 			return fmt.Errorf("failed to index questions: %w", err)
 		}
 		indexBatchSucceeded = true
 		logger.Infof(ctx, "Successfully indexed %d generated questions for knowledge: %s", len(indexInfoList), payload.KnowledgeID)
 	}
+	if current, stateErr := checkLegacyGenerationState(); stateErr != nil {
+		restoreStagedMetadata()
+		if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+			logger.Warnf(ctx, "Failed to clean generated questions after state check failure: %v", cleanupErr)
+		}
+		qErr = stateErr
+		return stateErr
+	} else if !current {
+		restoreStagedMetadata()
+		if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+			logger.Warnf(ctx, "Failed to clean generated questions after abort: %v", cleanupErr)
+		}
+		return nil
+	}
+	for itemIndex := range pendingMetadata {
+		item := &pendingMetadata[itemIndex]
+		if current, stateErr := checkLegacyGenerationState(); stateErr != nil {
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean generated questions after state check failure: %v", cleanupErr)
+			}
+			qErr = stateErr
+			return stateErr
+		} else if !current {
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean generated questions after abort: %v", cleanupErr)
+			}
+			return nil
+		}
+		indexedMetadata := *item.metadata
+		indexedMetadata.StagedGeneratedQuestionSourceIDs = nil
+		indexedMetadata.PendingGeneratedQuestionSourceIDs = item.oldSourceIDs
+		indexedMetadata.GeneratedQuestionIndexStatus = "indexed"
+		metadataJSON, marshalErr := chunkMetadataJSON(&indexedMetadata)
+		if marshalErr != nil {
+			qErr = marshalErr
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, metadataJSON,
+		); err != nil {
+			if errors.Is(err, ErrChunkRevisionConflict) {
+				if cleanupErr := cleanupNewQuestionItem(*item); cleanupErr != nil {
+					logger.Warnf(ctx, "Failed to clean stale generated questions for chunk %s: %v", item.chunkID, cleanupErr)
+				}
+				continue
+			}
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean generated questions after metadata write failure for chunk %s: %v", item.chunkID, cleanupErr)
+			}
+			qErr = fmt.Errorf("failed to update question metadata for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+		item.metadata = &indexedMetadata
+		metadataCommitted[item.chunkID] = true
+		if len(item.oldSourceIDs) > 0 {
+			if err := deleteQuestionSources(item.oldSourceIDs); err != nil {
+				if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+					logger.Warnf(ctx, "Failed to clean uncommitted generated questions after old index deletion failure: %v", cleanupErr)
+				}
+				qErr = fmt.Errorf("failed to remove previous generated questions for chunk %s: %w", item.chunkID, err)
+				return qErr
+			}
+		}
+		cleanJSON, marshalErr := chunkMetadataJSON(item.cleanMetadata)
+		if marshalErr != nil {
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean uncommitted generated questions after metadata encoding failure: %v", cleanupErr)
+			}
+			qErr = marshalErr
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevision(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, cleanJSON,
+		); err != nil {
+			if errors.Is(err, ErrChunkRevisionConflict) {
+				if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+					logger.Warnf(ctx, "Failed to remove stale generated questions for chunk %s: %v", item.chunkID, cleanupErr)
+				}
+				continue
+			}
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean uncommitted generated questions after cleanup metadata failure: %v", cleanupErr)
+			}
+			qErr = fmt.Errorf("failed to clear pending question indexes for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+	}
 
 	return nil
+}
+
+// questionGenerationBatchConcurrency 限制单个问题生成任务内的模型请求数。
+// 模型包装器仍会跨 worker 和实例执行分布式的单模型限流。
+const questionGenerationBatchConcurrency = 4
+
+type questionGenerationBatchResult struct {
+	questions []string
+	err       error
+}
+
+type pendingQuestionMetadata struct {
+	chunkID           string
+	expectedRevision  int
+	previousMetadata  types.JSON
+	metadata          *types.DocumentChunkMetadata
+	cleanMetadata     *types.DocumentChunkMetadata
+	newSourceIDs      []string
+	previousSourceIDs []string
+	oldSourceIDs      []string
+}
+
+func uniqueQuestionSourceIDs(sourceIDs ...[]string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, group := range sourceIDs {
+		for _, sourceID := range group {
+			if sourceID == "" {
+				continue
+			}
+			if _, ok := seen[sourceID]; ok {
+				continue
+			}
+			seen[sourceID] = struct{}{}
+			result = append(result, sourceID)
+		}
+	}
+	return result
+}
+
+func questionSourceIDsExcept(sourceIDs, excluded []string) []string {
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, sourceID := range excluded {
+		excludedSet[sourceID] = struct{}{}
+	}
+	result := make([]string, 0, len(sourceIDs))
+	for _, sourceID := range uniqueQuestionSourceIDs(sourceIDs) {
+		if _, ok := excludedSet[sourceID]; !ok {
+			result = append(result, sourceID)
+		}
+	}
+	return result
+}
+
+// generateQuestionBatchConcurrently 使用有界 worker 执行相互独立的分块请求，
+// 并按原始分块顺序保留结果。单个模型请求失败只影响对应分块，不丢弃其他成功结果；
+// 上下文取消仍作为任务级错误返回，让 Asynq 可以重试。
+func generateQuestionBatchConcurrently(
+	ctx context.Context,
+	count int,
+	concurrency int,
+	generate func(context.Context, int) ([]string, error),
+) ([]questionGenerationBatchResult, error) {
+	results := make([]questionGenerationBatchResult, count)
+	if count == 0 {
+		return results, nil
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > count {
+		concurrency = count
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	jobs := make(chan int)
+	for worker := 0; worker < concurrency; worker++ {
+		group.Go(func() error {
+			for {
+				select {
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case index, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+					questions, err := generate(groupCtx, index)
+					results[index] = questionGenerationBatchResult{questions: questions, err: err}
+					if err != nil && groupCtx.Err() != nil {
+						return groupCtx.Err()
+					}
+				}
+			}
+		})
+	}
+
+sendJobs:
+	for index := 0; index < count; index++ {
+		select {
+		case jobs <- index:
+		case <-groupCtx.Done():
+			break sendJobs
+		}
+	}
+	close(jobs)
+	if err := group.Wait(); err != nil {
+		return results, err
+	}
+	return results, nil
 }
 
 // processQuestionGenerationForChunks generates questions for a batch (window)
@@ -1757,7 +2329,18 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 // postprocess.question.batch[i] subspan. The payload carries only chunk ids
 // (never content); content is read fresh here, and all questions for the batch
 // are indexed in a single embedding BatchIndex call.
-func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) (retErr error) {
+func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) error {
+	batchIDs := payload.ChunkIDs
+	if len(batchIDs) == 0 && payload.ChunkID != "" {
+		batchIDs = []string{payload.ChunkID}
+	}
+	lockCtx := context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	return withChunkIndexLocks(lockCtx, s.redisClient, payload.TenantID, batchIDs, func(lockedCtx context.Context) error {
+		return s.processQuestionGenerationForChunksLocked(lockedCtx, t, payload)
+	})
+}
+
+func (s *knowledgeService) processQuestionGenerationForChunksLocked(ctx context.Context, t *asynq.Task, payload types.QuestionGenerationPayload) (retErr error) {
 	taskStartedAt := time.Now()
 	retryCount, _ := asynq.GetRetryCount(ctx)
 	maxRetry, _ := asynq.GetMaxRetry(ctx)
@@ -1784,6 +2367,7 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 	// Suppresses the FinalizeSubtask drain when a newer attempt superseded
 	// this run, so a stale task can't decrement the new attempt's counter.
 	superseded := false
+	pendingMetadata := make([]pendingQuestionMetadata, 0)
 
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
 	if payload.Language != "" {
@@ -1795,16 +2379,19 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 	// span failure yet `return nil` (terminal, must drain). Declared first
 	// so it runs LAST (after the stats/span defer below).
 	defer func() {
+		if retErr != nil && !superseded && isFinalAsynqAttempt(ctx) {
+			s.enqueueQuestionIndexCleanup(ctx, payload, pendingMetadata)
+		}
 		finalizeSubtaskDetached(ctx, s.repo, payload.KnowledgeID,
 			fmt.Sprintf("question_batch[%d]", payload.BatchIndex),
 			retErr, superseded, isFinalAsynqAttempt(ctx))
 	}()
 	defer func() {
 		logger.Infof(ctx,
-			"Question generation (batch) stats: knowledge=%s batch=%d chunks(in_batch=%d,processed=%d,empty=%d) llm_failed=%d retry=%d/%d status=%s elapsed=%s generated_questions=%d index(entries=%d,succeeded=%v)",
+			"Question generation (batch) stats: knowledge=%s batch=%d chunks(in_batch=%d,processed=%d,empty=%d) llm_failed=%d retry=%d/%d status=%s elapsed=%s generated_questions=%d index(entries=%d,succeeded=%v) generation_concurrency=%d",
 			payload.KnowledgeID, payload.BatchIndex, chunksInBatch, chunksProcessed, emptyChunks, llmCallFailed,
 			retryCount, maxRetry, exitStatus, time.Since(taskStartedAt).Round(time.Millisecond),
-			generatedQuestionsTotal, indexEntriesPrepared, indexBatchSucceeded,
+			generatedQuestionsTotal, indexEntriesPrepared, indexBatchSucceeded, questionGenerationBatchConcurrency,
 		)
 		if qSpan != nil {
 			out := types.JSONMap{
@@ -1817,6 +2404,7 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 				"questions_generated":    generatedQuestionsTotal,
 				"index_entries_prepared": indexEntriesPrepared,
 				"index_batch_succeeded":  indexBatchSucceeded,
+				"generation_concurrency": questionGenerationBatchConcurrency,
 				"retry":                  retryCount,
 				"max_retry":              maxRetry,
 			}
@@ -1848,7 +2436,12 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 
 	// A newer attempt has superseded this one: skip before opening the span
 	// so we don't read stale chunks and don't drain the new attempt.
-	if attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt) {
+	isSuperseded, attemptErr := attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt)
+	if attemptErr != nil {
+		qErr = attemptErr
+		return attemptErr
+	}
+	if isSuperseded {
 		superseded = true
 		exitStatus = "superseded"
 		logger.Infof(ctx, "question: attempt %d superseded for %s, skipping stale enrichment",
@@ -1947,22 +2540,35 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 	// neighbors so we can rebuild the same surrounding context the legacy
 	// loop used, all enriched with image OCR / caption info. A vanished
 	// chunk degrades gracefully (skipped / empty context).
-	getChunk := func(id string) *types.Chunk {
+	getChunk := func(id string) (*types.Chunk, error) {
 		if id == "" {
-			return nil
+			return nil, nil
 		}
 		c, gerr := s.chunkRepo.GetChunkByID(ctx, payload.TenantID, id)
 		if gerr != nil {
-			return nil
+			if errors.Is(gerr, repository.ErrChunkNotFound) {
+				return nil, nil
+			}
+			return nil, gerr
 		}
-		return c
+		return c, nil
 	}
 	batchChunks := make([]*types.Chunk, len(batchIDs))
 	for i, id := range batchIDs {
-		batchChunks[i] = getChunk(id)
+		chunk, getErr := getChunk(id)
+		if getErr != nil {
+			return fmt.Errorf("load question generation chunk %s: %w", id, getErr)
+		}
+		batchChunks[i] = chunk
 	}
-	prevChunk := getChunk(payload.PrevChunkID)
-	nextChunk := getChunk(payload.NextChunkID)
+	prevChunk, err := getChunk(payload.PrevChunkID)
+	if err != nil {
+		return fmt.Errorf("load previous question context: %w", err)
+	}
+	nextChunk, err := getChunk(payload.NextChunkID)
+	if err != nil {
+		return fmt.Errorf("load next question context: %w", err)
+	}
 
 	infoIDs := make([]string, 0, len(batchIDs)+2)
 	infoIDs = append(infoIDs, batchIDs...)
@@ -1998,57 +2604,186 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 		return enrich(nextChunk)
 	}
 
-	var indexInfoList []*types.IndexInfo
-	for i, chunk := range batchChunks {
+	for _, chunk := range batchChunks {
 		if chunk == nil || strings.TrimSpace(chunk.Content) == "" {
 			emptyChunks++
+		}
+	}
+
+	generationResults, generationErr := generateQuestionBatchConcurrently(
+		ctx,
+		len(batchChunks),
+		questionGenerationBatchConcurrency,
+		func(generateCtx context.Context, index int) ([]string, error) {
+			chunk := batchChunks[index]
+			if chunk == nil || strings.TrimSpace(chunk.Content) == "" {
+				return nil, nil
+			}
+			return s.generateQuestionsWithContext(
+				generateCtx,
+				chatModel,
+				enrich(chunk),
+				prevContentAt(index),
+				nextContentAt(index),
+				knowledge.Title,
+				questionCount,
+				customInstructions,
+			)
+		},
+	)
+	if generationErr != nil {
+		exitStatus = "question_generation_cancelled"
+		qErr = generationErr
+		return generationErr
+	}
+	failedGenerationChunks := 0
+	var firstGenerationErr error
+	for _, result := range generationResults {
+		if result.err == nil {
 			continue
+		}
+		failedGenerationChunks++
+		if firstGenerationErr == nil {
+			firstGenerationErr = result.err
+		}
+	}
+	if failedGenerationChunks > 0 {
+		// 生成阶段尚未写入 chunk，整批返回错误不会留下半成品；让
+		// Asynq 重试临时的限流、超时和上游 5xx，避免静默丢失问题。
+		exitStatus = "question_generation_failed"
+		llmCallFailed = failedGenerationChunks
+		qErr = fmt.Errorf("question generation failed for %d chunks: %w", failedGenerationChunks, firstGenerationErr)
+		return qErr
+	}
+
+	checkGenerationState := func() (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		supersededAttempt, attemptErr := attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt)
+		if attemptErr != nil {
+			return false, fmt.Errorf("failed to check question generation attempt: %w", attemptErr)
+		}
+		if supersededAttempt {
+			superseded = true
+			exitStatus = "superseded"
+			return false, nil
+		}
+		currentKnowledge, stateErr := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+		if stateErr != nil {
+			return false, fmt.Errorf("failed to recheck question generation state: %w", stateErr)
+		}
+		if currentKnowledge == nil || currentKnowledge.ParseStatus == types.ParseStatusCancelled ||
+			currentKnowledge.ParseStatus == types.ParseStatusDeleting {
+			exitStatus = "knowledge_aborted"
+			return false, nil
+		}
+		return true, nil
+	}
+	if current, stateErr := checkGenerationState(); stateErr != nil {
+		qErr = stateErr
+		return stateErr
+	} else if !current {
+		return nil
+	}
+
+	var indexInfoList []*types.IndexInfo
+	pendingMetadata = make([]pendingQuestionMetadata, 0, len(batchChunks))
+	for i, chunk := range batchChunks {
+		if chunk == nil || strings.TrimSpace(chunk.Content) == "" {
+			continue
+		}
+		if current, stateErr := checkGenerationState(); stateErr != nil {
+			qErr = stateErr
+			return stateErr
+		} else if !current {
+			return nil
 		}
 
 		generationRevision := chunk.ContentRevision
-		questions, gerr := s.generateQuestionsWithContext(
-			ctx, chatModel, enrich(chunk), prevContentAt(i), nextContentAt(i), knowledge.Title, questionCount,
-			customInstructions)
-		if gerr != nil {
-			llmCallFailed++
-			logger.Warnf(ctx, "Failed to generate questions for chunk %s: %v", chunk.ID, gerr)
-			continue
-		}
-		if len(questions) == 0 {
-			continue
-		}
+		result := generationResults[i]
+		questions := result.questions
 		latestChunk, latestErr := s.chunkRepo.GetChunkByID(ctx, payload.TenantID, chunk.ID)
-		if latestErr != nil || latestChunk.ContentRevision != generationRevision {
+		if latestErr != nil {
+			qErr = fmt.Errorf("failed to reload chunk %s before question write: %w", chunk.ID, latestErr)
+			return qErr
+		}
+		if latestChunk == nil || latestChunk.ContentRevision != generationRevision {
 			logger.Infof(ctx, "Skipping stale generated questions for chunk %s (revision changed)", chunk.ID)
 			continue
 		}
 		chunk = latestChunk
+		oldMetadata, metadataErr := chunk.DocumentMetadata()
+		if metadataErr != nil {
+			qErr = fmt.Errorf("failed to read existing question metadata for chunk %s: %w", chunk.ID, metadataErr)
+			return qErr
+		}
+		oldSourceIDs := make([]string, 0)
+		if oldMetadata != nil {
+			oldSourceIDs = append(oldSourceIDs, oldMetadata.PendingGeneratedQuestionSourceIDs...)
+			for _, oldQuestion := range oldMetadata.GeneratedQuestions {
+				if strings.TrimSpace(oldQuestion.Question) == "" {
+					continue
+				}
+				oldSourceIDs = append(oldSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, oldQuestion.ID))
+			}
+		}
 		chunksProcessed++
 		generatedQuestionsTotal += len(questions)
-		if sampleQuestion == "" {
+		if sampleQuestion == "" && len(questions) > 0 {
 			sampleQuestion = previewText(questions[0], 200)
 		}
 
 		generatedQuestions := make([]types.GeneratedQuestion, len(questions))
 		questionRevision := chunk.ContentRevision
+		newSourceIDs := make([]string, 0, len(questions))
 		for j, question := range questions {
 			generatedQuestions[j] = types.GeneratedQuestion{
-				ID:              fmt.Sprintf("q%d", time.Now().UnixNano()+int64(j)),
+				// 序号 ID 让同一 chunk revision 的重试复用 source_id，
+				// 避免向量库积累每次重试生成的新问题。
+				ID:              types.GeneratedQuestionID(questionRevision, question),
 				Question:        question,
 				ContentRevision: &questionRevision,
 			}
+			newSourceIDs = append(newSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, generatedQuestions[j].ID))
+		}
+		oldSourceIDs = uniqueQuestionSourceIDs(oldSourceIDs)
+		oldSourceIDsToDelete := questionSourceIDsExcept(oldSourceIDs, newSourceIDs)
+		pendingSourceIDs := uniqueQuestionSourceIDs(oldSourceIDsToDelete, newSourceIDs)
+		stagedSourceIDs := questionSourceIDsExcept(newSourceIDs, oldSourceIDs)
+		previousMetadata := append(types.JSON(nil), chunk.Metadata...)
+		if oldMetadata != nil && oldMetadata.GeneratedQuestionOperationID == payload.OperationID &&
+			len(oldMetadata.PreviousGeneratedQuestionMetadata) > 0 {
+			previousMetadata = append(types.JSON(nil), oldMetadata.PreviousGeneratedQuestionMetadata...)
 		}
 		meta := &types.DocumentChunkMetadata{
-			GeneratedQuestions: generatedQuestions, GeneratedQuestionsRevision: chunk.ContentRevision,
+			GeneratedQuestions:                generatedQuestions,
+			GeneratedQuestionsRevision:        chunk.ContentRevision,
+			PendingGeneratedQuestionSourceIDs: pendingSourceIDs,
+			StagedGeneratedQuestionSourceIDs:  stagedSourceIDs,
+			GeneratedQuestionIndexStatus:      "staged",
+			GeneratedQuestionOperationID:      payload.OperationID,
+			PreviousGeneratedQuestionMetadata: previousMetadata,
+		}
+		cleanMeta := &types.DocumentChunkMetadata{
+			GeneratedQuestions:         generatedQuestions,
+			GeneratedQuestionsRevision: chunk.ContentRevision,
 		}
 		if err := chunk.SetDocumentMetadata(meta); err != nil {
 			logger.Warnf(ctx, "Failed to set document metadata for chunk %s: %v", chunk.ID, err)
-			continue
+			qErr = err
+			return qErr
 		}
-		if err := s.chunkService.UpdateChunk(ctx, chunk); err != nil {
-			logger.Warnf(ctx, "Failed to update chunk %s: %v", chunk.ID, err)
-			continue
-		}
+		pendingMetadata = append(pendingMetadata, pendingQuestionMetadata{
+			chunkID:           chunk.ID,
+			expectedRevision:  generationRevision,
+			previousMetadata:  previousMetadata,
+			metadata:          meta,
+			cleanMetadata:     cleanMeta,
+			newSourceIDs:      newSourceIDs,
+			previousSourceIDs: oldSourceIDs,
+			oldSourceIDs:      oldSourceIDsToDelete,
+		})
 		for _, gq := range generatedQuestions {
 			indexInfoList = append(indexInfoList, &types.IndexInfo{
 				Content:         buildKnowledgeIndexContent(knowledge, gq.Question),
@@ -2063,10 +2798,82 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 	}
 
 	indexEntriesPrepared = len(indexInfoList)
+	// 先持久化本轮新旧 source ID，再调用向量库。即使 BatchIndex 部分
+	// 成功且补偿删除失败，下一次重试仍能从 pending 列表找到孤儿索引。
+	restoreStagedMetadata := func() {
+		for _, item := range pendingMetadata {
+			previous := item.previousMetadata
+			if len(previous) == 0 {
+				previous = types.JSON(`{}`)
+			}
+			if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+				context.WithoutCancel(ctx), payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, previous,
+			); err != nil {
+				logger.Warnf(ctx, "Failed to restore staged question metadata for chunk %s: %v", item.chunkID, err)
+			}
+		}
+	}
+	for _, item := range pendingMetadata {
+		metadataJSON, marshalErr := chunkMetadataJSON(item.metadata)
+		if marshalErr != nil {
+			restoreStagedMetadata()
+			qErr = fmt.Errorf("failed to encode staged question metadata for chunk %s: %w", item.chunkID, marshalErr)
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, metadataJSON,
+		); err != nil {
+			restoreStagedMetadata()
+			qErr = fmt.Errorf("failed to stage question metadata for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+	}
+	if current, stateErr := checkGenerationState(); stateErr != nil {
+		restoreStagedMetadata()
+		qErr = stateErr
+		return stateErr
+	} else if !current {
+		restoreStagedMetadata()
+		return nil
+	}
+	deleteQuestionSources := func(sourceIDs []string) error {
+		if len(sourceIDs) == 0 {
+			return nil
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
+		defer cancel()
+		return retrieveEngine.DeleteBySourceIDList(cleanupCtx, sourceIDs, embeddingModel.GetDimensions(), kb.Type)
+	}
+	cleanupNewQuestionItem := func(item pendingQuestionMetadata) error {
+		return deleteQuestionSources(item.metadata.StagedGeneratedQuestionSourceIDs)
+	}
+	cleanupNewQuestionIndexes := func() error {
+		for _, item := range pendingMetadata {
+			if err := cleanupNewQuestionItem(item); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	metadataCommitted := make(map[string]bool, len(pendingMetadata))
+	cleanupUncommittedQuestionIndexes := func() error {
+		for _, item := range pendingMetadata {
+			if metadataCommitted[item.chunkID] {
+				continue
+			}
+			if err := cleanupNewQuestionItem(item); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if len(indexInfoList) > 0 {
 		if err := retrieveEngine.BatchIndex(ctx, embeddingModel, indexInfoList); err != nil {
 			exitStatus = "index_questions_failed"
 			qErr = err
+			if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean partial generated question indexes: %v", cleanupErr)
+			}
 			logger.Errorf(ctx, "Failed to index generated questions for batch %d: %v", payload.BatchIndex, err)
 			return fmt.Errorf("failed to index questions: %w", err)
 		}
@@ -2074,7 +2881,83 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 		logger.Infof(ctx, "Indexed %d generated questions for knowledge=%s batch=%d",
 			len(indexInfoList), payload.KnowledgeID, payload.BatchIndex)
 	}
+	if current, stateErr := checkGenerationState(); stateErr != nil {
+		if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+			logger.Warnf(ctx, "Failed to clean generated questions after state check failure: %v", cleanupErr)
+		}
+		qErr = stateErr
+		return stateErr
+	} else if !current {
+		if cleanupErr := cleanupNewQuestionIndexes(); cleanupErr != nil {
+			logger.Warnf(ctx, "Failed to remove generated questions after abort: %v", cleanupErr)
+		}
+		return nil
+	}
+	for itemIndex := range pendingMetadata {
+		item := &pendingMetadata[itemIndex]
+		indexedMetadata := *item.metadata
+		indexedMetadata.StagedGeneratedQuestionSourceIDs = nil
+		indexedMetadata.PendingGeneratedQuestionSourceIDs = item.oldSourceIDs
+		indexedMetadata.GeneratedQuestionIndexStatus = "indexed"
+		metadataJSON, marshalErr := chunkMetadataJSON(&indexedMetadata)
+		if marshalErr != nil {
+			qErr = fmt.Errorf("failed to encode question metadata for chunk %s: %w", item.chunkID, marshalErr)
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevisionAndAttempt(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, payload.Attempt, metadataJSON,
+		); err != nil {
+			if errors.Is(err, ErrChunkRevisionConflict) {
+				if cleanupErr := cleanupNewQuestionItem(*item); cleanupErr != nil {
+					logger.Warnf(ctx, "Failed to remove stale generated questions for chunk %s: %v", item.chunkID, cleanupErr)
+				}
+				logger.Infof(ctx, "Skipping final question metadata cleanup for stale chunk %s", item.chunkID)
+				continue
+			}
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean generated questions after metadata write failure for chunk %s: %v", item.chunkID, cleanupErr)
+			}
+			qErr = fmt.Errorf("failed to clear pending question indexes for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+		item.metadata = &indexedMetadata
+		metadataCommitted[item.chunkID] = true
+		if len(item.oldSourceIDs) > 0 {
+			if err := deleteQuestionSources(item.oldSourceIDs); err != nil {
+				if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+					logger.Warnf(ctx, "Failed to clean uncommitted generated questions after old index deletion failure: %v", cleanupErr)
+				}
+				qErr = fmt.Errorf("failed to remove previous generated questions for chunk %s: %w", item.chunkID, err)
+				return qErr
+			}
+		}
+		cleanJSON, marshalErr := chunkMetadataJSON(item.cleanMetadata)
+		if marshalErr != nil {
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean uncommitted generated questions after metadata encoding failure: %v", cleanupErr)
+			}
+			qErr = fmt.Errorf("failed to encode clean question metadata for chunk %s: %w", item.chunkID, marshalErr)
+			return qErr
+		}
+		if err := s.chunkRepo.UpdateChunkMetadataIfRevision(
+			ctx, payload.TenantID, item.chunkID, item.expectedRevision, cleanJSON,
+		); err != nil {
+			if cleanupErr := cleanupUncommittedQuestionIndexes(); cleanupErr != nil {
+				logger.Warnf(ctx, "Failed to clean uncommitted generated questions after cleanup metadata failure: %v", cleanupErr)
+			}
+			qErr = fmt.Errorf("failed to clear pending question indexes for chunk %s: %w", item.chunkID, err)
+			return qErr
+		}
+	}
 	return nil
+}
+
+func chunkMetadataJSON(metadata *types.DocumentChunkMetadata) (types.JSON, error) {
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
+	return types.JSON(data), nil
 }
 
 // generateQuestionsWithContext generates questions for a chunk with surrounding context
@@ -2158,6 +3041,19 @@ func (s *knowledgeService) RegenerateChunkQuestions(
 	ctx context.Context, chunkID string,
 ) ([]types.GeneratedQuestion, error) {
 	tenantID := types.MustTenantIDFromContext(ctx)
+	var generated []types.GeneratedQuestion
+	err := withChunkIndexLock(ctx, s.redisClient, tenantID, chunkID, func(lockCtx context.Context) error {
+		var err error
+		generated, err = s.regenerateChunkQuestionsLocked(lockCtx, chunkID)
+		return err
+	})
+	return generated, err
+}
+
+func (s *knowledgeService) regenerateChunkQuestionsLocked(
+	ctx context.Context, chunkID string,
+) ([]types.GeneratedQuestion, error) {
+	tenantID := types.MustTenantIDFromContext(ctx)
 	chunk, err := s.chunkRepo.GetChunkByID(ctx, tenantID, chunkID)
 	if err != nil {
 		return nil, err
@@ -2217,21 +3113,80 @@ func (s *knowledgeService) RegenerateChunkQuestions(
 	chunk = latestChunk
 	generated := make([]types.GeneratedQuestion, 0, len(questions))
 	questionRevision := chunk.ContentRevision
+	newSourceIDs := make([]string, 0, len(questions))
 	for _, question := range questions {
 		generated = append(generated, types.GeneratedQuestion{
-			ID: uuid.NewString(), Question: question, ContentRevision: &questionRevision,
+			ID: types.GeneratedQuestionID(questionRevision, question), Question: question, ContentRevision: &questionRevision,
 		})
+		newSourceIDs = append(newSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, generated[len(generated)-1].ID))
+	}
+	oldSourceIDs := make([]string, 0)
+	oldMetadata, metadataErr := chunk.DocumentMetadata()
+	if metadataErr != nil {
+		return nil, fmt.Errorf("failed to read existing question metadata: %w", metadataErr)
+	}
+	if oldMetadata != nil {
+		oldSourceIDs = append(oldSourceIDs, oldMetadata.PendingGeneratedQuestionSourceIDs...)
+		for _, oldQuestion := range oldMetadata.GeneratedQuestions {
+			if strings.TrimSpace(oldQuestion.Question) != "" {
+				oldSourceIDs = append(oldSourceIDs, types.GeneratedQuestionSourceID(chunk.ID, oldQuestion.ID))
+			}
+		}
+	}
+	previousSourceIDs := uniqueQuestionSourceIDs(oldSourceIDs)
+	oldSourceIDs = questionSourceIDsExcept(previousSourceIDs, newSourceIDs)
+	stagedSourceIDs := questionSourceIDsExcept(newSourceIDs, previousSourceIDs)
+	operationID := uuid.NewString()
+	previousMetadata := append(types.JSON(nil), chunk.Metadata...)
+	if oldMetadata != nil && oldMetadata.GeneratedQuestionIndexStatus != "" &&
+		len(oldMetadata.PreviousGeneratedQuestionMetadata) > 0 {
+		previousMetadata = append(types.JSON(nil), oldMetadata.PreviousGeneratedQuestionMetadata...)
 	}
 	meta := &types.DocumentChunkMetadata{
+		GeneratedQuestions: generated, GeneratedQuestionsRevision: chunk.ContentRevision,
+		PendingGeneratedQuestionSourceIDs: uniqueQuestionSourceIDs(oldSourceIDs, newSourceIDs),
+		StagedGeneratedQuestionSourceIDs:  stagedSourceIDs,
+		GeneratedQuestionIndexStatus:      "staged",
+		GeneratedQuestionOperationID:      operationID,
+		PreviousGeneratedQuestionMetadata: previousMetadata,
+	}
+	cleanMeta := &types.DocumentChunkMetadata{
 		GeneratedQuestions: generated, GeneratedQuestionsRevision: chunk.ContentRevision,
 	}
 	if err := chunk.SetDocumentMetadata(meta); err != nil {
 		return nil, err
 	}
-	if err := s.chunkRepo.UpdateChunk(ctx, chunk); err != nil {
+	metadataJSON, err := chunkMetadataJSON(meta)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chunkRepo.UpdateChunkMetadataIfRevision(
+		ctx, tenantID, chunk.ID, generationRevision, metadataJSON,
+	); err != nil {
 		return nil, err
 	}
 	if err := s.updateChunkVector(ctx, chunk.KnowledgeBaseID, []*types.Chunk{chunk}); err != nil {
+		// updateChunkVector 先删后建；失败时用脱离请求取消的短窗口
+		// 再做一次完整重建，避免瞬时向量库错误留下空索引。
+		retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
+		retryErr := s.updateChunkVector(retryCtx, chunk.KnowledgeBaseID, []*types.Chunk{chunk})
+		cancel()
+		if retryErr != nil {
+			s.enqueueQuestionIndexCleanup(ctx, types.QuestionGenerationPayload{
+				TenantID: tenantID, KnowledgeBaseID: chunk.KnowledgeBaseID, KnowledgeID: chunk.KnowledgeID,
+			}, []pendingQuestionMetadata{{
+				chunkID: chunk.ID, expectedRevision: generationRevision, previousMetadata: previousMetadata, metadata: meta,
+			}})
+			return nil, fmt.Errorf("rebuild chunk vector failed: initial=%v retry=%w", err, retryErr)
+		}
+	}
+	cleanJSON, err := chunkMetadataJSON(cleanMeta)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chunkRepo.UpdateChunkMetadataIfRevision(
+		ctx, tenantID, chunk.ID, generationRevision, cleanJSON,
+	); err != nil {
 		return nil, err
 	}
 	return generated, nil
@@ -2886,6 +3841,28 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 }
 
 func (s *knowledgeService) UpdateImageInfo(
+	ctx context.Context,
+	knowledgeID string,
+	chunkID string,
+	imageInfo string,
+) error {
+	tenantID := types.MustTenantIDFromContext(ctx)
+	children, err := s.chunkRepo.ListChunkByParentID(ctx, tenantID, chunkID)
+	if err != nil {
+		return err
+	}
+	lockIDs := []string{chunkID}
+	for _, child := range children {
+		if child != nil {
+			lockIDs = append(lockIDs, child.ID)
+		}
+	}
+	return withChunkIndexLocks(ctx, s.redisClient, tenantID, lockIDs, func(lockedCtx context.Context) error {
+		return s.updateImageInfoLocked(lockedCtx, knowledgeID, chunkID, imageInfo)
+	})
+}
+
+func (s *knowledgeService) updateImageInfoLocked(
 	ctx context.Context,
 	knowledgeID string,
 	chunkID string,

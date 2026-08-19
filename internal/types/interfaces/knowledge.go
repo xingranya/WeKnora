@@ -208,6 +208,10 @@ type KnowledgeService interface {
 	ProcessFAQImport(ctx context.Context, t *asynq.Task) error
 	// ProcessQuestionGeneration handles Asynq question generation tasks
 	ProcessQuestionGeneration(ctx context.Context, t *asynq.Task) error
+	// ProcessQuestionIndexCleanup removes durable pending question indexes.
+	ProcessQuestionIndexCleanup(ctx context.Context, t *asynq.Task) error
+	// RecoverPendingQuestionIndexes re-enqueues durable question index cleanup.
+	RecoverPendingQuestionIndexes(ctx context.Context, limit int) error
 	// ProcessSummaryGeneration handles Asynq summary generation tasks
 	ProcessSummaryGeneration(ctx context.Context, t *asynq.Task) error
 	// ProcessKBClone handles Asynq knowledge base clone tasks

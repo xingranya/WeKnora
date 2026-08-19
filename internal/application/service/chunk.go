@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 var ErrChunkRevisionConflict = repository.ErrChunkRevisionConflict
@@ -34,6 +35,7 @@ type chunkService struct {
 	ownership       retriever.TenantStoreOwnership
 	task            interfaces.TaskEnqueuer
 	spanTracker     SpanTracker
+	redisClient     *redis.Client
 }
 
 // NewChunkService creates a new chunk service
@@ -52,6 +54,7 @@ func NewChunkService(
 	ownership retriever.TenantStoreOwnership,
 	task interfaces.TaskEnqueuer,
 	spanTracker SpanTracker,
+	redisClient *redis.Client,
 ) interfaces.ChunkService {
 	return &chunkService{
 		chunkRepository: chunkRepository,
@@ -62,6 +65,7 @@ func NewChunkService(
 		ownership:       ownership,
 		task:            task,
 		spanTracker:     spanTracker,
+		redisClient:     redisClient,
 	}
 }
 
@@ -383,6 +387,36 @@ func (s *chunkService) UpdateDocumentChunk(
 	ctx context.Context, chunkID string, content *string, isEnabled *bool, expectedRevision *int,
 ) (*types.Chunk, error) {
 	tenantID := types.MustTenantIDFromContext(ctx)
+	current, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	if err != nil {
+		return nil, err
+	}
+	lockIDs := []string{chunkID}
+	if current.ParentChunkID != "" {
+		lockIDs = append(lockIDs, current.ParentChunkID)
+	}
+	children, err := s.chunkRepository.ListChunkByParentID(ctx, tenantID, chunkID)
+	if err != nil {
+		return nil, err
+	}
+	for _, child := range children {
+		if child != nil {
+			lockIDs = append(lockIDs, child.ID)
+		}
+	}
+	var updated *types.Chunk
+	err = withChunkIndexLocks(ctx, s.redisClient, tenantID, lockIDs, func(lockCtx context.Context) error {
+		var err error
+		updated, err = s.updateDocumentChunkLocked(lockCtx, chunkID, content, isEnabled, expectedRevision)
+		return err
+	})
+	return updated, err
+}
+
+func (s *chunkService) updateDocumentChunkLocked(
+	ctx context.Context, chunkID string, content *string, isEnabled *bool, expectedRevision *int,
+) (*types.Chunk, error) {
+	tenantID := types.MustTenantIDFromContext(ctx)
 	chunk, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
 	if err != nil {
 		return nil, err
@@ -473,7 +507,7 @@ func (s *chunkService) UpdateDocumentChunk(
 		}
 	}
 	if bodyChanged || newEnabled != revision.IsEnabled {
-		if err := s.syncEditedChunkImages(ctx, chunk); err != nil {
+		if err := s.syncEditedChunkImagesLocked(ctx, chunk); err != nil {
 			logger.Warnf(ctx, "Failed to synchronize image children after chunk edit: %v", err)
 			chunk.IndexStatus = "failed"
 			_ = s.chunkRepository.UpdateChunk(ctx, chunk)
@@ -530,28 +564,48 @@ func (s *chunkService) syncEditedChunkImages(ctx context.Context, chunk *types.C
 	if err != nil {
 		return err
 	}
+	lockIDs := []string{chunk.ID}
+	for _, child := range children {
+		if child != nil {
+			lockIDs = append(lockIDs, child.ID)
+		}
+	}
+	return withChunkIndexLocks(ctx, s.redisClient, chunk.TenantID, lockIDs, func(lockCtx context.Context) error {
+		return s.syncEditedChunkImagesLocked(lockCtx, chunk)
+	})
+}
+
+func (s *chunkService) syncEditedChunkImagesLocked(ctx context.Context, chunk *types.Chunk) error {
+	children, err := s.chunkRepository.ListChunkByParentID(ctx, chunk.TenantID, chunk.ID)
+	if err != nil {
+		return err
+	}
 	contentURLs := searchutil.ImageURLsInContent(chunk.Content)
 	for _, child := range children {
 		if child.ChunkType != types.ChunkTypeImageOCR && child.ChunkType != types.ChunkTypeImageCaption {
 			continue
 		}
-		desiredEnabled := chunk.IsEnabled && imageChildMatchesContent(child, contentURLs)
-		if child.IsEnabled == desiredEnabled && child.IndexStatus == "ready" {
+		latestChild, getErr := s.chunkRepository.GetChunkByID(ctx, chunk.TenantID, child.ID)
+		if getErr != nil {
+			return getErr
+		}
+		desiredEnabled := chunk.IsEnabled && imageChildMatchesContent(latestChild, contentURLs)
+		if latestChild.IsEnabled == desiredEnabled && latestChild.IndexStatus == "ready" {
 			continue
 		}
-		child.IsEnabled = desiredEnabled
-		child.IndexStatus = "processing"
-		child.UpdatedAt = time.Now()
-		if err := s.chunkRepository.UpdateChunk(ctx, child); err != nil {
+		latestChild.IsEnabled = desiredEnabled
+		latestChild.IndexStatus = "processing"
+		latestChild.UpdatedAt = time.Now()
+		if err := s.chunkRepository.UpdateChunk(ctx, latestChild); err != nil {
 			return err
 		}
-		if err := s.syncChunkIndex(ctx, child); err != nil {
-			child.IndexStatus = "failed"
-			_ = s.chunkRepository.UpdateChunk(ctx, child)
+		if err := s.syncChunkIndex(ctx, latestChild); err != nil {
+			latestChild.IndexStatus = "failed"
+			_ = s.chunkRepository.UpdateChunk(ctx, latestChild)
 			return err
 		}
-		child.IndexStatus = "ready"
-		if err := s.chunkRepository.UpdateChunk(ctx, child); err != nil {
+		latestChild.IndexStatus = "ready"
+		if err := s.chunkRepository.UpdateChunk(ctx, latestChild); err != nil {
 			return err
 		}
 	}
@@ -696,6 +750,27 @@ func (s *chunkService) syncChunkIndex(ctx context.Context, chunk *types.Chunk) e
 func (s *chunkService) UpsertGeneratedQuestion(
 	ctx context.Context, chunkID string, questionID string, question string,
 ) (*types.GeneratedQuestion, error) {
+	tenantID := types.MustTenantIDFromContext(ctx)
+	current, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	if err != nil {
+		return nil, err
+	}
+	lockIDs := []string{chunkID}
+	if current.ParentChunkID != "" {
+		lockIDs = append(lockIDs, current.ParentChunkID)
+	}
+	var result *types.GeneratedQuestion
+	err = withChunkIndexLocks(ctx, s.redisClient, tenantID, lockIDs, func(lockCtx context.Context) error {
+		var err error
+		result, err = s.upsertGeneratedQuestionLocked(lockCtx, chunkID, questionID, question)
+		return err
+	})
+	return result, err
+}
+
+func (s *chunkService) upsertGeneratedQuestionLocked(
+	ctx context.Context, chunkID string, questionID string, question string,
+) (*types.GeneratedQuestion, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return nil, fmt.Errorf("question cannot be empty")
@@ -704,7 +779,7 @@ func (s *chunkService) UpsertGeneratedQuestion(
 	if err != nil {
 		return nil, err
 	}
-	meta, err := chunk.DocumentMetadata()
+	meta, err := s.stabilizeGeneratedQuestionMetadata(ctx, chunk)
 	if err != nil {
 		return nil, err
 	}
@@ -751,6 +826,21 @@ func (s *chunkService) UpsertGeneratedQuestion(
 // DeleteGeneratedQuestion deletes a single generated question from a chunk by question ID
 // This updates the chunk metadata and removes the corresponding vector index
 func (s *chunkService) DeleteGeneratedQuestion(ctx context.Context, chunkID string, questionID string) error {
+	tenantID := types.MustTenantIDFromContext(ctx)
+	current, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	if err != nil {
+		return err
+	}
+	lockIDs := []string{chunkID}
+	if current.ParentChunkID != "" {
+		lockIDs = append(lockIDs, current.ParentChunkID)
+	}
+	return withChunkIndexLocks(ctx, s.redisClient, tenantID, lockIDs, func(lockCtx context.Context) error {
+		return s.deleteGeneratedQuestionLocked(lockCtx, chunkID, questionID)
+	})
+}
+
+func (s *chunkService) deleteGeneratedQuestionLocked(ctx context.Context, chunkID string, questionID string) error {
 	logger.Infof(ctx, "Deleting generated question, chunk ID: %s, question ID: %s", chunkID, questionID)
 
 	tenantID := types.MustTenantIDFromContext(ctx)
@@ -766,7 +856,7 @@ func (s *chunkService) DeleteGeneratedQuestion(ctx context.Context, chunkID stri
 	}
 
 	// 2. Parse the metadata
-	meta, err := chunk.DocumentMetadata()
+	meta, err := s.stabilizeGeneratedQuestionMetadata(ctx, chunk)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"chunk_id": chunkID,
@@ -823,8 +913,7 @@ func (s *chunkService) DeleteGeneratedQuestion(ctx context.Context, chunkID stri
 
 	// Delete the vector index by source ID
 	if err := retrieveEngine.DeleteBySourceIDList(ctx, []string{sourceID}, embeddingModel.GetDimensions(), kb.Type); err != nil {
-		logger.Warnf(ctx, "Failed to delete vector index for question (may not exist): %v", err)
-		// Continue even if vector deletion fails - the question might not have been indexed
+		return fmt.Errorf("failed to delete vector index for question: %w", err)
 	}
 
 	// 6. Remove the question from metadata
@@ -850,4 +939,42 @@ func (s *chunkService) DeleteGeneratedQuestion(ctx context.Context, chunkID stri
 
 	logger.Infof(ctx, "Successfully deleted generated question %s from chunk %s", questionID, chunkID)
 	return nil
+}
+
+// stabilizeGeneratedQuestionMetadata completes or rolls back an interrupted
+// generated-question operation before a user mutation can invalidate its
+// recovery fence. The caller already holds the chunk and parent lock set.
+func (s *chunkService) stabilizeGeneratedQuestionMetadata(
+	ctx context.Context, chunk *types.Chunk,
+) (*types.DocumentChunkMetadata, error) {
+	meta, err := chunk.DocumentMetadata()
+	if err != nil || meta == nil || meta.GeneratedQuestionIndexStatus == "" {
+		return meta, err
+	}
+	if meta.GeneratedQuestionIndexStatus == "staged" {
+		if len(meta.PreviousGeneratedQuestionMetadata) == 0 {
+			return nil, fmt.Errorf("staged question metadata is missing its recovery snapshot")
+		}
+		chunk.Metadata = append(types.JSON(nil), meta.PreviousGeneratedQuestionMetadata...)
+		meta, err = chunk.DocumentMetadata()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		meta.PendingGeneratedQuestionSourceIDs = nil
+		meta.StagedGeneratedQuestionSourceIDs = nil
+		meta.GeneratedQuestionIndexStatus = ""
+		meta.GeneratedQuestionOperationID = ""
+		meta.PreviousGeneratedQuestionMetadata = nil
+		if err := chunk.SetDocumentMetadata(meta); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.syncChunkIndex(ctx, chunk); err != nil {
+		return nil, err
+	}
+	if err := s.chunkRepository.UpdateChunk(ctx, chunk); err != nil {
+		return nil, err
+	}
+	return meta, nil
 }

@@ -92,6 +92,8 @@ type SpanTracker interface {
 	// the knowledge, or 0 if it's never been parsed. Used by the API
 	// layer to default to "show me the most recent run".
 	LatestAttempt(ctx context.Context, knowledgeID string) int
+	// LatestAttemptChecked 返回最新 attempt 和底层查询错误，写入 fencing 必须使用该方法并 fail closed。
+	LatestAttemptChecked(ctx context.Context, knowledgeID string) (int, error)
 
 	// BeginStage starts one of the canonical stages. Looks up the
 	// root span for (kid, attempt) — caller passes attempt to make
@@ -286,12 +288,17 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 }
 
 func (t *spanTracker) LatestAttempt(ctx context.Context, knowledgeID string) int {
-	n, err := t.repo.LatestAttempt(ctx, knowledgeID)
+	n, err := t.LatestAttemptChecked(ctx, knowledgeID)
 	if err != nil {
 		logger.Warnf(ctx, "[SpanTracker] LatestAttempt failed kid=%s: %v", knowledgeID, err)
 		return 0
 	}
 	return n
+}
+
+// LatestAttemptChecked 返回最新 attempt 和底层查询错误，供需要 fail-closed fencing 的写路径使用。
+func (t *spanTracker) LatestAttemptChecked(ctx context.Context, knowledgeID string) (int, error) {
+	return t.repo.LatestAttempt(ctx, knowledgeID)
 }
 
 func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attempt int, stage string, input types.JSONMap) *Span {
@@ -861,6 +868,9 @@ func (noopSpanTracker) OpenAttempt(_ context.Context, _, _ string) (*Span, int, 
 	return nil, 0, nil
 }
 func (noopSpanTracker) LatestAttempt(_ context.Context, _ string) int { return 0 }
+func (noopSpanTracker) LatestAttemptChecked(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
 func (noopSpanTracker) BeginStage(_ context.Context, _ string, _ int, _ string, _ types.JSONMap) *Span {
 	return nil
 }

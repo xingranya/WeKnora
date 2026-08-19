@@ -310,6 +310,76 @@ func (r *chunkRepository) UpdateChunk(ctx context.Context, chunk *types.Chunk) e
 	return r.db.WithContext(ctx).Omit("SeqID").Save(chunk).Error
 }
 
+// UpdateChunkMetadataIfRevision 只在内容版本未变化时更新元数据。
+// 问题生成属于异步任务，不能用完整 Save 覆盖用户在生成期间提交的正文。
+func (r *chunkRepository) UpdateChunkMetadataIfRevision(
+	ctx context.Context,
+	tenantID uint64,
+	chunkID string,
+	expectedRevision int,
+	metadata types.JSON,
+) error {
+	result := r.db.WithContext(ctx).
+		Model(&types.Chunk{}).
+		Where("tenant_id = ? AND id = ? AND content_revision = ?", tenantID, chunkID, expectedRevision).
+		Updates(map[string]interface{}{
+			"metadata":   metadata,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrChunkRevisionConflict
+	}
+	return nil
+}
+
+// UpdateChunkMetadataIfRevisionAndAttempt 只在内容版本未变化且没有更新的解析 attempt 时更新元数据。
+// 解析 attempt 使用 knowledge_processing_spans 作为持久化 fencing token，避免旧任务在
+// 最后一次内存状态检查后越过新 attempt 写回。
+func (r *chunkRepository) UpdateChunkMetadataIfRevisionAndAttempt(
+	ctx context.Context,
+	tenantID uint64,
+	chunkID string,
+	expectedRevision int,
+	expectedAttempt int,
+	metadata types.JSON,
+) error {
+	var knowledgeID string
+	if err := r.db.WithContext(ctx).
+		Model(&types.Chunk{}).
+		Where("tenant_id = ? AND id = ?", tenantID, chunkID).
+		Pluck("knowledge_id", &knowledgeID).Error; err != nil {
+		return err
+	}
+	if knowledgeID == "" {
+		return ErrChunkRevisionConflict
+	}
+	query := r.db.WithContext(ctx).
+		Model(&types.Chunk{}).
+		Where("tenant_id = ? AND id = ? AND content_revision = ?", tenantID, chunkID, expectedRevision)
+	if expectedAttempt > 0 {
+		query = query.Where(`NOT EXISTS (
+			SELECT 1
+			FROM knowledge_processing_spans AS newer_attempt
+			WHERE newer_attempt.knowledge_id = ?
+			AND newer_attempt.attempt > ?
+		)`, knowledgeID, expectedAttempt)
+	}
+	result := query.Updates(map[string]interface{}{
+		"metadata":   metadata,
+		"updated_at": time.Now(),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrChunkRevisionConflict
+	}
+	return nil
+}
+
 func (r *chunkRepository) CreateChunkRevision(ctx context.Context, revision *types.ChunkRevision) error {
 	return r.db.WithContext(ctx).Create(revision).Error
 }
@@ -1286,5 +1356,31 @@ func (r *chunkRepository) ListRecentDocumentChunksWithQuestions(
 		}
 	}
 
+	return chunks, nil
+}
+
+// ListChunksWithPendingQuestionIndexes returns durable question-index
+// compensation state so startup and housekeeping can recover interrupted work.
+func (r *chunkRepository) ListChunksWithPendingQuestionIndexes(
+	ctx context.Context, limit int,
+) ([]*types.Chunk, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var chunks []*types.Chunk
+	query := r.db.WithContext(ctx).Model(&types.Chunk{}).
+		Where("deleted_at IS NULL").
+		Order("updated_at ASC").Limit(limit)
+	switch r.db.Name() {
+	case "postgres":
+		query = query.Where("COALESCE(metadata->>'generated_question_index_status', '') IN ?", []string{"staged", "indexed"})
+	case "mysql":
+		query = query.Where("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.generated_question_index_status')) IN ?", []string{"staged", "indexed"})
+	default:
+		query = query.Where("json_extract(metadata, '$.generated_question_index_status') IN ?", []string{"staged", "indexed"})
+	}
+	if err := query.Find(&chunks).Error; err != nil {
+		return nil, err
+	}
 	return chunks, nil
 }

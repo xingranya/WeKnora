@@ -57,6 +57,24 @@ type ChunkRepository interface {
 	ListChunksByParentIDs(ctx context.Context, tenantID uint64, parentIDs []string) ([]*types.Chunk, error)
 	// UpdateChunk updates a chunk
 	UpdateChunk(ctx context.Context, chunk *types.Chunk) error
+	// UpdateChunkMetadataIfRevision 只在内容版本未变化时更新元数据，防止异步问题生成覆盖用户新编辑。
+	UpdateChunkMetadataIfRevision(
+		ctx context.Context,
+		tenantID uint64,
+		chunkID string,
+		expectedRevision int,
+		metadata types.JSON,
+	) error
+	// UpdateChunkMetadataIfRevisionAndAttempt 在内容版本和解析 attempt 都仍是当前值时更新元数据。
+	// 旧 attempt 即使在最后一次状态检查后继续运行，也不能越过新 attempt 写回。
+	UpdateChunkMetadataIfRevisionAndAttempt(
+		ctx context.Context,
+		tenantID uint64,
+		chunkID string,
+		expectedRevision int,
+		expectedAttempt int,
+		metadata types.JSON,
+	) error
 	// CreateChunkRevision stores an immutable snapshot of a superseded revision.
 	CreateChunkRevision(ctx context.Context, revision *types.ChunkRevision) error
 	// SaveChunkRevision atomically snapshots the old row and applies the new
@@ -122,6 +140,9 @@ type ChunkRepository interface {
 	// Filter by kbIDs and/or knowledgeIDs. At least one of them must be non-empty.
 	// Returns up to `limit` chunks sorted by updated_at descending.
 	ListRecentDocumentChunksWithQuestions(ctx context.Context, tenantID uint64, kbIDs []string, knowledgeIDs []string, limit int) ([]*types.Chunk, error)
+	// ListChunksWithPendingQuestionIndexes lists staged/indexed question metadata
+	// for restart recovery across tenants.
+	ListChunksWithPendingQuestionIndexes(ctx context.Context, limit int) ([]*types.Chunk, error)
 }
 
 // ChunkService defines the interface for chunk service operations

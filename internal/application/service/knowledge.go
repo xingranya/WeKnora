@@ -201,17 +201,19 @@ func attemptFromCtx(ctx context.Context) int {
 }
 
 // attemptSuperseded reports whether a newer parse attempt has started for the
-// knowledge since this enrichment subtask was enqueued. Stale subtasks from a
-// previous upload/edit/reparse that is still draining must NOT touch the new
-// attempt's chunks or decrement its pending_subtasks_count — doing so would
-// race-promote the row to completed before the new attempt finishes. An attempt
-// of 0 predates attempt tracking (or tracking is disabled) and is never treated
-// as superseded.
-func attemptSuperseded(ctx context.Context, tracker SpanTracker, knowledgeID string, attempt int) bool {
+// knowledge since this enrichment subtask was enqueued. Query failures are
+// returned to the caller so Asynq can retry instead of treating an unavailable
+// fencing store as a successful supersede.
+func attemptSuperseded(ctx context.Context, tracker SpanTracker, knowledgeID string, attempt int) (bool, error) {
 	if attempt <= 0 || knowledgeID == "" {
-		return false
+		return false, nil
 	}
-	return tracker.LatestAttempt(ctx, knowledgeID) > attempt
+	latestAttempt, err := tracker.LatestAttemptChecked(ctx, knowledgeID)
+	if err != nil {
+		logger.Warnf(ctx, "failed to check latest parse attempt for %s: %v", knowledgeID, err)
+		return false, fmt.Errorf("failed to check latest parse attempt for %s: %w", knowledgeID, err)
+	}
+	return latestAttempt > attempt, nil
 }
 
 // finalizeSubtaskDetachedTimeout bounds the detached decrement so a wedged DB

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,6 +30,12 @@ type GeneratedQuestion struct {
 	ID              string `json:"id"`                         // 唯一标识，用于构造 source_id
 	Question        string `json:"question"`                   // 问题内容
 	ContentRevision *int   `json:"content_revision,omitempty"` // 该问题对应的 Chunk 内容版本
+}
+
+// GeneratedQuestionID 为同一内容版本和问题文本生成稳定 ID，保证任务重试不会创建新 source_id。
+func GeneratedQuestionID(contentRevision int, question string) string {
+	digest := sha256.Sum256([]byte(strconv.Itoa(contentRevision) + "\n" + question))
+	return "q" + strconv.Itoa(contentRevision) + "-" + hex.EncodeToString(digest[:10])
 }
 
 const maxGeneratedQuestionSourceIDLength = 64
@@ -57,6 +64,17 @@ type DocumentChunkMetadata struct {
 	GeneratedQuestions []GeneratedQuestion `json:"generated_questions,omitempty"`
 	// GeneratedQuestionsRevision ties the questions to Chunk.ContentRevision.
 	GeneratedQuestionsRevision int `json:"generated_questions_revision,omitempty"`
+	// PendingGeneratedQuestionSourceIDs 记录新 metadata 已写入但旧索引尚未清理的 source_id。
+	// 重试时会继续清理这些 ID，避免旧问题向量长期残留。
+	PendingGeneratedQuestionSourceIDs []string `json:"pending_generated_question_source_ids,omitempty"`
+	// StagedGeneratedQuestionSourceIDs 记录尚未确认写入向量的新 source_id。
+	StagedGeneratedQuestionSourceIDs []string `json:"staged_generated_question_source_ids,omitempty"`
+	// GeneratedQuestionIndexStatus 区分向量写入前和写入后的补偿阶段。
+	GeneratedQuestionIndexStatus string `json:"generated_question_index_status,omitempty"`
+	// GeneratedQuestionOperationID fences retries and stale cleanup tasks.
+	GeneratedQuestionOperationID string `json:"generated_question_operation_id,omitempty"`
+	// PreviousGeneratedQuestionMetadata allows restart recovery of staged work.
+	PreviousGeneratedQuestionMetadata JSON `json:"previous_generated_question_metadata,omitempty"`
 }
 
 // IsQuestionCurrent reports whether a generated question was authored for the

@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 )
@@ -621,6 +622,7 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationTasks(
 			Attempt:         attempt,
 			ChunkIDs:        chunkIDs,
 			BatchIndex:      batchIndex,
+			OperationID:     uuid.NewString(),
 		}
 		// Boundary context: the text chunk just before / after this window.
 		if start > 0 {

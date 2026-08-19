@@ -44,7 +44,8 @@ type HousekeepingService struct {
 	// queue (no span heartbeat yet because no worker has picked them up).
 	// nil-safe — a nil inspector disables the queue check and the sweep
 	// falls back to the span/updated_at heuristics alone.
-	inspector interfaces.TaskInspector
+	inspector        interfaces.TaskInspector
+	knowledgeService interfaces.KnowledgeService
 
 	mu      sync.Mutex
 	started bool
@@ -54,12 +55,13 @@ type HousekeepingService struct {
 // the cron — call Start in the application bootstrap so a misconfigured
 // cron schedule cannot prevent the rest of the service from coming up.
 func NewHousekeepingService(
-	db *gorm.DB, cfg *config.Config, inspector interfaces.TaskInspector,
+	db *gorm.DB, cfg *config.Config, inspector interfaces.TaskInspector, knowledgeService interfaces.KnowledgeService,
 ) *HousekeepingService {
 	return &HousekeepingService{
-		db:        db,
-		cfg:       cfg,
-		inspector: inspector,
+		db:               db,
+		cfg:              cfg,
+		inspector:        inspector,
+		knowledgeService: knowledgeService,
 		cron: cron.New(cron.WithSeconds(), cron.WithChain(
 			cron.Recover(cron.DefaultLogger),
 		)),
@@ -109,6 +111,11 @@ func (h *HousekeepingService) Stop() {
 // runSweep is exported on the type for testability — tests can drive a
 // single sweep without waiting for the cron tick.
 func (h *HousekeepingService) runSweep(ctx context.Context) {
+	if h.knowledgeService != nil {
+		if err := h.knowledgeService.RecoverPendingQuestionIndexes(ctx, 200); err != nil {
+			logger.Warnf(ctx, "[Housekeeping] pending question index recovery failed: %v", err)
+		}
+	}
 	threshold := h.staleThreshold()
 	cutoff := time.Now().Add(-threshold)
 
