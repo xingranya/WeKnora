@@ -10,6 +10,7 @@
 .codebuddy/
 .vscode/
 .idea/
+.codegraph/
 *.swp
 *.swo
 .DS_Store
@@ -51,6 +52,9 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 test/data/mswag.txt
+
+# 生产回滚快照仅供宿主机恢复，禁止进入 Docker 构建上下文
+backups/
 
 # 敏感文件
 .env
