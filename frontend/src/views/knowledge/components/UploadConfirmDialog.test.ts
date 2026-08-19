@@ -99,3 +99,9 @@ test('closes the confirmation layer before handing the batch to the upload queue
     /const handleConfirm = \(\) => \{[\s\S]*?dialogVisible\.value = false\s+emit\('confirm', result\)/,
   )
 })
+
+test('rehydrates dialog-local fields when a newer confirmation supersedes the visible request', () => {
+  assert.match(host, /:request-revision="uploadConfirmStore\.requestRevision"/)
+  assert.match(dialog, /\(\) => \[props\.visible, props\.requestRevision\] as const/)
+  assert.match(dialog, /if \(!previous\?\.\[0\]\)/)
+})

@@ -632,6 +632,8 @@ const props = withDefaults(defineProps<{
   targetFolder?: string
   /** Existing folders offered as upload destinations. */
   folderOptions?: FolderOption[]
+  /** Monotonic key used to rehydrate local state when one open request supersedes another. */
+  requestRevision?: number
 }>(), {
   mode: 'file',
   files: () => [],
@@ -643,6 +645,7 @@ const props = withDefaults(defineProps<{
   supportedFileTypes: () => [],
   targetFolder: '',
   folderOptions: () => [],
+  requestRevision: 0,
 })
 
 const emit = defineEmits<{
@@ -1344,14 +1347,16 @@ async function loadTags() {
 }
 
 watch(
-  () => props.visible,
-  (visible) => {
+  () => [props.visible, props.requestRevision] as const,
+  ([visible], previous) => {
     if (!visible) {
       previouslyFocusedElement?.focus()
       previouslyFocusedElement = null
       return
     }
-    previouslyFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!previous?.[0]) {
+      previouslyFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    }
     void nextTick(() => {
       const first = getFocusableElements()[0]
       ;(first || modalRef.value)?.focus()

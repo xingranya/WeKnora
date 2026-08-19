@@ -65,13 +65,20 @@ export const useUploadConfirmStore = defineStore('uploadConfirm', {
     supportedFileTypes: [] as string[],
     targetFolder: '',
     folderOptions: [] as Array<{ path: string; name: string; depth: number }>,
+    requestRevision: 0,
     pendingResolve: null as ((value: UploadConfirmResult) => void) | null,
     pendingReject: null as (() => void) | null,
   }),
 
   actions: {
     open(options: OpenUploadConfirmOptions): Promise<UploadConfirmResult> {
+      // 全局只能展示一个确认层。新操作到来时先取消旧调用方，避免覆盖
+      // resolver 后让上一条重解析或上传流程永久等待。
+      if (this.pendingResolve || this.pendingReject) {
+        this.rejectConfirm()
+      }
       return new Promise((resolve, reject) => {
+        this.requestRevision += 1
         this.visible = true
         this.mode = options.mode
         this.kbInfo = options.kbInfo
