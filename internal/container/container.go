@@ -338,6 +338,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		// worker pool against one provider, so install an in-process governor.
 		must(container.Invoke(registerLiteModelConcurrencyLimiter))
 	}
+	// 上传清理会解析 KnowledgeService，而 KnowledgeBaseService 依赖数据源调度器。
+	// 必须在首次解析该服务图之前注册，dig 不会回溯后续的 Provide 调用。
+	must(container.Provide(datasource.NewScheduler))
 	must(container.Provide(service.NewTemporaryDocumentService))
 	must(container.Invoke(startTemporaryDocumentCleanup))
 	must(container.Invoke(startKnowledgeUploadCleanup))
@@ -348,7 +351,6 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Data source sync framework
 	logger.Debugf(ctx, "[Container] Registering data source sync framework...")
 	must(container.Provide(initConnectorRegistry))
-	must(container.Provide(datasource.NewScheduler))
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Invoke(startDataSourceScheduler))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
