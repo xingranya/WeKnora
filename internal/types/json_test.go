@@ -35,3 +35,26 @@ func TestJSONUnmarshalCopiesInput(t *testing.T) {
 		t.Fatal("expected marshaled output")
 	}
 }
+
+func TestJSONMapNormalizesNullToWritableMap(t *testing.T) {
+	for name, value := range map[string]JSON{
+		"empty": nil,
+		"null": JSON("null"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := value.Map()
+			if err != nil {
+				t.Fatalf("Map returned error: %v", err)
+			}
+			got["process_overrides"] = map[string]any{"parser": "mineru"}
+		})
+	}
+
+	got, err := JSON(`{"existing":true}`).Map()
+	if err != nil {
+		t.Fatalf("Map returned error: %v", err)
+	}
+	if got["existing"] != true {
+		t.Fatalf("existing JSON field was not preserved: %#v", got)
+	}
+}

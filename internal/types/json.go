@@ -81,5 +81,8 @@ func (j JSON) Map() (map[string]interface{}, error) {
 
 	var m map[string]interface{}
 	err := json.Unmarshal(j, &m)
+	if m == nil && err == nil {
+		m = map[string]interface{}{}
+	}
 	return m, err
 }
