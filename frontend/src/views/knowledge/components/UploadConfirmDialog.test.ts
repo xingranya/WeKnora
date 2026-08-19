@@ -92,3 +92,10 @@ test('upload confirmation is modal and keeps keyboard focus inside', () => {
   assert.match(dialog, /previouslyFocusedElement/)
   assert.match(dialog, /event\.key !== 'Tab'/)
 })
+
+test('closes the confirmation layer before handing the batch to the upload queue', () => {
+  assert.match(
+    dialog,
+    /const handleConfirm = \(\) => \{[\s\S]*?dialogVisible\.value = false\s+emit\('confirm', result\)/,
+  )
+})

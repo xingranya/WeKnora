@@ -1500,26 +1500,30 @@ const handleConfirm = () => {
   if (!validateBeforeConfirm()) return
 
   const processConfig = buildProcessOverrides()
+  let result: UploadConfirmResult
   if (props.mode === 'manual' && props.manualPreview) {
-    emit('confirm', {
+    result = {
       processConfig,
       mode: 'manual',
       tagIds: [...selectedTagIds.value],
       manual: { ...props.manualPreview, tagIds: [...selectedTagIds.value] },
-    })
+    }
   } else if (props.mode === 'reparse' && props.reparsePreview) {
-    emit('confirm', { processConfig, mode: 'reparse', reparse: { ...props.reparsePreview } })
+    result = { processConfig, mode: 'reparse', reparse: { ...props.reparsePreview } }
   } else {
-    emit('confirm', {
+    result = {
       processConfig,
       mode: 'file',
       tagIds: [...selectedTagIds.value],
       files: [...localFiles.value],
       urls: [...localUrls.value],
       targetFolder: localTargetFolder.value,
-    })
+    }
   }
-  emit('update:visible', false)
+
+  // 先关闭确认层，再唤醒上传调用方，避免队列启动后弹窗仍短暂残留。
+  dialogVisible.value = false
+  emit('confirm', result)
 }
 </script>
 
