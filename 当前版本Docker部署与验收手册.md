@@ -1,6 +1,6 @@
 # WeKnora 当前版本 Docker 部署与验收手册
 
-最后现场核验：2026-08-18 18:03（Asia/Shanghai）
+最后现场核验：2026-08-19 14:15（Asia/Shanghai）
 
 本文记录见外传媒当前 WeKnora 分支在远端生产机上的 Docker 部署方式、配置边界、验收门槛和回滚方法。所有命令均不得包含 SSH 密码、API Key、数据库密码或模型凭据。
 
@@ -423,6 +423,27 @@ platform_parser_engine_configs: 1 row
 ```
 
 迁移会在历史空间解析配置唯一时回填到平台配置；存在多份不一致配置时主动阻断，禁止静默覆盖凭据。
+
+生产自部署 MinerU 运行在宿主机 systemd 服务中，不属于 Docker Compose：
+
+```text
+服务：mineru-api.service
+版本：MinerU 3.4.5
+环境：/home/fox/miniconda3/envs/mineru-3.4.5
+端口：0.0.0.0:8000
+模式：pipeline，CUDA_VISIBLE_DEVICES=-1
+并发：MINERU_API_MAX_CONCURRENT_REQUESTS=1
+```
+
+2026-08-19 已从 MinerU 2.7.0 全量替换为 3.4.5。旧版只接受 PDF 和图片，虽然 WeKnora 将 `docx` 路由到 MinerU，服务仍会返回 `Unsupported file type: docx`。3.4.5 的上传白名单已包含 `docx`、`pptx` 和 `xlsx`；现场从 WeKnora app 容器调用生产 `http://host.docker.internal:8000/file_parse`，DOCX 返回 HTTP 200、`version=3.4.5`，标题、正文和表格均存在。
+
+当前并发上限为 1：一个请求执行期间，第二个并发请求会返回 HTTP 503，而不是进入应用层等待队列。服务器有 GTX 1060 6GB，但当前明确禁用 CUDA，因此不要在没有压测、内存监控和任务排队改造的情况下提高并发。
+
+旧 `/home/fox/miniconda3/envs/mineru` 环境已按要求删除，仅保留新环境。升级前配置和依赖清单位于：
+
+```text
+/home/fox/backups/mineru-before-3.4.5-20260819-134615
+```
 
 ### 9.3 MinIO SSRF 白名单
 
