@@ -360,6 +360,41 @@ test('文档进入解析后立即释放上传槽，后续文件无需等待解�
   assert.equal(uploadedParts, 2)
 })
 
+test('暂停后即使浏览器把中止包装成网络错误也保持暂停状态', async () => {
+  let rejectUpload!: (error: Error) => void
+  const uploadPending = new Promise((_resolve, reject) => { rejectUpload = reject })
+  const dependencies = createDependencies({
+    getKnowledgeUpload: async () => ({
+      data: {
+        ...(await createDependencies().getKnowledgeUpload('kb-1', 'upload-1')).data,
+        status: 'uploading',
+        received_bytes: 0,
+        received_parts: [],
+        received_part_hashes: {},
+        knowledge_id: undefined,
+      },
+    }),
+    uploadKnowledgePart: async () => uploadPending,
+  })
+  const store = createStore(dependencies)
+  store.tasks = [baseTask({
+    status: 'queued',
+    confirmedBytes: 0,
+    displayBytes: 0,
+    knowledgeId: undefined,
+    file: new File(['abc'], 'report.txt', { type: 'text/plain', lastModified: 1 }),
+  })]
+
+  const running = store.runTask('task-1')
+  await eventually(() => store.tasks[0].status === 'uploading')
+  store.pause('task-1')
+  rejectUpload(new Error('网络错误，请检查您的网络连接'))
+  await running
+
+  assert.equal(store.tasks[0].status, 'paused')
+  assert.equal(store.tasks[0].error, undefined)
+})
+
 test('完成清理中的会话幂等调用完成接口且不重传分片', async () => {
   let completeCalls = 0
   let uploadCalls = 0

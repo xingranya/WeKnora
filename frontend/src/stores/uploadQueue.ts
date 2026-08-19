@@ -369,12 +369,15 @@ export const createUploadQueueStore = (
         }
         await this.completeAndTrack(id, task, session)
       } catch (error: any) {
+        const current = this.tasks.find(item => item.id === id)
+        if (current?.status === 'paused') {
+          this.patch(id, { status: 'paused', speedBps: 0, etaSeconds: null, error: undefined })
+          return
+        }
         if (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') {
-          const current = this.tasks.find(item => item.id === id)
           if (current?.status === 'queued' || current?.status === 'cancel_requested') return
           if (current?.status !== 'cancelled') this.patch(id, { status: 'paused', speedBps: 0, etaSeconds: null })
         } else {
-          const current = this.tasks.find(item => item.id === id)
           if (current?.status === 'cancel_requested' || current?.status === 'cancelled') return
           this.patch(id, { status: 'failed', error: error?.message || t('errors.uploadFailed'), speedBps: 0, etaSeconds: null })
         }
