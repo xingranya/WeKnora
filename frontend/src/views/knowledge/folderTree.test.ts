@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  addFolderToTree,
   buildFolderRows,
   buildUploadFileName,
   canMoveFolderTo,
@@ -17,6 +18,8 @@ import {
   MAX_FOLDER_PATH_LENGTH,
   MAX_FOLDER_SEGMENT_LENGTH,
   normalizeFolderPath,
+  removeFolderFromTree,
+  rollbackFolderCreation,
   ROOT_FOLDER_PATH,
   sortFolderOptions,
 } from './folderTree.ts'
@@ -210,6 +213,38 @@ test('folder paths typed by the user respect the same depth and length caps as t
 
   const wide = 'y'.repeat(100).concat('/').repeat(12).slice(0, -1)
   assert.ok(normalizeFolderPath(wide).length <= MAX_FOLDER_PATH_LENGTH)
+})
+
+test('乐观创建目录会补齐祖先且不改变已有目录计数', () => {
+  const next = addFolderToTree(tree, 'handbook/policies/release')
+  assert.deepEqual(next.folders[0].children?.map((node) => node.path), [
+    'handbook/onboarding',
+    'handbook/policies',
+  ])
+  assert.deepEqual(next.folders[0].children?.[1].children?.map((node) => node.path), [
+    'handbook/policies/release',
+  ])
+  assert.equal(next.folders[0].document_count, 1)
+  assert.equal(next.folders[0].total_count, 4)
+  assert.equal(next.total_document_count, 7)
+})
+
+test('回滚乐观创建只移除本次目录及其子树', () => {
+  const optimistic = addFolderToTree(tree, 'handbook/policies/release')
+  const rolledBack = removeFolderFromTree(optimistic, 'handbook/policies')
+  assert.ok(rolledBack)
+  assert.deepEqual(rolledBack?.folders[0].children?.map((node) => node.path), [
+    'handbook/onboarding',
+  ])
+  assert.deepEqual(rolledBack?.folders[1].path, 'design')
+})
+
+test('并发创建失败时保留另一个操作创建的子目录', () => {
+  const optimistic = addFolderToTree(tree, 'handbook/policies/release')
+  const withSibling = addFolderToTree(optimistic, 'handbook/policies/guide')
+  const rolledBack = rollbackFolderCreation(withSibling, ['handbook/policies'])
+  assert.ok(folderPathExists(rolledBack?.folders || [], 'handbook/policies/release'))
+  assert.ok(folderPathExists(rolledBack?.folders || [], 'handbook/policies/guide'))
 })
 
 // Moving a folder into its own subtree would make that subtree unreachable.

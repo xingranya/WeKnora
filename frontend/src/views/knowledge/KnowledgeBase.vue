@@ -69,11 +69,14 @@ import {
   buildUploadFileName,
   canMoveFolderTo,
   childFolders,
+  addFolderToTree,
+  folderAncestorPaths,
   folderBreadcrumbs as buildFolderBreadcrumbs,
   folderPathExists as folderExistsInTree,
   isFilteringDocuments,
   isFolderUpload,
   joinFolderPath,
+  rollbackFolderCreation,
   ROOT_FOLDER_PATH,
 } from './folderTree';
 import { useI18n } from 'vue-i18n';
@@ -416,6 +419,7 @@ let knowledgeScroll = ref()
 let page = 1;
 let pageSize = 35;
 let scrollLoading = false;
+let knowledgeListLoadingGeneration = 0;
 const resetPage = () => { page = 1; scrollLoading = false; };
 
 // Move state — inline in card menu
@@ -641,6 +645,9 @@ const writeStoredFlag = (key: string, value: boolean) => {
 };
 const folderTree = ref<KnowledgeFolderTree | null>(null);
 const folderTreeLoading = ref(false);
+let folderTreeRequestGeneration = 0;
+let knowledgeViewGeneration = 0;
+let folderInteractionGeneration = 0;
 // The folder being browsed; ROOT_FOLDER_PATH ('') is the knowledge base top
 // level, a real node of the tree rather than a separate mode.
 const selectedFolderPath = ref<string>(ROOT_FOLDER_PATH);
@@ -769,6 +776,8 @@ const getTagName = (tagId?: string | number) => {
 
 const loadKnowledgeFiles = (kbIdValue: string): Promise<void> => {
   if (!kbIdValue) return Promise.resolve();
+  const requestGeneration = ++knowledgeListLoadingGeneration;
+  const requestFolderPath = selectedFolderPath.value;
   if (!isFAQ.value) {
     docListLoading.value = true;
   }
@@ -779,8 +788,11 @@ const loadKnowledgeFiles = (kbIdValue: string): Promise<void> => {
       ...filterParams.value,
     },
     kbIdValue,
+    () => isCurrentKb(kbIdValue) &&
+      requestGeneration === knowledgeListLoadingGeneration &&
+      requestFolderPath === selectedFolderPath.value,
   ).finally(() => {
-    if (isCurrentKb(kbIdValue) && !isFAQ.value) {
+    if (isCurrentKb(kbIdValue) && requestGeneration === knowledgeListLoadingGeneration && !isFAQ.value) {
       docListLoading.value = false;
     }
   });
@@ -788,15 +800,16 @@ const loadKnowledgeFiles = (kbIdValue: string): Promise<void> => {
 
 const isCurrentKb = (targetKbId: string) => targetKbId === kbId.value;
 
-const loadFolderTree = async (kbIdValue: string) => {
+const loadFolderTree = async (kbIdValue: string, options: { preserveOnError?: boolean } = {}) => {
   if (!kbIdValue || isFAQ.value) {
     folderTree.value = null;
     return;
   }
+  const requestGeneration = ++folderTreeRequestGeneration;
   folderTreeLoading.value = true;
   try {
     const res: any = await listKnowledgeFolders(kbIdValue);
-    if (!isCurrentKb(kbIdValue)) return;
+    if (!isCurrentKb(kbIdValue) || requestGeneration !== folderTreeRequestGeneration) return;
     folderTree.value = (res?.data as KnowledgeFolderTree) || null;
     // A folder can disappear (its last document was deleted or moved); fall
     // back to the root instead of leaving an empty, unreachable view.
@@ -804,11 +817,13 @@ const loadFolderTree = async (kbIdValue: string) => {
       selectedFolderPath.value = ROOT_FOLDER_PATH;
     }
   } catch (error) {
-    if (!isCurrentKb(kbIdValue)) return;
+    if (!isCurrentKb(kbIdValue) || requestGeneration !== folderTreeRequestGeneration) return;
     console.error('Failed to load knowledge folders', error);
-    folderTree.value = null;
+    if (!options.preserveOnError) {
+      folderTree.value = null;
+    }
   } finally {
-    if (isCurrentKb(kbIdValue)) {
+    if (isCurrentKb(kbIdValue) && requestGeneration === folderTreeRequestGeneration) {
       folderTreeLoading.value = false;
     }
   }
@@ -816,6 +831,11 @@ const loadFolderTree = async (kbIdValue: string) => {
 
 const handleFolderSelect = (path: string) => {
   if (selectedFolderPath.value === path) return;
+  folderInteractionGeneration++;
+  closeDoc();
+  cardList.value = [];
+  total.value = 0;
+  docListLoading.value = true;
   selectedFolderPath.value = path;
 };
 
@@ -838,15 +858,22 @@ const folderOptions = computed(() => {
 
 const moveKnowledgeIntoFolder = async (ids: string[], folderPath: string) => {
   if (!kbId.value || ids.length === 0) return;
+  const requestKbId = kbId.value;
+  const requestViewGeneration = knowledgeViewGeneration;
+  let requestInteractionGeneration = ++folderInteractionGeneration;
   try {
-    await moveKnowledgeToFolder(kbId.value, ids, folderPath);
+    await moveKnowledgeToFolder(requestKbId, ids, folderPath);
+    if (kbId.value !== requestKbId || knowledgeViewGeneration !== requestViewGeneration ||
+      folderInteractionGeneration !== requestInteractionGeneration) return;
     MessagePlugin.success(t('knowledgeBase.moveToFolder.success', { count: ids.length }));
     clearSelection();
     batchMode.value = false;
     resetPage();
-    await loadKnowledgeFiles(kbId.value);
-    await loadFolderTree(kbId.value);
+    await loadKnowledgeFiles(requestKbId);
+    await loadFolderTree(requestKbId);
   } catch (error: any) {
+    if (kbId.value !== requestKbId || knowledgeViewGeneration !== requestViewGeneration ||
+      folderInteractionGeneration !== requestInteractionGeneration) return;
     MessagePlugin.error(error?.message || t('knowledgeBase.moveToFolder.failed'));
   }
 };
@@ -857,12 +884,17 @@ const handleFolderRename = async ({ from, to }: { from: string; to: string }) =>
     MessagePlugin.warning(t('knowledgeBase.folderTree.renameInvalid'));
     return;
   }
+  const requestKbId = kbId.value;
+  const requestViewGeneration = knowledgeViewGeneration;
+  let requestInteractionGeneration = ++folderInteractionGeneration;
   try {
-    const res: any = await renameKnowledgeFolder(kbId.value, from, to);
+    const res: any = await renameKnowledgeFolder(requestKbId, from, to);
+    if (kbId.value !== requestKbId || knowledgeViewGeneration !== requestViewGeneration ||
+      folderInteractionGeneration !== requestInteractionGeneration) return;
     const movedCount = res?.data?.moved_count ?? 0;
     if (movedCount === 0) {
       MessagePlugin.warning(t('knowledgeBase.folderTree.renameFailed'));
-      await loadFolderTree(kbId.value);
+      await loadFolderTree(requestKbId);
       return;
     }
     MessagePlugin.success(t('knowledgeBase.folderTree.renameSuccess'));
@@ -873,9 +905,11 @@ const handleFolderRename = async ({ from, to }: { from: string; to: string }) =>
       selectedFolderPath.value = to + selectedFolderPath.value.slice(from.length);
     }
     resetPage();
-    await loadKnowledgeFiles(kbId.value);
-    await loadFolderTree(kbId.value);
+    await loadKnowledgeFiles(requestKbId);
+    await loadFolderTree(requestKbId);
   } catch (error: any) {
+    if (kbId.value !== requestKbId || knowledgeViewGeneration !== requestViewGeneration ||
+      folderInteractionGeneration !== requestInteractionGeneration) return;
     MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.renameFailed'));
   }
 };
@@ -883,15 +917,50 @@ const handleFolderRename = async ({ from, to }: { from: string; to: string }) =>
 const handleFolderCreate = async ({ parentPath, name }: { parentPath: string; name: string }) => {
   if (!kbId.value) return;
   const requestKbId = kbId.value;
+  const requestViewGeneration = knowledgeViewGeneration;
+  let requestInteractionGeneration = ++folderInteractionGeneration;
+  const predictedPath = joinFolderPath(parentPath, name);
+  const previousTree = folderTree.value;
+  const previousSelection = selectedFolderPath.value;
+  if (!predictedPath || folderExistsInTree(previousTree?.folders || [], predictedPath)) {
+    MessagePlugin.error(t('knowledgeBase.folderTree.createFailed'));
+    return;
+  }
+  const createdPaths = folderAncestorPaths(predictedPath)
+    .filter(Boolean)
+    .filter((path) => !folderExistsInTree(previousTree?.folders || [], path));
+
+  // 让正在返回的旧目录请求失效，避免它覆盖刚插入的乐观节点。
+  folderTreeRequestGeneration++;
+  folderTreeLoading.value = false;
+  folderTree.value = addFolderToTree(previousTree, predictedPath);
+  handleFolderSelect(predictedPath);
+  requestInteractionGeneration = folderInteractionGeneration;
   try {
     const res: any = await createKnowledgeFolder(requestKbId, parentPath, name);
-    if (kbId.value !== requestKbId) return;
-    const path = res?.data?.path || joinFolderPath(parentPath, name);
-    await loadFolderTree(requestKbId);
-    selectedFolderPath.value = path;
+    if (kbId.value !== requestKbId || knowledgeViewGeneration !== requestViewGeneration ||
+      folderInteractionGeneration !== requestInteractionGeneration) return;
+    const path = res?.data?.path || predictedPath;
+    if (path !== predictedPath) {
+      folderTree.value = addFolderToTree(
+        rollbackFolderCreation(folderTree.value, createdPaths),
+        path,
+      );
+      handleFolderSelect(path);
+    }
     MessagePlugin.success(t('knowledgeBase.folderTree.createSuccess'));
+    void loadFolderTree(requestKbId, { preserveOnError: true });
   } catch (error: any) {
-    MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.createFailed'));
+    if (kbId.value === requestKbId && knowledgeViewGeneration === requestViewGeneration) {
+      folderTree.value = rollbackFolderCreation(folderTree.value, createdPaths);
+      if (folderInteractionGeneration === requestInteractionGeneration &&
+        selectedFolderPath.value === predictedPath) {
+        handleFolderSelect(previousSelection);
+      }
+      if (folderInteractionGeneration === requestInteractionGeneration) {
+        MessagePlugin.error(error?.message || t('knowledgeBase.folderTree.createFailed'));
+      }
+    }
   }
 };
 
@@ -1141,6 +1210,7 @@ watch(activeKbTab, (tab) => {
 })
 
 watch(() => kbId.value, (newKbId, oldKbId) => {
+  knowledgeViewGeneration++;
   if (!newKbId) {
     kbInfo.value = null;
     cardList.value = [];
@@ -1319,6 +1389,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  knowledgeViewGeneration++;
   window.removeEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.removeEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
   window.removeEventListener('weknora:knowledge-file-drop', handleKnowledgeFileDrop as EventListener);
@@ -1331,7 +1402,10 @@ onUnmounted(() => {
 });
 watch(() => cardList.value, (newValue) => {
   if (isFAQ.value) return;
-  docListLoading.value = false;
+  // 切换目录时先清空旧列表；在当前请求结束前保持骨架屏，避免短暂显示空状态。
+  if (newValue.length > 0 || !docListLoading.value) {
+    docListLoading.value = false;
+  }
 
   // Auto-open document if navigated with ?knowledge_id=xxx
   if (pendingKnowledgeId.value && newValue?.length) {
@@ -2008,7 +2082,12 @@ const handleScroll = () => {
       if (cardList.value.length < total.value && page < pageNum) {
         page++;
         scrollLoading = true;
-        getKnowled({ page, page_size: pageSize, ...filterParams.value }, currentKbId).finally(() => {
+        const requestGeneration = knowledgeListLoadingGeneration;
+        const requestFolderPath = selectedFolderPath.value;
+        getKnowled({ page, page_size: pageSize, ...filterParams.value }, currentKbId, () =>
+          isCurrentKb(currentKbId) && requestGeneration === knowledgeListLoadingGeneration &&
+          requestFolderPath === selectedFolderPath.value,
+        ).finally(() => {
           if (isCurrentKb(currentKbId)) {
             scrollLoading = false;
           }

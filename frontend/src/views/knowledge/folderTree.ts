@@ -230,6 +230,92 @@ export function joinFolderPath(parent: string, name: string): string {
   return normalizeFolderPath(parent ? `${parent}/${name}` : name)
 }
 
+/** 向目录树中插入一个目录及缺失的祖先目录，返回不可变的新树。 */
+export function addFolderToTree(
+  tree: KnowledgeFolderTree | null,
+  path: string,
+): KnowledgeFolderTree {
+  const next: KnowledgeFolderTree = tree
+    ? {
+        ...tree,
+        folders: tree.folders.map((folder) => cloneFolderNode(folder)),
+      }
+    : {
+        root_document_count: 0,
+        total_document_count: 0,
+        folders: [],
+      }
+  const segments = normalizeFolderPath(path).split('/').filter(Boolean)
+  let nodes = next.folders
+  let currentPath = ''
+
+  segments.forEach((segment) => {
+    currentPath = currentPath ? `${currentPath}/${segment}` : segment
+    let node = nodes.find((candidate) => candidate.path === currentPath)
+    if (!node) {
+      node = {
+        path: currentPath,
+        name: segment,
+        document_count: 0,
+        total_count: 0,
+        children: [],
+      }
+      nodes.push(node)
+    }
+    if (!node.children) node.children = []
+    nodes = node.children
+  })
+  return next
+}
+
+/** 从目录树中移除一个目录及其子树，返回不可变的新树。 */
+export function removeFolderFromTree(
+  tree: KnowledgeFolderTree | null,
+  path: string,
+): KnowledgeFolderTree | null {
+  if (!tree) return null
+  const normalizedPath = normalizeFolderPath(path)
+  const remove = (nodes: KnowledgeFolderNode[]): KnowledgeFolderNode[] =>
+    nodes
+      .filter((node) => node.path !== normalizedPath)
+      .map((node) => ({
+        ...node,
+        children: node.children ? remove(node.children) : node.children,
+      }))
+  return { ...tree, folders: remove(tree.folders) }
+}
+
+/** 回滚本次乐观创建仍为空的目录，不影响其他并发创建的子目录。 */
+export function rollbackFolderCreation(
+  tree: KnowledgeFolderTree | null,
+  createdPaths: string[],
+): KnowledgeFolderTree | null {
+  let next = tree
+  const paths = [...new Set(createdPaths)].sort((a, b) => b.split('/').length - a.split('/').length)
+  paths.forEach((path) => {
+    if (!next) return
+    const find = (nodes: KnowledgeFolderNode[]): KnowledgeFolderNode | undefined => {
+      for (const node of nodes) {
+        if (node.path === path) return node
+        const child = find(node.children || [])
+        if (child) return child
+      }
+      return undefined
+    }
+    const node = find(next.folders)
+    if (!node || node.document_count > 0 || node.total_count > 0 || node.children?.length) return
+    next = removeFolderFromTree(next, path)
+  })
+  return next
+}
+
+function cloneFolderNode(node: KnowledgeFolderNode): KnowledgeFolderNode {
+  return {
+    ...node,
+    children: node.children?.map((child) => cloneFolderNode(child)),
+  }
+}
+
 /** Flat picker row for a canonical folder path (used for optimistic create rows). */
 export function folderOptionFromPath(path: string): { path: string; name: string; depth: number } {
   const segments = path.split('/').filter(Boolean)

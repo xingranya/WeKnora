@@ -57,6 +57,7 @@ export default function (knowledgeBaseId?: string) {
       folder_recursive?: boolean;
     } = { page: 1, page_size: 35 },
     kbId?: string,
+    shouldCommit?: () => boolean,
   ): Promise<void> => {
     const targetKbId = kbId || knowledgeBaseId;
     if (!targetKbId) return Promise.resolve();
@@ -67,7 +68,9 @@ export default function (knowledgeBaseId?: string) {
         if (requestGeneration !== knowledgeListGeneration) return;
 
         const currentRouteKbId = (route.params as any)?.kbId as string | undefined;
-        if (currentRouteKbId && currentRouteKbId !== targetKbId) return;
+        // 路由切离知识库页面时，旧请求也不能再写回共享列表状态。
+        if (!currentRouteKbId || currentRouteKbId !== targetKbId) return;
+        if (shouldCommit && !shouldCommit()) return;
 
         const { data, total: totalResult } = result;
     const cardList_ = data.map((item: any) => {
