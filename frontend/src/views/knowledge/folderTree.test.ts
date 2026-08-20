@@ -213,6 +213,19 @@ test('folder paths typed by the user respect the same depth and length caps as t
 
   const wide = 'y'.repeat(100).concat('/').repeat(12).slice(0, -1)
   assert.ok(normalizeFolderPath(wide).length <= MAX_FOLDER_PATH_LENGTH)
+
+  const chineseSegment = '中'.repeat(64)
+  const normalizedChinese = normalizeFolderPath(chineseSegment)
+  assert.equal(new TextEncoder().encode(normalizedChinese).byteLength, 126)
+  assert.equal(normalizedChinese, '中'.repeat(42))
+
+  const emojiSegment = '😀'.repeat(40)
+  const normalizedEmoji = normalizeFolderPath(emojiSegment)
+  assert.equal(new TextEncoder().encode(normalizedEmoji).byteLength, 128)
+  assert.equal(normalizedEmoji, '😀'.repeat(32))
+
+  const multibytePath = Array.from({ length: 12 }, (_, index) => `${index}${'文'.repeat(31)}`).join('/')
+  assert.ok(new TextEncoder().encode(normalizeFolderPath(multibytePath)).byteLength <= MAX_FOLDER_PATH_LENGTH)
 })
 
 test('乐观创建目录会补齐祖先且不改变已有目录计数', () => {

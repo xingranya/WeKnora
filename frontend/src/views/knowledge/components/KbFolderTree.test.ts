@@ -20,6 +20,7 @@ test('only real folders expose a rename affordance', () => {
   assert.match(tree, /v-if="canEdit && row\.kind === 'folder'"/)
   assert.match(tree, /popup-menu-item/)
   assert.match(tree, /onFolderMenuRename/)
+  assert.match(tree, /t\('knowledgeBase\.folderTree\.moreOptions'\)/)
 })
 
 // Picking a folder is a small, reversible action, so it stays a popup: in the row

@@ -76,6 +76,7 @@ import {
   isFilteringDocuments,
   isFolderUpload,
   joinFolderPath,
+  normalizeFolderPath,
   rollbackFolderCreation,
   ROOT_FOLDER_PATH,
 } from './folderTree';
@@ -345,7 +346,7 @@ const canDownloadKnowledge = computed(() => {
 });
 
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([]);
-let { cardList, total, moreIndex, details, getKnowled, delKnowledge, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
+let { cardList, knowledgeListError, total, moreIndex, details, getKnowled, delKnowledge, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
 
 const showKbDetailContextualGuide = computed(() => {
   return Boolean(kbId.value)
@@ -652,6 +653,12 @@ let folderInteractionGeneration = 0;
 // level, a real node of the tree rather than a separate mode.
 const selectedFolderPath = ref<string>(ROOT_FOLDER_PATH);
 const folderTreeCollapsed = ref(readStoredFlag(FOLDER_TREE_COLLAPSED_KEY));
+const narrowViewport = ref(typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches);
+const effectiveFolderTreeCollapsed = computed(() => folderTreeCollapsed.value || narrowViewport.value);
+let narrowViewportMedia: MediaQueryList | null = null;
+const syncNarrowViewport = (event: MediaQueryListEvent | MediaQueryList) => {
+  narrowViewport.value = event.matches;
+};
 const hasFolders = computed(() => (folderTree.value?.folders?.length ?? 0) > 0);
 // The folder column only earns its space once the knowledge base actually has
 // folders, so knowledge bases filled with single-file uploads look unchanged.
@@ -674,7 +681,7 @@ const isFiltering = computed(() =>
 // tree is open it already lists the same folders, so skip the duplicate rows.
 const currentChildFolders = computed(() => {
   if (isFiltering.value) return [];
-  if (showFolderTree.value && !folderTreeCollapsed.value) return [];
+  if (showFolderTree.value && !effectiveFolderTreeCollapsed.value) return [];
   return childFolders(folderTree.value, selectedFolderPath.value);
 });
 // A row's folder is worth showing only when the list can span folders.
@@ -898,11 +905,12 @@ const handleFolderRename = async ({ from, to }: { from: string; to: string }) =>
       return;
     }
     MessagePlugin.success(t('knowledgeBase.folderTree.renameSuccess'));
+    const canonicalTarget = res?.data?.folder_path || normalizeFolderPath(to);
     // Follow the folder to its new path so the user stays where they were.
     if (selectedFolderPath.value === from) {
-      selectedFolderPath.value = to;
+      selectedFolderPath.value = canonicalTarget;
     } else if (selectedFolderPath.value.startsWith(`${from}/`)) {
-      selectedFolderPath.value = to + selectedFolderPath.value.slice(from.length);
+      selectedFolderPath.value = canonicalTarget + selectedFolderPath.value.slice(from.length);
     }
     resetPage();
     await loadKnowledgeFiles(requestKbId);
@@ -1379,6 +1387,9 @@ const handleOpenKnowledgeEvent = (e: Event) => {
 };
 
 onMounted(() => {
+  narrowViewportMedia = window.matchMedia('(max-width: 768px)');
+  syncNarrowViewport(narrowViewportMedia);
+  narrowViewportMedia.addEventListener('change', syncNarrowViewport);
   loadKnowledgeList();
   editorResources.ensureParserEngines();
 
@@ -1390,6 +1401,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   knowledgeViewGeneration++;
+  narrowViewportMedia?.removeEventListener('change', syncNarrowViewport);
+  narrowViewportMedia = null;
   window.removeEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.removeEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
   window.removeEventListener('weknora:knowledge-file-drop', handleKnowledgeFileDrop as EventListener);
@@ -2498,14 +2511,14 @@ async function createNewSession(value: string): Promise<void> {
       <template v-if="activeKbTab === 'documents' || !isWiki">
         <div class="knowledge-main">
           <KbFolderTree v-if="showFolderTree" ref="folderTreeRef" :tree="folderTree" :selected-path="selectedFolderPath"
-            :loading="folderTreeLoading" :can-edit="canManage" :collapsed="folderTreeCollapsed"
+            :loading="folderTreeLoading" :can-edit="canManage" :collapsed="effectiveFolderTreeCollapsed"
             @select="handleFolderSelect" @update:collapsed="handleFolderTreeCollapsedChange"
             @rename="handleFolderRename" @create="handleFolderCreate" @delete="handleFolderDelete" />
           <div class="tag-content">
             <div class="doc-card-area">
               <nav v-if="showFolderTree" class="doc-folder-path"
                 :aria-label="$t('knowledgeBase.folderTree.title')">
-                <t-tooltip v-if="folderTreeCollapsed" :content="$t('knowledgeBase.folderTree.expand')" placement="top">
+                <t-tooltip v-if="effectiveFolderTreeCollapsed" :content="$t('knowledgeBase.folderTree.expand')" placement="top">
                   <button type="button" class="doc-folder-path__tree-toggle"
                     :aria-label="$t('knowledgeBase.folderTree.expand')"
                     @click="handleFolderTreeCollapsedChange(false)">
@@ -2713,7 +2726,15 @@ async function createNewSession(value: string): Promise<void> {
                   :class="{ 'is-add': docMarqueeMode === 'add', 'is-subtract': docMarqueeMode === 'subtract' }"
                   :style="docMarqueeBoxStyle" aria-hidden="true" />
                 <!-- 文档骨架屏 -->
-                <div v-if="docListLoading && cardList.length === 0 && !currentChildFolders.length" class="doc-card-list doc-card-list-animated">
+                <div v-if="knowledgeListError && !docListLoading" class="doc-load-error" role="alert">
+                  <t-icon name="error-circle" size="24px" />
+                  <p>{{ knowledgeListError }}</p>
+                  <t-button variant="outline" size="small" @click="loadKnowledgeFiles(kbId)">
+                    <template #icon><t-icon name="refresh" /></template>
+                    {{ $t('knowledgeBase.retryLoadDocuments') }}
+                  </t-button>
+                </div>
+                <div v-else-if="docListLoading && cardList.length === 0 && !currentChildFolders.length" class="doc-card-list doc-card-list-animated">
                   <div v-for="n in 8" :key="'doc-skel-' + n" class="knowledge-card knowledge-card-skeleton">
                     <div class="card-content">
                       <div class="card-content-nav">
@@ -3944,6 +3965,49 @@ async function createNewSession(value: string): Promise<void> {
   }
 }
 
+@media (max-width: 768px) {
+  .knowledge-layout {
+    margin: 0;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .document-header,
+  .document-header-title,
+  .document-title-row,
+  .document-breadcrumb {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .document-header .document-breadcrumb {
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 16px;
+    line-height: 24px;
+  }
+
+  .document-header .breadcrumb-link.dropdown {
+    max-width: min(220px, calc(100vw - 150px));
+
+    span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .doc-filter-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .faq-manager-wrapper {
+    margin: 0;
+    padding: 16px;
+  }
+}
+
 @keyframes contentFadeIn {
   from {
     opacity: 0;
@@ -4007,6 +4071,23 @@ async function createNewSession(value: string): Promise<void> {
   justify-content: center;
   padding: 60px 20px;
   min-height: 100%;
+}
+
+.doc-load-error {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--td-text-color-secondary);
+  text-align: center;
+
+  p {
+    max-width: 520px;
+    margin: 0;
+    line-height: 1.5;
+  }
 }
 
 

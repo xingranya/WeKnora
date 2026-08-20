@@ -17,6 +17,28 @@ export const MAX_FOLDER_SEGMENT_LENGTH = 128
 /** Keep in sync with types.MaxKnowledgeFolderPathLength on the server. */
 export const MAX_FOLDER_PATH_LENGTH = 1024
 
+const utf8Encoder = new TextEncoder()
+
+/** 按 UTF-8 字节截断，并确保不会截断多字节字符。 */
+function truncateUTF8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  if (utf8Encoder.encode(value).byteLength <= maxBytes) return value
+
+  let result = ''
+  let usedBytes = 0
+  for (const character of value) {
+    const characterBytes = utf8Encoder.encode(character).byteLength
+    if (usedBytes + characterBytes > maxBytes) break
+    result += character
+    usedBytes += characterBytes
+  }
+  return result
+}
+
+function utf8ByteLength(value: string): number {
+  return utf8Encoder.encode(value).byteLength
+}
+
 /** Minimal shape of the browser File objects the upload flow deals with. */
 export type UploadFileLike = {
   name: string
@@ -210,15 +232,15 @@ export function normalizeFolderPath(path: string): string {
   for (const raw of path.replace(/\\/g, '/').split('/')) {
     let segment = raw.trim().replace(/[. ]+$/, '')
     if (!segment || segment === '.' || segment === '..') continue
-    if (segment.length > MAX_FOLDER_SEGMENT_LENGTH) {
-      segment = segment.slice(0, MAX_FOLDER_SEGMENT_LENGTH).trim()
+    if (utf8ByteLength(segment) > MAX_FOLDER_SEGMENT_LENGTH) {
+      segment = truncateUTF8Bytes(segment, MAX_FOLDER_SEGMENT_LENGTH).trim()
     }
     if (!segment) continue
     segments.push(segment)
     if (segments.length >= MAX_FOLDER_DEPTH) break
   }
   let normalized = segments.join('/')
-  while (normalized.length > MAX_FOLDER_PATH_LENGTH && segments.length > 0) {
+  while (utf8ByteLength(normalized) > MAX_FOLDER_PATH_LENGTH && segments.length > 0) {
     segments.pop()
     normalized = segments.join('/')
   }

@@ -116,7 +116,7 @@
                   type="button"
                   class="kb-folder-row__more"
                   :class="{ 'is-open': menuOpenPath === row.path }"
-                  :aria-label="t('knowledgeBase.moreOptions')"
+                  :aria-label="t('knowledgeBase.folderTree.moreOptions')"
                   aria-haspopup="menu"
                   :aria-expanded="menuOpenPath === row.path"
                   @click.stop

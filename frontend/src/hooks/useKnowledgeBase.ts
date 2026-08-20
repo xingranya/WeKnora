@@ -19,6 +19,7 @@ export default function (knowledgeBaseId?: string) {
   const route = useRoute();
   const { t } = useI18n();
   const { cardList, total } = storeToRefs(usemenuStore);
+  const knowledgeListError = ref('');
   let moreIndex = ref(-1);
   const details = reactive({
     title: "",
@@ -73,6 +74,7 @@ export default function (knowledgeBaseId?: string) {
         if (shouldCommit && !shouldCommit()) return;
 
         const { data, total: totalResult } = result;
+        knowledgeListError.value = '';
     const cardList_ = data.map((item: any) => {
       const rawName = item.file_name || item.title || item.source || t('knowledgeBase.untitledDocument')
       const dotIndex = rawName.lastIndexOf('.')
@@ -97,7 +99,13 @@ export default function (knowledgeBaseId?: string) {
         }
         total.value = totalResult;
       })
-      .catch(() => {});
+      .catch((error: any) => {
+        if (requestGeneration !== knowledgeListGeneration) return;
+        const currentRouteKbId = (route.params as any)?.kbId as string | undefined;
+        if (!currentRouteKbId || currentRouteKbId !== targetKbId) return;
+        if (shouldCommit && !shouldCommit()) return;
+        knowledgeListError.value = error?.message || t('knowledgeBase.documentLoadFailed');
+      });
   };
   const delKnowledge = (index: number, item: any, onSuccess?: () => void) => {
     cardList.value[index].isMore = false;
@@ -261,6 +269,7 @@ export default function (knowledgeBaseId?: string) {
   };
   return {
     cardList,
+    knowledgeListError,
     moreIndex,
     getKnowled,
     details,
