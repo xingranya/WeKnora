@@ -1,9 +1,9 @@
 // background.js — Service Worker
 // 存储管理 + 消息路由 + 右键菜单 + API 通信
 
-importScripts('collection.js');
+importScripts('network.js', 'collection.js');
 
-var COMPANY_API_BASE = 'http://100.78.64.62:8080/api/v1';
+var COMPANY_API_BASE = JiwaiNetwork.COMPANY_API_BASE;
 
 async function migrateToCompanyService() {
   var data = await chrome.storage.local.get(['ka_auth', 'ka_config']);
@@ -56,16 +56,17 @@ async function apiRequest(method, path, body, options) {
     if (options && options.signal) {
       fetchOpts.signal = options.signal;
     }
-    var resp = await fetch(url, fetchOpts);
+    var result = await JiwaiNetwork.requestTextWithTimeout(fetch, url, fetchOpts);
+    var resp = result.response;
+    var responseText = result.text;
     if (!resp.ok) {
-      var errText = '';
-      try { var errJson = await resp.json(); errText = errJson.error?.message || errJson.message || resp.statusText; } catch (e) { errText = resp.statusText; }
-      return { success: false, error: errText, status: resp.status };
+      var errText = resp.statusText;
+      try { var errJson = JSON.parse(responseText); errText = errJson.error?.message || errJson.message || errText; } catch (e) {}
+      return JiwaiNetwork.httpFailure(resp.status, errText);
     }
-    var data = await resp.json();
-    return data;
+    try { return JSON.parse(responseText); } catch (parseError) { return JiwaiNetwork.invalidResponseFailure(); }
   } catch (err) {
-    return { success: false, error: err.message || '网络请求失败' };
+    return JiwaiNetwork.fetchFailure(err);
   }
 }
 
@@ -80,20 +81,26 @@ async function apiChatStream(path, body) {
   var headers = await buildHeaders(config);
   headers['Accept'] = 'text/event-stream';
   try {
-    var resp = await fetch(url, {
+    var resp = await JiwaiNetwork.requestWithTimeout(fetch, url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body),
       cache: 'no-store'  // 避免浏览器缓存导致 SSE 流被缓冲
     });
     if (!resp.ok) {
-      var errText = '';
-      try { var errJson = await resp.json(); errText = errJson.error?.message || errJson.message || resp.statusText; } catch (e) { errText = resp.statusText; }
-      return { success: false, error: errText };
+      var errText = resp.statusText;
+      try {
+        var responseText = await JiwaiNetwork.readResponseTextWithTimeout(resp);
+        var errJson = JSON.parse(responseText);
+        errText = errJson.error?.message || errJson.message || errText;
+      } catch (e) {
+        if (e && e.code === 'REQUEST_TIMEOUT') return JiwaiNetwork.fetchFailure(e);
+      }
+      return JiwaiNetwork.httpFailure(resp.status, errText);
     }
     return { success: true, response: resp };
   } catch (err) {
-    return { success: false, error: err.message || '网络请求失败' };
+    return JiwaiNetwork.fetchFailure(err);
   }
 }
 
@@ -727,21 +734,22 @@ async function scanLoginApiRequest(method, path, body, options) {
     if (options && options.signal) {
       fetchOpts.signal = options.signal;
     }
-    var resp = await fetch(url, fetchOpts);
+    var result = await JiwaiNetwork.requestTextWithTimeout(fetch, url, fetchOpts);
+    var resp = result.response;
+    var responseText = result.text;
     if (!resp.ok) {
-      var errText = '';
-      try { var errJson = await resp.json(); errText = errJson.error?.message || errJson.message || resp.statusText; } catch (e) { errText = resp.statusText; }
+      var errText = resp.statusText;
+      try { var errJson = JSON.parse(responseText); errText = errJson.error?.message || errJson.message || errText; } catch (e) {}
       if (resp.status === 401) {
         stopTokenKeepalive();
         broadcastTokenExpired();
         return { success: false, error: '登录已过期，请重新扫码登录', expired: true };
       }
-      return { success: false, error: errText, status: resp.status };
+      return JiwaiNetwork.httpFailure(resp.status, errText);
     }
-    var respData = await resp.json();
-    return respData;
+    try { return JSON.parse(responseText); } catch (parseError) { return JiwaiNetwork.invalidResponseFailure(); }
   } catch (err) {
-    return { success: false, error: err.message || '网络请求失败' };
+    return JiwaiNetwork.fetchFailure(err);
   }
 }
 
@@ -766,20 +774,26 @@ async function scanLoginApiChatStream(path, body) {
     'Accept': 'text/event-stream'
   };
   try {
-    var resp = await fetch(url, {
+    var resp = await JiwaiNetwork.requestWithTimeout(fetch, url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body),
       cache: 'no-store'
     });
     if (!resp.ok) {
-      var errText = '';
-      try { var errJson = await resp.json(); errText = errJson.error?.message || errJson.message || resp.statusText; } catch (e) { errText = resp.statusText; }
-      return { success: false, error: errText };
+      var errText = resp.statusText;
+      try {
+        var responseText = await JiwaiNetwork.readResponseTextWithTimeout(resp);
+        var errJson = JSON.parse(responseText);
+        errText = errJson.error?.message || errJson.message || errText;
+      } catch (e) {
+        if (e && e.code === 'REQUEST_TIMEOUT') return JiwaiNetwork.fetchFailure(e);
+      }
+      return JiwaiNetwork.httpFailure(resp.status, errText);
     }
     return { success: true, response: resp };
   } catch (err) {
-    return { success: false, error: err.message || '网络请求失败' };
+    return JiwaiNetwork.fetchFailure(err);
   }
 }
 
@@ -1097,8 +1111,8 @@ async function handleMessage(msg, sender) {
 
     // === WeKnora API 相关 ===
     case 'VALIDATE_CONFIG':
-      // 通过调用知识库列表接口来验证连通性和认证
-      return autoApiRequest('GET', '/knowledge-bases');
+      // 仅读取当前身份，避免为一次鉴权加载完整知识库列表。
+      return apiRequest('GET', '/auth/me');
 
     case 'LIST_KNOWLEDGE_BASES':
       // agent_id 参数仅用于共享智能体（跨租户），本地/内置智能体不传
@@ -1397,9 +1411,10 @@ async function handleMessage(msg, sender) {
         fileHeaders = await buildHeaders(cfg);
       }
       try {
-        var fileResp = await fetch(fileUrl, { method: 'GET', headers: fileHeaders });
-        if (!fileResp.ok) return { success: false, error: 'HTTP ' + fileResp.status };
-        var blob = await fileResp.blob();
+        var fileResult = await JiwaiNetwork.requestBlobWithTimeout(fetch, fileUrl, { method: 'GET', headers: fileHeaders });
+        var fileResp = fileResult.response;
+        if (!fileResp.ok) return JiwaiNetwork.httpFailure(fileResp.status, fileResp.statusText);
+        var blob = fileResult.blob;
         var reader2 = new FileReader();
         var dataUrl = await new Promise(function (resolve, reject) {
           reader2.onload = function () { resolve(reader2.result); };
@@ -1408,7 +1423,7 @@ async function handleMessage(msg, sender) {
         });
         return { success: true, dataUrl: dataUrl };
       } catch (err) {
-        return { success: false, error: err.message || '文件请求失败' };
+        return JiwaiNetwork.fetchFailure(err);
       }
     }
 

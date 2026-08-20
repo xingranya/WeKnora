@@ -5,14 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CHROME_PATH="${CHROME_PATH:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 node --check "${EXTENSION_DIR}/background.js"
+node --check "${EXTENSION_DIR}/network.js"
+node --check "${EXTENSION_DIR}/popup-auth.js"
 node --check "${EXTENSION_DIR}/collection.js"
 node --check "${EXTENSION_DIR}/content.js"
 node --check "${EXTENSION_DIR}/extractors.js"
 node --check "${EXTENSION_DIR}/popup.js"
 node --check "${EXTENSION_DIR}/sidepanel.js"
-jq -e '.manifest_version == 3 and .version == "1.3.1" and (.content_scripts[0].js | index("collection.js")) and (.content_scripts[0].js | index("extractors.js"))' \
+jq -e '.manifest_version == 3 and .version == "1.3.2" and (.content_scripts[0].js | index("collection.js")) and (.content_scripts[0].js | index("extractors.js"))' \
   "${EXTENSION_DIR}/manifest.json" >/dev/null
 
 node "${EXTENSION_DIR}/tests/run-background-test.mjs"
+node "${EXTENSION_DIR}/tests/run-network-test.mjs"
 CHROME_PATH="${CHROME_PATH}" node "${EXTENSION_DIR}/tests/run-browser-test.mjs"
 printf 'EXTENSION_VERIFY_OK\n'

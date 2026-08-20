@@ -356,7 +356,7 @@ export default {
       copySuccess: 'API 주소가 복사되었습니다',
       installCta: '확장 프로그램 다운로드',
       installCtaHint: 'ZIP 설치 파일 · 압축 해제 후 확장 프로그램 로드',
-      storeMeta: '见外 지식베이스 도우미 · v1.3.1',
+      storeMeta: '见外 지식베이스 도우미 · v1.3.2',
       installGuide: '파일의 압축을 푼 뒤 확장 프로그램 페이지에서 “압축해제된 확장 프로그램을 로드합니다”를 선택하고 manifest.json이 있는 폴더를 지정하세요.',
       steps: {
         connect: {

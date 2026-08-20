@@ -21,6 +21,8 @@ trap cleanup EXIT
 mkdir -p "${STAGING_DIR}/icons" "${OUTPUT_DIR}"
 cp \
   "${EXTENSION_DIR}/manifest.json" \
+  "${EXTENSION_DIR}/network.js" \
+  "${EXTENSION_DIR}/popup-auth.js" \
   "${EXTENSION_DIR}/background.js" \
   "${EXTENSION_DIR}/collection.js" \
   "${EXTENSION_DIR}/content.js" \
@@ -35,16 +37,21 @@ cp \
   "${STAGING_DIR}/"
 cp "${EXTENSION_DIR}"/icons/*.png "${STAGING_DIR}/icons/"
 
-if [[ -f "${KEY_PATH}" ]]; then
-  "${CHROME_PATH}" \
-    --pack-extension="${STAGING_DIR}" \
-    --pack-extension-key="${KEY_PATH}" \
-    --no-message-box
-else
-  mkdir -p "$(dirname "${KEY_PATH}")"
-  "${CHROME_PATH}" --pack-extension="${STAGING_DIR}" --no-message-box
-  install -m 600 "${STAGING_DIR}.pem" "${KEY_PATH}"
+if [[ ! -f "${KEY_PATH}" ]]; then
+  echo "Error: existing extension signing key is required: ${KEY_PATH}" >&2
+  exit 1
 fi
+EXPECTED_PUBLIC_KEY="$(jq -r '.key' "${EXTENSION_DIR}/manifest.json")"
+ACTUAL_PUBLIC_KEY="$(openssl pkey -in "${KEY_PATH}" -pubout -outform DER 2>/dev/null | openssl base64 -A)"
+if [[ -z "${ACTUAL_PUBLIC_KEY}" || "${ACTUAL_PUBLIC_KEY}" != "${EXPECTED_PUBLIC_KEY}" ]]; then
+  echo "Error: extension signing key does not match manifest public key" >&2
+  exit 1
+fi
+
+"${CHROME_PATH}" \
+  --pack-extension="${STAGING_DIR}" \
+  --pack-extension-key="${KEY_PATH}" \
+  --no-message-box
 
 cp "${STAGING_DIR}.crx" "${CRX_OUTPUT}"
 rm -f "${ZIP_OUTPUT}"

@@ -24,21 +24,7 @@
 
   // === Chrome Storage Helpers ===
   function sendMsg(data) {
-    return new Promise(function (resolve) {
-      if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
-        try {
-          chrome.runtime.sendMessage(data, function (resp) {
-            // 静默处理 lastError，防止 Chrome 报错
-            void chrome.runtime.lastError;
-            resolve(resp || { success: false });
-          });
-        } catch (e) {
-          resolve({ success: false, error: e.message });
-        }
-      } else {
-        resolve({ success: false, error: 'no chrome api' });
-      }
-    });
+    return JiwaiNetwork.sendRuntimeMessage(chrome, data);
   }
 
   // 卡通头像
@@ -147,8 +133,8 @@
 
     function pollLoginStatus(code) {
       qrPollTimer = setTimeout(function () {
-        fetch(CHATBOT_BASE + '/get/login/status?logincode=' + code + '&source=ext')
-          .then(function (resp) { return resp.json(); })
+        JiwaiNetwork.requestTextWithTimeout(fetch, CHATBOT_BASE + '/get/login/status?logincode=' + code + '&source=ext', {})
+          .then(function (result) { return JSON.parse(result.text); })
           .then(function (data) {
             // data.scan === 1 → 已扫码；data.logged === 1 → 登录成功（带 token）
             if (data.logged === 1) {
@@ -247,7 +233,7 @@
   });
 
   // WeKnora 默认服务地址
-  var WK_DEFAULT_URL = 'http://100.78.64.62:8080/api/v1';
+  var WK_DEFAULT_URL = JiwaiNetwork.COMPANY_API_BASE;
 
   function openCompanyLogin() {
     goPage('pg-weknora');
@@ -276,39 +262,19 @@
   });
 
   // WeKnora 保存并登录
-  $('btn-wk-save').addEventListener('click', function () {
-    var url = WK_DEFAULT_URL;
+  $('btn-wk-save').addEventListener('click', async function () {
     var key = $('wk-key').value.trim();
-    if (!url) {
-      $('wk-test-msg').textContent = '请填写服务地址';
-      $('wk-test-msg').className = 'wk-test-result err';
-      return;
-    }
-    if (!key) {
-      $('wk-test-msg').textContent = '请填写 API Key';
-      $('wk-test-msg').className = 'wk-test-result err';
-      return;
-    }
-    $('wk-test-msg').textContent = '正在验证…';
-    $('wk-test-msg').className = 'wk-test-result';
-    // 保存配置
-    sendMsg({ type: 'SET_CONFIG', payload: { baseUrl: url, apiKey: key } }).then(function () {
-      // 验证连接
-      return sendMsg({ type: 'VALIDATE_CONFIG' });
-    }).then(function (resp) {
-      if (resp && resp.success) {
-        // API Key 验证成功
-        sendMsg({ type: 'SET_AUTH', payload: { type: 'wk', name: '见外知识库用户', avatar: '' } });
-        $('wk-test-msg').textContent = '验证通过，配置已保存';
-        $('wk-test-msg').className = 'wk-test-result ok';
-        setTimeout(function () {
-          enterMain('wk', '见外知识库用户', '', '见外知识库');
-        }, 500);
-      } else {
-        $('wk-test-msg').textContent = '验证未通过，请检查 API Key 或网络连接';
-        $('wk-test-msg').className = 'wk-test-result err';
-      }
+    var response = await JiwaiPopupAuth.validateCompanyConnection({
+      apiKey: key,
+      sendMessage: sendMsg,
+      button: $('btn-wk-save'),
+      statusElement: $('wk-test-msg')
     });
+    if (!response || !response.success) return;
+
+    setTimeout(function () {
+      enterMain('wk', '见外知识库用户', '', '见外知识库');
+    }, 500);
   });
 
   // === 更新用户信息显示 ===

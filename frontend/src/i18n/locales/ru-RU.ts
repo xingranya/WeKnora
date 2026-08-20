@@ -356,7 +356,7 @@ export default {
       copySuccess: 'URL API скопирован',
       installCta: 'Скачать расширение',
       installCtaHint: 'ZIP-архив · распакуйте и загрузите расширение',
-      storeMeta: 'Помощник 见外 · v1.3.1',
+      storeMeta: 'Помощник 见外 · v1.3.2',
       installGuide: 'Распакуйте архив, выберите «Загрузить распакованное расширение» и укажите папку с manifest.json.',
       steps: {
         connect: {

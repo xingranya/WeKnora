@@ -6063,7 +6063,7 @@ export default {
       copySuccess: 'API URL copied',
       installCta: 'Download extension',
       installCtaHint: 'ZIP package · extract and load the extension',
-      storeMeta: '见外 Knowledge Base Assistant · v1.3.1',
+      storeMeta: '见外 Knowledge Base Assistant · v1.3.2',
       installGuide: 'Extract the download, select Load unpacked on the extensions page, and choose the folder containing manifest.json.'
     },
     claw: {

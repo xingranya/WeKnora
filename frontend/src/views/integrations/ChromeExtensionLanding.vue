@@ -16,7 +16,7 @@
         :label="$t('integrations.chrome.installCta')"
         :hint="$t('integrations.chrome.installCtaHint')"
         :href="CHROME_EXTENSION_DOWNLOAD_URL"
-        download="jiwai-knowledge-assistant-1.3.1.zip"
+        download="jiwai-knowledge-assistant-1.3.2.zip"
         trailing-icon="download"
       >
         <template #icon>

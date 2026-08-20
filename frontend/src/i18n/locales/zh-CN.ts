@@ -356,7 +356,7 @@ export default {
       copySuccess: '已复制 API 地址',
       installCta: '下载插件安装包',
       installCtaHint: 'ZIP 安装包 · 解压后加载扩展',
-      storeMeta: '见外知识库助手 · v1.3.1',
+      storeMeta: '见外知识库助手 · v1.3.2',
       installGuide: '下载后先解压，在扩展管理页选择“加载解压缩的扩展”，并选中包含 manifest.json 的目录。',
       steps: {
         connect: {

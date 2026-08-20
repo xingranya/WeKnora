@@ -4,6 +4,7 @@ import vm from 'node:vm'
 
 const extensionDir = new URL('..', import.meta.url)
 const collectionSource = await readFile(new URL('collection.js', extensionDir), 'utf8')
+const networkSource = await readFile(new URL('network.js', extensionDir), 'utf8')
 const backgroundSource = await readFile(new URL('background.js', extensionDir), 'utf8')
 
 function createEvent() {
@@ -17,6 +18,7 @@ const storageData = {}
 const tabs = new Map()
 let nextTabId = 100
 let lastRequestBody = null
+let lastRequestUrl = null
 
 function selectStorage(keys) {
   if (keys == null) return { ...storageData }
@@ -108,12 +110,20 @@ const chrome = {
 const context = vm.createContext({
   chrome,
   console,
-  fetch: async (_url, options) => {
+  fetch: async (url, options) => {
+    lastRequestUrl = String(url)
     if (options && options.body) lastRequestBody = JSON.parse(options.body)
-    return { ok: true, json: async () => ({ success: true, data: { id: 'knowledge-screenshot' } }) }
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify({ success: true, data: { id: 'knowledge-screenshot' } }),
+      blob: async () => new Blob([])
+    }
   },
   setTimeout,
   clearTimeout,
+  AbortController,
   TextDecoder,
   URL,
   Blob,
@@ -122,9 +132,15 @@ const context = vm.createContext({
 })
 context.globalThis = context
 
+vm.runInContext(networkSource, context, { filename: 'network.js' })
 vm.runInContext(collectionSource, context, { filename: 'collection.js' })
 vm.runInContext(backgroundSource, context, { filename: 'background.js' })
 await new Promise((resolve) => setTimeout(resolve, 0))
+
+assert.equal(context.COMPANY_API_BASE, 'https://know.seeway.co/api/v1')
+const validationResult = await context.handleMessage({ type: 'VALIDATE_CONFIG' }, {})
+assert.equal(validationResult.success, true)
+assert.equal(lastRequestUrl, 'https://know.seeway.co/api/v1/auth/me', '验证必须使用轻量鉴权接口')
 
 assert.ok(
   context.scoreFrameExtractionCandidate({ adapterId: 'feishu', matchedSite: true, markdownLength: 10000 }) >
