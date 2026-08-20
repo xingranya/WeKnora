@@ -12,11 +12,19 @@ set -e
 MOUNT_DIRS=(
     /app/skills/preloaded
     /data/files
+    /var/log/weknora
 )
+
+appuser_uid="$(id -u appuser)"
+appuser_gid="$(id -g appuser)"
 
 for dir in "${MOUNT_DIRS[@]}"; do
     if [ -d "$dir" ]; then
-        chown -R appuser:appuser "$dir" 2>/dev/null || true
+        # 已完成归属迁移的数据卷不再递归扫描；大文件卷重启时可节省数分钟。
+        current_owner="$(stat -c '%u:%g' "$dir" 2>/dev/null || true)"
+        if [ "$current_owner" != "$appuser_uid:$appuser_gid" ]; then
+            chown -R appuser:appuser "$dir" 2>/dev/null || true
+        fi
     fi
 done
 

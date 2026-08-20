@@ -35,7 +35,7 @@ help:
 	@echo ""
 	@echo "数据库:"
 	@echo "  migrate-up        执行数据库迁移"
-	@echo "  migrate-down      回滚数据库迁移"
+	@echo "  migrate-down      回滚指定步数迁移（必须传 STEPS，例如 STEPS=1）"
 	@echo ""
 	@echo "开发工具:"
 	@echo "  fmt               格式化代码"
@@ -193,7 +193,8 @@ migrate-up:
 	./scripts/migrate.sh up
 
 migrate-down:
-	./scripts/migrate.sh down
+	@test -n "$(STEPS)" || { echo "Error: migrate-down requires STEPS=<positive integer>" >&2; exit 1; }
+	./scripts/migrate.sh down "$(STEPS)"
 
 migrate-version:
 	./scripts/migrate.sh version
@@ -346,5 +347,4 @@ dev-app:
 
 dev-frontend:
 	./scripts/dev.sh frontend
-
 

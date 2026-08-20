@@ -21,8 +21,11 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
     apt-get update && \
     apt-get install -y git build-essential libsqlite3-dev curl
 
-# Install migrate tool
-RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+# 安装固定版本的迁移工具，避免上游 latest 漂移破坏生产镜像可复现性。
+ARG GOLANG_MIGRATE_VERSION=v4.19.1
+RUN go install -tags 'postgres' \
+    -ldflags "-X main.Version=${GOLANG_MIGRATE_VERSION}" \
+    github.com/golang-migrate/migrate/v4/cmd/migrate@${GOLANG_MIGRATE_VERSION}
 
 # Copy go mod files. go.mod replace-points anydoc at ./third_party/anydoc-go,
 # so that module's go.mod must exist before `go mod download`.
@@ -112,9 +115,9 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Create data directories and set permissions
-RUN mkdir -p /data/files && \
-    chown -R appuser:appuser /app /data/files
+# Create data and audit-log directories and set permissions
+RUN mkdir -p /data/files /var/log/weknora && \
+    chown -R appuser:appuser /app /data/files /var/log/weknora
 
 # Copy migrate tool from builder stage
 COPY --from=builder /go/bin/migrate /usr/local/bin/

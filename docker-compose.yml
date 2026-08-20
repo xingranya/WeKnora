@@ -22,6 +22,12 @@ services:
     depends_on:
       app:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -42,6 +48,7 @@ services:
       - "${APP_PORT:-8080}:8080"
     volumes:
       - data-files:/data/files
+      - app-logs:/var/log/weknora
       - docreader-tmp:/tmp/docreader:ro
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
@@ -68,10 +75,10 @@ services:
       - .env
     environment:
       # ========== 日志 ==========
-      # 日志级别，默认debug
-      - LOG_LEVEL=${LOG_LEVEL:-debug}
-      # 日志文件路径（留空则只输出 stdout）；LLM_DEBUG_LOG 开启时同目录写 llm_debug.log
-      - LOG_PATH=${LOG_PATH:-}
+      # 日志级别，生产默认 info
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # 公司审计日志默认写入独立持久卷；同时继续输出 stdout。
+      - LOG_PATH=${LOG_PATH:-/var/log/weknora/app.log}
       # 自定义日志格式模板（留空用内置默认格式）
       - LOG_FORMAT=${LOG_FORMAT:-}
       # LLM 调试日志：true 写 LOG_PATH 同目录 llm_debug.log，或指定路径；留空关闭
@@ -88,8 +95,8 @@ services:
       # gin 信任的代理 CIDR（逗号分隔）；显式设为空字符串则禁用代理信任。
       # 默认信任 loopback + 私网段（容器网络内 nginx 已覆盖）
       # - WEKNORA_TRUSTED_PROXIES=${WEKNORA_TRUSTED_PROXIES:-}
-      # 启动时自动执行数据库迁移；设为 false 禁用，默认启用
-      - AUTO_MIGRATE=${AUTO_MIGRATE:-true}
+      # 生产由独立任务显式迁移；主应用默认不修改 schema。
+      - AUTO_MIGRATE=${AUTO_MIGRATE:-false}
       # IM 渠道图片/文件外链的外部可达 URL。IM 显示知识库图片需二选一：
       # 存储后端公网可达（如 MINIO_ENDPOINT 设为公网），或设本变量走 <APP_EXTERNAL_URL>/r/<token>（需 nginx 代理 /r/）。
       # 默认 MinIO 内网部署 / local 后端需设本变量。
@@ -178,7 +185,7 @@ services:
       - TENCENT_VECTORDB_COLLECTION=${TENCENT_VECTORDB_COLLECTION:-}
       - TENCENT_VECTORDB_REPLICA_NUMBER=${TENCENT_VECTORDB_REPLICA_NUMBER:-}
       # Docreader 解析调优
-      - DOCREADER_ADDR=${DOCREADER_ADDR:-docreader:50051}
+      - DOCREADER_ADDR=${DOCREADER_ADDR:-docreader:${DOCREADER_GRPC_PORT:-50051}}
       - DOCREADER_TRANSPORT=${DOCREADER_TRANSPORT:-grpc}
       # docreader gRPC TLS / 认证（客户端侧）
       - GRPC_TLS_ENABLED=${GRPC_TLS_ENABLED:-false}
@@ -206,7 +213,8 @@ services:
       - LOCAL_STORAGE_BASE_DIR=${LOCAL_STORAGE_BASE_DIR:-/data/files}
       # 本地存储路径前缀（legacy 回填用，一般留空）
       - LOCAL_STORAGE_PATH_PREFIX=${LOCAL_STORAGE_PATH_PREFIX:-}
-      - AUTO_RECOVER_DIRTY=${AUTO_RECOVER_DIRTY:-true}
+      # dirty schema 必须人工核对，禁止自动 force 到未知版本。
+      - AUTO_RECOVER_DIRTY=${AUTO_RECOVER_DIRTY:-false}
       # ----- MinIO（STORAGE_TYPE=minio）-----
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
       - MINIO_ACCESS_KEY_ID=${MINIO_ACCESS_KEY_ID:-minioadmin}
@@ -281,8 +289,8 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
       # 数据库中 API Key 等敏感字段落盘加密的 AES-256 主密钥（必须为 32 字节）。
       # 加密范围：tenants.api_key、模型 API key、向量库凭证、web search provider key、
-      # WeKnoraCloud.AppSecret 等。缺失或长度不对时，已加密字段无法解密（UI 显示为空，
-      # 需重新填写）。生产环境必须显式设置且妥善保管，丢失则所有加密数据不可恢复。
+      # WeKnoraCloud.AppSecret 等。standard + GIN_MODE=release 启动时，缺失或长度不对
+      # 会直接失败。生产环境必须显式设置且妥善保管，丢失则所有加密数据不可恢复。
       # （TENANT_AES_KEY / CRYPTO_MASTER_KEY / CRYPTO_SALT 已废弃：v0.4.0 起加密统一
       #   改用 SYSTEM_AES_KEY，Go 主应用不再读取这三个变量。）
       - SYSTEM_AES_KEY=${SYSTEM_AES_KEY:-}
@@ -299,15 +307,24 @@ services:
       # DB host would skip the 5432 port block.)
       # doris-be: Stream Load follows FE→BE redirects that must receive Basic
       # credentials on whitelisted BE hosts.
-      - SSRF_WHITELIST_EXTRA=${SSRF_WHITELIST_EXTRA:-searxng,qdrant,milvus,weaviate,doris-fe,doris-be,minio}
+      - SSRF_WHITELIST_EXTRA=${SSRF_WHITELIST_EXTRA:-docreader,searxng,qdrant,milvus,weaviate,doris-fe,doris-be,minio}
       - CONCURRENCY_POOL_SIZE=${CONCURRENCY_POOL_SIZE:-5}
       - JWT_SECRET=${JWT_SECRET:-}
       # File size limit (in MB)
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      # App 与 DocReader 必须使用同一条 gRPC 输入上限与 worker 契约。
+      - DOCREADER_GRPC_MAX_FILE_SIZE_MB=${DOCREADER_GRPC_MAX_FILE_SIZE_MB:-${MAX_FILE_SIZE_MB:-50}}
+      - DOCREADER_GRPC_MAX_WORKERS=${DOCREADER_GRPC_MAX_WORKERS:-4}
+      - WEKNORA_DOCREADER_MAX_CONCURRENCY=${WEKNORA_DOCREADER_MAX_CONCURRENCY:-4}
+      - DOCREADER_MAX_IMAGE_COUNT=${DOCREADER_MAX_IMAGE_COUNT:-256}
+      - DOCREADER_MAX_IMAGE_SIZE_MB=${DOCREADER_MAX_IMAGE_SIZE_MB:-16}
+      - DOCREADER_MAX_TOTAL_IMAGE_SIZE_MB=${DOCREADER_MAX_TOTAL_IMAGE_SIZE_MB:-128}
+      - DOCREADER_PDF_MAX_PAGES=${DOCREADER_PDF_MAX_PAGES:-1000}
       - KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=${KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB:-2048}
       # 仅允许 1-16 MiB；frontend Nginx 与后端请求上限按最大 16 MiB 设计。
       - KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB=${KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB:-4}
       - KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS=${KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS:-24}
+      - KNOWLEDGE_UPLOAD_FINALIZE_MAX_CONCURRENCY=${KNOWLEDGE_UPLOAD_FINALIZE_MAX_CONCURRENCY:-1}
       # 必须位于已挂载的 /data/files 下；多副本部署必须改用所有 app 共享的 RWX 路径。
       - KNOWLEDGE_UPLOAD_TEMP_DIR=${KNOWLEDGE_UPLOAD_TEMP_DIR:-/data/files/upload-sessions}
       - WEKNORA_MINERU_MAX_CONCURRENCY=${WEKNORA_MINERU_MAX_CONCURRENCY:-}
@@ -394,6 +411,7 @@ services:
       dockerfile: docker/Dockerfile.docreader
       args:
         - APT_MIRROR=${APT_MIRROR:-}
+        - DOCREADER_GRPC_PORT=${DOCREADER_GRPC_PORT:-50051}
     container_name: WeKnora-docreader
     # docreader gRPC ships without auth/TLS and is only consumed by the app
     # container over the WeKnora-network (DOCREADER_ADDR defaults to
@@ -402,7 +420,7 @@ services:
     # If you need to call docreader from outside the host (e.g. for debugging),
     # add a `ports:` entry locally, preferably bound to 127.0.0.1.
     expose:
-      - "50051"
+      - "${DOCREADER_GRPC_PORT:-50051}"
     volumes:
       - docreader-tmp:/tmp/docreader
     environment:
@@ -411,9 +429,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-}
       - DOCREADER_IMAGE_OUTPUT_DIR=/tmp/docreader
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-}
-      # docreader 对外 HTTP 抓取的 SSRF 白名单（逗号分隔；与 app 共用同名变量）
-      - SSRF_WHITELIST=${SSRF_WHITELIST:-}
-      - SSRF_WHITELIST_EXTRA=${SSRF_WHITELIST_EXTRA:-}
+      # DocReader 用户 URL 抓取使用独立白名单，禁止继承 app 的内部服务列表。
+      - SSRF_WHITELIST=${DOCREADER_SSRF_WHITELIST:-}
+      - SSRF_WHITELIST_EXTRA=${DOCREADER_SSRF_WHITELIST_EXTRA:-}
       # ========== gRPC 服务端 TLS / 认证 ==========
       - GRPC_TLS_ENABLED=${GRPC_TLS_ENABLED:-false}
       - GRPC_TLS_CERT=${GRPC_TLS_CERT:-}
@@ -427,6 +445,10 @@ services:
       - DOCREADER_GRPC_MAX_WORKERS=${DOCREADER_GRPC_MAX_WORKERS:-4}
       - DOCREADER_GRPC_MAX_FILE_SIZE_MB=${DOCREADER_GRPC_MAX_FILE_SIZE_MB:-${MAX_FILE_SIZE_MB:-50}}
       - DOCREADER_GRPC_PORT=${DOCREADER_GRPC_PORT:-50051}
+      - DOCREADER_MAX_IMAGE_COUNT=${DOCREADER_MAX_IMAGE_COUNT:-256}
+      - DOCREADER_MAX_IMAGE_SIZE_MB=${DOCREADER_MAX_IMAGE_SIZE_MB:-16}
+      - DOCREADER_MAX_TOTAL_IMAGE_SIZE_MB=${DOCREADER_MAX_TOTAL_IMAGE_SIZE_MB:-128}
+      - DOCREADER_PDF_MAX_PAGES=${DOCREADER_PDF_MAX_PAGES:-1000}
       # ========== 解析通用 ==========
       - DOCREADER_DOCX_MAX_PAGES=${DOCREADER_DOCX_MAX_PAGES:-0}
       - DOCREADER_MARKITDOWN_MAX_WORKERS=${DOCREADER_MARKITDOWN_MAX_WORKERS:-1}
@@ -480,7 +502,7 @@ services:
       - DOCREADER_PDF_MAX_CHART_REGION_AREA=${DOCREADER_PDF_MAX_CHART_REGION_AREA:-}
       - DOCREADER_PDF_MAX_FIGURE_HEIGHT_RATIO=${DOCREADER_PDF_MAX_FIGURE_HEIGHT_RATIO:-}
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=localhost:50051"]
+      test: ["CMD-SHELL", "grpc_health_probe -addr=localhost:$${DOCREADER_GRPC_PORT:-50051}"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1020,6 +1042,7 @@ networks:
 volumes:
   postgres-data:
   data-files:
+  app-logs:
   docreader-tmp:
   minio_data:
   neo4j-data:
