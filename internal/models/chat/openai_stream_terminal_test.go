@@ -13,7 +13,7 @@ import (
 
 func collectRawOpenAIStream(t *testing.T, body string) []types.StreamResponse {
 	t.Helper()
-	model := &RemoteAPIChat{modelName: "terminal-test"}
+	model := &RemoteAPIChat{modelName: "terminal-test", adapter: baseProvider{}}
 	stream := make(chan types.StreamResponse, 16)
 	model.processRawHTTPStream(context.Background(), &http.Response{
 		Body: io.NopCloser(strings.NewReader(body)),
@@ -55,4 +55,31 @@ func TestRawOpenAIStreamDoneSentinelIsTerminal(t *testing.T) {
 	require.NotEmpty(t, responses)
 	require.Equal(t, types.ResponseTypeAnswer, responses[len(responses)-1].ResponseType)
 	require.True(t, responses[len(responses)-1].Done)
+}
+
+func TestRawOpenAIStreamMalformedContentBeforeDoneIsTerminalError(t *testing.T) {
+	responses := collectRawOpenAIStream(t,
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"\"}]}\n\n"+
+			"data: {malformed-json}\n\n"+
+			"data: [DONE]\n\n")
+	require.Len(t, responses, 2)
+	require.Equal(t, "partial", responses[0].Content)
+	require.Equal(t, types.ResponseTypeError, responses[1].ResponseType)
+	require.True(t, responses[1].Done)
+}
+
+func TestRawOpenAIStreamMalformedToolArgumentsBeforeDoneIsTerminalError(t *testing.T) {
+	responses := collectRawOpenAIStream(t,
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"\"}]}\n\n"+
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":\"truncated\"},\"finish_reason\":\"\"}]}\n\n"+
+			"data: [DONE]\n\n")
+	require.NotEmpty(t, responses)
+	last := responses[len(responses)-1]
+	require.Equal(t, types.ResponseTypeError, last.ResponseType)
+	require.True(t, last.Done)
+	for _, response := range responses {
+		if response.ResponseType == types.ResponseTypeAnswer && response.Done {
+			t.Fatal("畸形工具参数后不得被 [DONE] 提升为成功")
+		}
+	}
 }

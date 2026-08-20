@@ -745,15 +745,12 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		resolveStorageProviderPending(db)
 		migrateLegacyStorageBackends(db)
 
-		// Post-migration: declarative built-in models from config/builtin_models.yaml (optional).
-		if err := types.LoadBuiltinModelsConfig(context.Background(), db, config.ConfigDir()); err != nil {
-			logger.Warnf(context.Background(), "Load builtin models config failed: %v", err)
-		}
 	} else {
 		logger.Infof(context.Background(), "Auto-migration is disabled (AUTO_MIGRATE=false)")
 	}
 
-	if config.IsStandardProduction(handler.Edition, os.Getenv("GIN_MODE")) && db.Dialector.Name() == "postgres" {
+	isStandardProduction := config.IsStandardProduction(handler.Edition, os.Getenv("GIN_MODE"))
+	if isStandardProduction && db.Dialector.Name() == "postgres" {
 		var state struct {
 			Version uint
 			Dirty   bool
@@ -772,6 +769,17 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		); err != nil {
 			return nil, err
 		}
+	}
+
+	// 公司预置模型协调不是 schema migration，必须在生产 AUTO_MIGRATE=false
+	// 时照常执行。生产先通过 87 clean 门禁，再严格验证清单中的每个模型；
+	// 开发环境保留缺少可选文件时告警后继续的兼容行为。
+	if isStandardProduction {
+		if err := types.LoadBuiltinModelsConfigStrict(context.Background(), db, config.ConfigDir()); err != nil {
+			return nil, fmt.Errorf("load builtin models config: %w", err)
+		}
+	} else if err := types.LoadBuiltinModelsConfig(context.Background(), db, config.ConfigDir()); err != nil {
+		logger.Warnf(context.Background(), "Load builtin models config failed: %v", err)
 	}
 
 	// Get underlying SQL DB object

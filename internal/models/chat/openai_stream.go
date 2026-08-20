@@ -234,8 +234,12 @@ func (c *RemoteAPIChat) processRawHTTPStream(
 		}
 
 		if err := json.Unmarshal(event.Data, &streamResp); err != nil {
-			logger.Errorf(ctx, "Failed to parse stream response: %v", err)
-			continue
+			decodeErr := fmt.Errorf("decode SSE response: %w", err)
+			if dumper != nil {
+				dumper.WriteError(decodeErr.Error())
+			}
+			streamChan <- publicModelStreamFailure(ctx, "openai_raw_sse_decode", decodeErr)
+			return
 		}
 
 		if streamResp.Usage != nil {

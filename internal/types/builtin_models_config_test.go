@@ -83,6 +83,46 @@ func TestLoadBuiltinModelsConfig_ParseError(t *testing.T) {
 	assert.Equal(t, int64(0), deleted)
 }
 
+func TestLoadBuiltinModelsConfigStrictRejectsMissingAndMalformedFiles(t *testing.T) {
+	db := setupBuiltinModelsDB(t)
+	require.Error(t, LoadBuiltinModelsConfigStrict(context.Background(), db, t.TempDir()))
+
+	dir := writeYAML(t, "builtin_models: [oops: : bad")
+	require.Error(t, LoadBuiltinModelsConfigStrict(context.Background(), db, dir))
+}
+
+func TestLoadBuiltinModelsConfigStrictRequiresEveryAdoptedModel(t *testing.T) {
+	db := setupBuiltinModelsDB(t)
+	dir := writeYAML(t, `adopt_existing_model_ids:
+  - missing-company-model
+builtin_models: []
+`)
+
+	err := LoadBuiltinModelsConfigStrict(context.Background(), db, dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "applied 0 of 1")
+}
+
+func TestLoadBuiltinModelsConfigStrictAdoptsEveryDeclaredModel(t *testing.T) {
+	db := setupBuiltinModelsDB(t)
+	require.NoError(t, db.Create(&Model{
+		ID: "company-chat", Name: "company-chat", Type: ModelTypeKnowledgeQA,
+		Source: ModelSourceRemote, Status: ModelStatusActive,
+	}).Error)
+	dir := writeYAML(t, `adopt_existing_model_ids:
+  - company-chat
+builtin_models:
+  - id: company-rerank
+    name: company-rerank
+    type: Rerank
+`)
+
+	require.NoError(t, LoadBuiltinModelsConfigStrict(context.Background(), db, dir))
+	var count int64
+	require.NoError(t, db.Model(&Model{}).Where("is_builtin = ?", true).Count(&count).Error)
+	require.Equal(t, int64(2), count)
+}
+
 func TestLoadBuiltinModelsConfig_BasicUpsert(t *testing.T) {
 	db := setupBuiltinModelsDB(t)
 	dir := writeYAML(t, `builtin_models:

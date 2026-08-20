@@ -51,6 +51,13 @@ type builtinModelsFile struct {
 // main config.yaml flow.
 var builtinModelEnvPattern = regexp.MustCompile(`\${([^}]+)}`)
 
+func builtinModelsConfigPath(configDir string) string {
+	if path := strings.TrimSpace(os.Getenv("BUILTIN_MODELS_CONFIG")); path != "" {
+		return path
+	}
+	return filepath.Join(configDir, "builtin_models.yaml")
+}
+
 // interpolateBuiltinModelEnv substitutes ${NAME} occurrences with the
 // corresponding os.Getenv value. Unset vars are left as the literal ${NAME}
 // so misconfiguration surfaces visibly in downstream provider calls instead
@@ -95,10 +102,7 @@ func interpolateBuiltinModelEnv(s string) string {
 //     the "current YAML id set" so the sweep won't delete its existing
 //     row either (treats the failure as "leave alone")
 func LoadBuiltinModelsConfig(ctx context.Context, db *gorm.DB, configDir string) error {
-	path := os.Getenv("BUILTIN_MODELS_CONFIG")
-	if path == "" {
-		path = filepath.Join(configDir, "builtin_models.yaml")
-	}
+	path := builtinModelsConfigPath(configDir)
 
 	// Treat "missing", "is a directory", and other non-regular-file cases the
 	// same way. Docker bind-mounting a non-existent source file silently
@@ -199,6 +203,71 @@ func LoadBuiltinModelsConfig(ctx context.Context, db *gorm.DB, configDir string)
 	}
 
 	log.Printf("[builtin-models] applied: %d upserted, %d adopted, %d pruned from %s", applied, adopted, pruned, path)
+	return nil
+}
+
+// LoadBuiltinModelsConfigStrict 在生产启动时执行声明式模型协调并验证结果。
+// 它保留宽松加载器在开发环境中的兼容行为，但生产不能把缺失、损坏或未能
+// 采用的公司模型静默当作成功。
+func LoadBuiltinModelsConfigStrict(ctx context.Context, db *gorm.DB, configDir string) error {
+	path := builtinModelsConfigPath(configDir)
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat builtin models config: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("builtin models config is not a regular file: %s", path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read builtin models config: %w", err)
+	}
+
+	var file builtinModelsFile
+	if err := yaml.Unmarshal([]byte(interpolateBuiltinModelEnv(string(raw))), &file); err != nil {
+		return fmt.Errorf("parse builtin models config: %w", err)
+	}
+
+	expectedIDs := make(map[string]struct{}, len(file.AdoptExistingModelIDs)+len(file.BuiltinModels))
+	for index, rawID := range file.AdoptExistingModelIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || len(id) > ModelIDMaxLen {
+			return fmt.Errorf("invalid adopt_existing_model_ids[%d]", index)
+		}
+		expectedIDs[id] = struct{}{}
+	}
+	for index := range file.BuiltinModels {
+		entry := &file.BuiltinModels[index]
+		if err := validateBuiltinModelEntry(entry, index); err != nil {
+			return err
+		}
+		expectedIDs[entry.ID] = struct{}{}
+	}
+
+	if err := LoadBuiltinModelsConfig(ctx, db, configDir); err != nil {
+		return err
+	}
+	if len(expectedIDs) == 0 {
+		return nil
+	}
+
+	ids := make([]string, 0, len(expectedIDs))
+	for id := range expectedIDs {
+		ids = append(ids, id)
+	}
+	var appliedIDs []string
+	if err := db.WithContext(ctx).
+		Model(&Model{}).
+		Where("id IN ? AND is_builtin = ?", ids, true).
+		Pluck("id", &appliedIDs).Error; err != nil {
+		return fmt.Errorf("verify builtin models config: %w", err)
+	}
+	if len(appliedIDs) != len(expectedIDs) {
+		return fmt.Errorf(
+			"builtin models config applied %d of %d declared model ids",
+			len(appliedIDs), len(expectedIDs),
+		)
+	}
 	return nil
 }
 
