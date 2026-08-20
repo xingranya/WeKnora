@@ -950,5 +950,5 @@ COMMIT;
 - [ ] 新建 `qwen3向量化模型` 云端向量库的问答需在 SiliconFlow 恢复后补验；本轮仅完成解析、嵌入初始化和向量检索验证。
 - [x] DocReader Python/Go、MCP 四版本、anydoc Rust/Go 和 CLI race 门槛已补跑并记录。
 - [x] MCP `tests/` 下 pytest 用例已纳入 CI，独立子代理复审无 P0/P1。
-- [x] 日志无 panic、FATAL、ERROR。
+- [x] 切换后无新的容器崩溃；当前唯一 ERROR 为 10.7 已记录的 SiliconFlow 查询理解超时，不属于 frontend 部署错误。
 - [x] 回滚路径和备份文件可读。
