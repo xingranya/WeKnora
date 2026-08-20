@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MIGRATIONS_DIR="${PROJECT_ROOT}/migrations/versioned"
 DATABASE_URL="${TEST_DATABASE_URL:-}"
+TEST_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TEST_TMP_DIR}"' EXIT
 
 if [[ -z "${DATABASE_URL}" ]]; then
 	for required_name in DB_HOST DB_PORT DB_USER DB_PASSWORD DB_NAME; do
@@ -145,9 +147,120 @@ BEGIN
 END $$;
 SQL
 
+# 使用与仓储相同的“条件消费旧 refresh，再在同一事务写入新 token 对”语义，
+# 同时发起两次轮换。PostgreSQL 行锁释放后，后到事务必须观察到已撤销状态并写入 0 行。
+psql "${DATABASE_URL}" -Xv ON_ERROR_STOP=1 -q <<'SQL'
+INSERT INTO auth_tokens (
+    id, user_id, token, token_fingerprint, token_type, expires_at
+) VALUES (
+    'concurrent-old-refresh',
+    'user-3',
+    'synthetic.concurrent.refresh',
+    encode(sha256(convert_to('synthetic.concurrent.refresh', 'UTF8')), 'hex'),
+    'refresh_token',
+    NOW() + INTERVAL '24 hours'
+);
+SQL
+
+rotate_refresh_once() {
+    local suffix="$1"
+    psql "${DATABASE_URL}" -XqAtv ON_ERROR_STOP=1 -v suffix="${suffix}" <<'SQL'
+BEGIN;
+WITH consumed AS (
+    UPDATE auth_tokens
+    SET is_revoked = TRUE, updated_at = NOW()
+    WHERE user_id = 'user-3'
+      AND token_type = 'refresh_token'
+      AND is_revoked = FALSE
+      AND expires_at > NOW()
+      AND (
+          token = 'synthetic.concurrent.refresh'
+          OR token_fingerprint = encode(
+              sha256(convert_to('synthetic.concurrent.refresh', 'UTF8')),
+              'hex'
+          )
+      )
+    RETURNING 1
+), access_created AS (
+    INSERT INTO auth_tokens (
+        id, user_id, token, token_fingerprint, token_type, expires_at
+    )
+    SELECT
+        'concurrent-access-' || :'suffix',
+        'user-3',
+        'synthetic.concurrent.access.' || :'suffix',
+        encode(sha256(convert_to('synthetic.concurrent.access.' || :'suffix', 'UTF8')), 'hex'),
+        'access_token',
+        NOW() + INTERVAL '1 hour'
+    FROM consumed
+    RETURNING 1
+), refresh_created AS (
+    INSERT INTO auth_tokens (
+        id, user_id, token, token_fingerprint, token_type, expires_at
+    )
+    SELECT
+        'concurrent-refresh-' || :'suffix',
+        'user-3',
+        'synthetic.concurrent.next.' || :'suffix',
+        encode(sha256(convert_to('synthetic.concurrent.next.' || :'suffix', 'UTF8')), 'hex'),
+        'refresh_token',
+        NOW() + INTERVAL '24 hours'
+    FROM consumed
+    RETURNING 1
+)
+SELECT
+    (SELECT COUNT(*) FROM access_created) +
+    (SELECT COUNT(*) FROM refresh_created);
+COMMIT;
+SQL
+}
+
+rotate_refresh_once a >"${TEST_TMP_DIR}/refresh-a.out" &
+refresh_a_pid=$!
+rotate_refresh_once b >"${TEST_TMP_DIR}/refresh-b.out" &
+refresh_b_pid=$!
+wait "${refresh_a_pid}"
+wait "${refresh_b_pid}"
+
+refresh_results="$({ cat "${TEST_TMP_DIR}/refresh-a.out"; cat "${TEST_TMP_DIR}/refresh-b.out"; } | sed '/^$/d' | sort | tr '\n' ' ')"
+if [[ "${refresh_results}" != "0 2 " ]]; then
+    echo "Error: concurrent refresh results were not exactly one success and one rejection" >&2
+    exit 1
+fi
+
+psql "${DATABASE_URL}" -Xv ON_ERROR_STOP=1 -q <<'SQL'
+DO $$
+BEGIN
+    IF (SELECT COUNT(*) FROM auth_tokens
+        WHERE id = 'concurrent-old-refresh' AND is_revoked) <> 1 THEN
+        RAISE EXCEPTION 'concurrent refresh did not consume the old token';
+    END IF;
+    IF (SELECT COUNT(*) FROM auth_tokens
+        WHERE user_id = 'user-3' AND token_type = 'access_token' AND NOT is_revoked) <> 1 THEN
+        RAISE EXCEPTION 'concurrent refresh created an invalid access-token count';
+    END IF;
+    IF (SELECT COUNT(*) FROM auth_tokens
+        WHERE user_id = 'user-3' AND token_type = 'refresh_token' AND NOT is_revoked) <> 1 THEN
+        RAISE EXCEPTION 'concurrent refresh created an invalid refresh-token count';
+    END IF;
+END $$;
+SQL
+
 # 直接重放 up SQL，验证 IF NOT EXISTS/IS DISTINCT FROM 可以安全收敛。
 psql "${DATABASE_URL}" -Xv ON_ERROR_STOP=1 -q -f \
     "${MIGRATIONS_DIR}/000087_auth_token_fingerprints.up.sql"
+
+# 将真实 PostgreSQL 迁移状态切到 dirty 再恢复。候选 App 的拒绝启动由镜像
+# 隔离门禁执行；这里保证输入状态本身真实存在且可被准确读取。
+psql "${DATABASE_URL}" -Xv ON_ERROR_STOP=1 -q \
+    -c 'UPDATE schema_migrations SET dirty = TRUE'
+dirty_state="$(psql "${DATABASE_URL}" -XAtqc 'SELECT version::text || '\''|'\'' || dirty::text FROM schema_migrations LIMIT 1')"
+if [[ "${dirty_state}" != "87|true" ]]; then
+    echo "Error: failed to establish PostgreSQL 87 dirty state" >&2
+    exit 1
+fi
+psql "${DATABASE_URL}" -Xv ON_ERROR_STOP=1 -q \
+    -c 'UPDATE schema_migrations SET dirty = FALSE'
 
 migrate -path "${MIGRATIONS_DIR}" -database "${DATABASE_URL}" down 1 >/dev/null
 
@@ -174,4 +287,4 @@ BEGIN
 END $$;
 SQL
 
-echo "PASS: PostgreSQL auth migration supports expand, mixed app access, revoke/logout, idempotency, and down"
+echo "PASS: PostgreSQL auth migration supports expand, mixed app access, atomic concurrent refresh, revoke/logout, dirty-state setup, idempotency, and down"
