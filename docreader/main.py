@@ -8,13 +8,19 @@ from concurrent import futures
 from typing import Optional
 
 import grpc
-from grpc_health.v1 import health_pb2_grpc
+from grpc_health.v1 import health_pb2, health_pb2_grpc
 from grpc_health.v1.health import HealthServicer
 
 from docreader.auth import AuthInterceptor, TLSConfigError, load_tls_credentials
 from docreader import config
 from docreader.config import CONFIG
 from docreader.parser import Parser
+from docreader.limits import (
+    ParseCancelledError,
+    ResourceLimitError,
+    iter_limited_image_data,
+    validate_request_limits,
+)
 from docreader.proto import docreader_pb2_grpc
 from docreader.parser.registry import registry
 from docreader.proto.docreader_pb2 import (
@@ -55,7 +61,10 @@ init_logging_request_id()
 
 
 def _resolve_images(
-    images: dict, request_id: str, storage_map: dict | None = None
+    images: dict,
+    request_id: str,
+    storage_map: dict | None = None,
+    context=None,
 ) -> tuple[str, list]:
     """Resolve document images into inline bytes for the Go App to persist.
 
@@ -68,8 +77,6 @@ def _resolve_images(
 
     Returns ("", list[ImageRef]).  image_dir_path is always empty.
     """
-    import base64
-
     if not images:
         return "", []
 
@@ -83,12 +90,13 @@ def _resolve_images(
     }
 
     refs = []
-    for ref_path, b64data in images.items():
-        try:
-            img_bytes = base64.b64decode(b64data)
-        except Exception:
-            img_bytes = b64data.encode("utf-8") if isinstance(b64data, str) else b64data
-
+    for ref_path, img_bytes in iter_limited_image_data(
+        images,
+        CONFIG.max_image_count,
+        CONFIG.max_image_size_bytes,
+        CONFIG.max_total_image_size_bytes,
+        is_cancelled=(lambda: not context.is_active()) if context else None,
+    ):
         fname = os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png"
         ext = os.path.splitext(fname)[1].lower()
         mime = mime_map.get(ext, "application/octet-stream")
@@ -121,22 +129,20 @@ def _mime_for_ref(ref_path: str) -> tuple[str, str]:
     return fname, mime_map.get(ext, "application/octet-stream")
 
 
-def _iter_image_refs(images: dict):
+def _iter_image_refs(images: dict, context=None):
     """Yield ImageRef one at a time, freeing each source entry as we go.
 
     Used by the streaming RPC so we never hold every decoded image plus its
     base64 source in memory simultaneously (the inline path's peak-memory and
     message-size problem for large scanned PDFs).
     """
-    import base64
-
-    for ref_path in list(images.keys()):
-        b64data = images.pop(ref_path)
-        try:
-            img_bytes = base64.b64decode(b64data)
-        except Exception:
-            img_bytes = b64data.encode("utf-8") if isinstance(b64data, str) else b64data
-        del b64data
+    for ref_path, img_bytes in iter_limited_image_data(
+        images,
+        CONFIG.max_image_count,
+        CONFIG.max_image_size_bytes,
+        CONFIG.max_total_image_size_bytes,
+        is_cancelled=(lambda: not context.is_active()) if context else None,
+    ):
         fname, mime = _mime_for_ref(ref_path)
         yield ImageRef(
             filename=fname,
@@ -151,11 +157,24 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
         super().__init__()
         self.parser = Parser()
 
-    def _parse_request(self, request: ReadRequest):
+    @staticmethod
+    def _raise_if_cancelled(context) -> None:
+        if context is not None and not context.is_active():
+            raise ParseCancelledError("DocReader request was cancelled")
+
+    def _validate_request(self, request: ReadRequest) -> None:
+        validate_request_limits(
+            len(request.file_content),
+            request.ByteSize(),
+            CONFIG.grpc_max_message_bytes,
+        )
+
+    def _parse_request(self, request: ReadRequest, context=None):
         """Run the parser for a ReadRequest, returning (result, source_desc).
 
         Shared by the unary Read and streaming ReadStream RPCs.
         """
+        self._raise_if_cancelled(context)
         cfg = request.config
         parser_engine = cfg.parser_engine if cfg else ""
         engine_overrides = dict(cfg.parser_engine_overrides) if cfg else {}
@@ -167,7 +186,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                 request.title,
                 parser_engine=parser_engine,
                 engine_overrides=engine_overrides,
+                is_cancelled=(lambda: not context.is_active()) if context else None,
             )
+            self._raise_if_cancelled(context)
             return result, request.url
 
         file_type = request.file_type or os.path.splitext(request.file_name)[1][1:]
@@ -183,7 +204,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
             request.file_content,
             parser_engine=parser_engine,
             engine_overrides=engine_overrides,
+            is_cancelled=(lambda: not context.is_active()) if context else None,
         )
+        self._raise_if_cancelled(context)
         return result, request.file_name
 
     def Read(self, request: ReadRequest, context):
@@ -192,7 +215,8 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
 
         with request_id_context(request_id):
             try:
-                result, source_desc = self._parse_request(request)
+                self._validate_request(request)
+                result, source_desc = self._parse_request(request, context)
 
                 if not result or not result.content:
                     error_msg = f"Failed to parse: {source_desc}"
@@ -200,7 +224,11 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                     return ReadResponse(error=error_msg)
 
                 _c = to_valid_utf8_text
-                image_dir, image_refs = _resolve_images(result.images, request_id)
+                image_dir, image_refs = _resolve_images(
+                    result.images,
+                    request_id,
+                    context=context,
+                )
 
                 response = ReadResponse(
                     markdown_content=_c(result.content),
@@ -217,6 +245,10 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                 )
                 return response
 
+            except ParseCancelledError as e:
+                context.abort(grpc.StatusCode.CANCELLED, str(e))
+            except ResourceLimitError as e:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(e))
             except Exception as e:
                 error_msg = f"Error reading document: {e}"
                 logger.error(error_msg)
@@ -235,7 +267,12 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
         with request_id_context(request_id):
             _c = to_valid_utf8_text
             try:
-                result, source_desc = self._parse_request(request)
+                self._validate_request(request)
+                result, source_desc = self._parse_request(request, context)
+            except ParseCancelledError as e:
+                context.abort(grpc.StatusCode.CANCELLED, str(e))
+            except ResourceLimitError as e:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(e))
             except Exception as e:
                 logger.error("Error reading document: %s", e)
                 logger.info("Traceback: %s", traceback.format_exc())
@@ -250,6 +287,12 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
 
             images = result.images or {}
             image_count = len(images)
+            if image_count > CONFIG.max_image_count:
+                context.abort(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    f"DocReader image count {image_count} exceeds "
+                    f"limit {CONFIG.max_image_count}",
+                )
             yield ReadStreamResponse(
                 meta=ReadStreamMeta(
                     markdown_content=_c(result.content),
@@ -262,9 +305,14 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
             )
 
             sent = 0
-            for ref in _iter_image_refs(images):
-                yield ReadStreamResponse(image=ref)
-                sent += 1
+            try:
+                for ref in _iter_image_refs(images, context=context):
+                    yield ReadStreamResponse(image=ref)
+                    sent += 1
+            except ParseCancelledError as e:
+                context.abort(grpc.StatusCode.CANCELLED, str(e))
+            except ResourceLimitError as e:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(e))
 
             logger.info(
                 "ReadStream response: content_len=%d, images=%d",
@@ -296,8 +344,8 @@ def main():
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=CONFIG.grpc_max_workers),
         options=[
-            ("grpc.max_send_message_length", CONFIG.grpc_max_file_size_mb),
-            ("grpc.max_receive_message_length", CONFIG.grpc_max_file_size_mb),
+            ("grpc.max_send_message_length", CONFIG.grpc_max_message_bytes),
+            ("grpc.max_receive_message_length", CONFIG.grpc_max_message_bytes),
         ],
         interceptors=interceptors,
     )
@@ -305,6 +353,7 @@ def main():
     docreader_pb2_grpc.add_DocReaderServicer_to_server(DocReaderServicer(), server)
 
     health_servicer = HealthServicer()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
     try:
@@ -331,6 +380,8 @@ def main():
         server.wait_for_termination()
     except KeyboardInterrupt:
         logger.info("Received termination signal, shutting down server")
+        health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+        server.stop(grace=5).wait()
         server.stop(0)
 
 

@@ -1,16 +1,20 @@
 package docparser
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
+	appLogger "github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/utils"
 )
@@ -357,5 +361,131 @@ func TestProcessImagesRejectsDecodedImageLimit(t *testing.T) {
 	_, _, err := reader.processImages("![](too-large.png)", images)
 	if err == nil {
 		t.Fatal("expected decoded image limit error")
+	}
+}
+
+func TestValidateMinerUImageLimitsChecksTotalBytes(t *testing.T) {
+	images := map[string]string{
+		"a.png": base64.StdEncoding.EncodeToString([]byte("abc")),
+		"b.png": base64.StdEncoding.EncodeToString([]byte("def")),
+	}
+	err := validateMinerUImageLimits(context.Background(), images, 3, 5)
+	if err == nil {
+		t.Fatal("expected total decoded image limit error")
+	}
+}
+
+func TestProcessImagesChecksCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader := &MinerUReader{}
+	_, _, err := reader.processImagesWithContext(
+		ctx,
+		"![](cover.png)",
+		map[string]string{"cover.png": base64.StdEncoding.EncodeToString([]byte("abc"))},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("processImagesWithContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func captureMinerUAuditLogs(t *testing.T, output *bytes.Buffer) {
+	t.Helper()
+	originalFormat, hadFormat := os.LookupEnv("LOG_FORMAT")
+	if err := os.Setenv("LOG_FORMAT", ""); err != nil {
+		t.Fatal(err)
+	}
+	appLogger.ConfigureFromEnv()
+	appLogger.SetOutput(output)
+	t.Cleanup(func() {
+		if hadFormat {
+			_ = os.Setenv("LOG_FORMAT", originalFormat)
+		} else {
+			_ = os.Unsetenv("LOG_FORMAT")
+		}
+		appLogger.ConfigureFromEnv()
+	})
+}
+
+func TestMinerUReaderLogsAuditContentWithoutCredentialsOrBase64(t *testing.T) {
+	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
+	t.Cleanup(func() { utils.SetSSRFWhitelistFromRaw("") })
+
+	const markdownContent = "员工文档正文"
+	const credential = "sk-abcdefghijk"
+	const imageSecret = "SENSITIVE_IMAGE_BYTES"
+	responseBody, err := json.Marshal(map[string]any{
+		"results": map[string]any{
+			"document": map[string]any{
+				"md_content": "![](cover.png)\n" + markdownContent + " api_key=" + credential,
+				"images": map[string]string{
+					"cover.png": "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(imageSecret)),
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responseBody)
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	captureMinerUAuditLogs(t, &logs)
+	reader := NewMinerUReader(map[string]string{"mineru_endpoint": server.URL})
+	result, err := reader.Read(context.Background(), &types.ReadRequest{
+		FileContent: []byte("test"),
+		FileName:    "document.pdf",
+		FileType:    "pdf",
+	})
+	if err != nil {
+		t.Fatalf("Read() error: %v", err)
+	}
+	if len(result.ImageRefs) != 1 {
+		t.Fatalf("image refs = %d, want 1", len(result.ImageRefs))
+	}
+	logged := logs.String()
+	for _, expected := range []string{markdownContent, "cover.png", "response_bytes=", "images=1", "encoded_image_chars="} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("MinerU logs missing audit field %q: %s", expected, logged)
+		}
+	}
+	for _, forbidden := range []string{credential, imageSecret, "base64,"} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("MinerU logs expose forbidden payload %q: %s", forbidden, logged)
+		}
+	}
+}
+
+func TestMinerUReaderLogsSanitizedErrorBodyWithoutReturningIt(t *testing.T) {
+	utils.SetSSRFWhitelistFromRaw("127.0.0.1")
+	t.Cleanup(func() { utils.SetSSRFWhitelistFromRaw("") })
+	const responseDetail = "解析服务内部错误"
+	const credential = "sk-abcdefghijk"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(responseDetail + " api_key=" + credential))
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	captureMinerUAuditLogs(t, &logs)
+	reader := NewMinerUReader(map[string]string{"mineru_endpoint": server.URL})
+	_, err := reader.Read(context.Background(), &types.ReadRequest{
+		FileContent: []byte("test"),
+		FileName:    "document.pdf",
+		FileType:    "pdf",
+	})
+	if err == nil {
+		t.Fatal("expected MinerU status error")
+	}
+	if strings.Contains(err.Error(), responseDetail) || strings.Contains(err.Error(), credential) {
+		t.Fatalf("error exposes MinerU response body: %v", err)
+	}
+	if !strings.Contains(logs.String(), responseDetail) || strings.Contains(logs.String(), credential) {
+		t.Fatalf("MinerU error audit log boundary is wrong: %s", logs.String())
 	}
 }

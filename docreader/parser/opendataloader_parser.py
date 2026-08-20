@@ -22,9 +22,10 @@ import urllib.request
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from docreader.config import CONFIG
+from docreader.limits import ImageBudget, ParseCancelledError
 from docreader.models.document import Document
 from docreader.parser.base_parser import BaseParser
-from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.concurrency import parser_worker_limit, run_in_cancellable_process
 from docreader.utils.ssrf import is_ssrf_safe_url
 
 logger = logging.getLogger(__name__)
@@ -181,17 +182,30 @@ def _canonical_image_ref(abs_path: str, output_dir: str) -> str:
     return f"images/{name}"
 
 
-def _collect_images_under_output(output_dir: str) -> Dict[str, str]:
+def _collect_images_under_output(
+    output_dir: str,
+    budget: ImageBudget | None = None,
+    is_cancelled=None,
+) -> Dict[str, str]:
     """Collect every extracted image under the convert output tree."""
+    if budget is None:
+        budget = ImageBudget(
+            CONFIG.max_image_count,
+            CONFIG.max_image_size_bytes,
+            CONFIG.max_total_image_size_bytes,
+        )
     images: Dict[str, str] = {}
     for root, _, files in os.walk(output_dir):
         for name in files:
+            if is_cancelled is not None and is_cancelled():
+                raise ParseCancelledError("DocReader request was cancelled")
             if not name.lower().endswith(_IMAGE_SUFFIXES):
                 continue
             abs_path = os.path.join(root, name)
             ref = _canonical_image_ref(abs_path, output_dir)
             if ref in images:
                 continue
+            budget.add_size(os.path.getsize(abs_path))
             with open(abs_path, "rb") as f:
                 images[ref] = base64.b64encode(f.read()).decode("utf-8")
     return images
@@ -267,14 +281,19 @@ def _rewrite_markdown_image_refs(
     return _MD_IMAGE_RE.sub(repl, markdown)
 
 
+def _execute_odl_convert(kwargs: Dict[str, Any]) -> None:
+    import opendataloader_pdf
+
+    opendataloader_pdf.convert(**kwargs)
+
+
 def _run_convert(
     pdf_path: str,
     output_dir: str,
     image_dir: str,
     overrides: Optional[Mapping[str, Any]] = None,
+    is_cancelled=None,
 ) -> None:
-    import opendataloader_pdf
-
     kwargs: Dict[str, Any] = {
         "input_path": pdf_path,
         "output_dir": output_dir,
@@ -303,7 +322,11 @@ def _run_convert(
         if _override_bool(overrides, "odl_hybrid_fallback", CONFIG.odl_hybrid_fallback):
             kwargs["hybrid_fallback"] = True
 
-    opendataloader_pdf.convert(**kwargs)
+    run_in_cancellable_process(
+        _execute_odl_convert,
+        kwargs,
+        is_cancelled=is_cancelled,
+    )
 
 
 class OpenDataLoaderParser(BaseParser):
@@ -322,13 +345,18 @@ class OpenDataLoaderParser(BaseParser):
         if not ok:
             raise RuntimeError(msg)
 
+        from docreader.parser.pdf_parser import validate_pdf_input_page_count
+
+        validate_pdf_input_page_count(content, self._is_cancelled)
+
         safe_name = os.path.basename(self.file_name) or "document.pdf"
         if not safe_name.lower().endswith(".pdf"):
             safe_name = f"{os.path.splitext(safe_name)[0] or 'document'}.pdf"
         pdf_stem = os.path.splitext(safe_name)[0]
 
         max_workers = CONFIG.odl_max_workers
-        with parser_worker_limit("opendataloader", max_workers):
+        with parser_worker_limit("opendataloader", max_workers, self._is_cancelled):
+            self.raise_if_cancelled()
             with tempfile.TemporaryDirectory(prefix="weknora-odl-") as tmp_dir:
                 pdf_path = os.path.join(tmp_dir, safe_name)
                 with open(pdf_path, "wb") as f:
@@ -341,13 +369,24 @@ class OpenDataLoaderParser(BaseParser):
                     tmp_dir,
                     image_dir,
                     overrides=self._engine_overrides,
+                    is_cancelled=self._is_cancelled,
                 )
+                self.raise_if_cancelled()
 
                 md_path = _find_markdown_file(tmp_dir, pdf_stem)
                 with open(md_path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
 
-                images = _collect_images_under_output(tmp_dir)
+                image_budget = ImageBudget(
+                    CONFIG.max_image_count,
+                    CONFIG.max_image_size_bytes,
+                    CONFIG.max_total_image_size_bytes,
+                )
+                images = _collect_images_under_output(
+                    tmp_dir,
+                    budget=image_budget,
+                    is_cancelled=self._is_cancelled,
+                )
                 text = _rewrite_markdown_image_refs(text, images)
 
         if len(text.strip()) < _MIN_CHARS_PER_PAGE:
@@ -359,7 +398,9 @@ class OpenDataLoaderParser(BaseParser):
             from docreader.parser.pdf_parser import PDFScannedParser
 
             return PDFScannedParser(
-                file_name=self.file_name, file_type=self.file_type
+                file_name=self.file_name,
+                file_type=self.file_type,
+                _is_cancelled=self._is_cancelled,
             ).parse_into_text(content)
 
         logger.info(

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from docreader.limits import ImageBudget, ResourceLimitError
 from docreader.parser.opendataloader_parser import (
     OpenDataLoaderParser,
     _collect_images_under_output,
@@ -19,6 +20,22 @@ from docreader.parser.opendataloader_parser import (
 
 
 class OpenDataLoaderHelpersTest(unittest.TestCase):
+    def test_collect_images_applies_total_budget_before_loading_all_files(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            image_dir = os.path.join(output_dir, "images")
+            os.makedirs(image_dir)
+            for name in ("a.png", "b.png"):
+                with open(os.path.join(image_dir, name), "wb") as image_file:
+                    image_file.write(b"abc")
+
+            budget = ImageBudget(
+                max_count=2,
+                max_image_bytes=3,
+                max_total_bytes=5,
+            )
+            with self.assertRaises(ResourceLimitError):
+                _collect_images_under_output(output_dir, budget=budget)
+
     def test_hybrid_health_probe_blocks_private_url_before_request(self):
         with mock.patch(
             "docreader.parser.opendataloader_parser.is_ssrf_safe_url",
@@ -100,7 +117,13 @@ class OpenDataLoaderParserTest(unittest.TestCase):
     def test_parse_reads_markdown_and_images(self, mock_convert, mock_avail):
         mock_avail.return_value = (True, "")
 
-        def fake_convert(pdf_path, output_dir, image_dir, overrides=None):
+        def fake_convert(
+            pdf_path,
+            output_dir,
+            image_dir,
+            overrides=None,
+            is_cancelled=None,
+        ):
             stem = os.path.splitext(os.path.basename(pdf_path))[0]
             md_path = os.path.join(output_dir, f"{stem}.md")
             with open(md_path, "w") as f:
@@ -112,7 +135,11 @@ class OpenDataLoaderParserTest(unittest.TestCase):
         mock_convert.side_effect = fake_convert
 
         parser = OpenDataLoaderParser(file_name="doc.pdf", file_type="pdf")
-        doc = parser.parse_into_text(b"%PDF-1.4 fake")
+        with mock.patch(
+            "docreader.parser.pdf_parser.validate_pdf_input_page_count",
+            return_value=1,
+        ):
+            doc = parser.parse_into_text(b"%PDF-1.4 fake")
         self.assertIn("# Hello", doc.content)
         self.assertIn("images/pic.png", doc.content)
         self.assertIn("images/pic.png", doc.images)

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -102,25 +103,34 @@ func isValidURL(url string) bool {
 	return false
 }
 
-// calculateFileHash calculates MD5 hash of a file
-func calculateFileHash(file *multipart.FileHeader) (string, error) {
+type fileContentHashes struct {
+	SHA256    string
+	LegacyMD5 string
+}
+
+// calculateMultipartFileContentHashes 单次读取同时计算新 SHA-256 身份和旧 MD5 兼容键。
+func calculateMultipartFileContentHashes(file *multipart.FileHeader) (fileContentHashes, error) {
 	f, err := file.Open()
 	if err != nil {
-		return "", err
+		return fileContentHashes{}, err
 	}
 	defer f.Close()
 
-	h := md5.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	sha256Hash := sha256.New()
+	legacyMD5Hash := md5.New()
+	if _, err := io.Copy(io.MultiWriter(sha256Hash, legacyMD5Hash), f); err != nil {
+		return fileContentHashes{}, err
 	}
 
 	// Reset file pointer for subsequent operations
 	if _, err := f.Seek(0, 0); err != nil {
-		return "", err
+		return fileContentHashes{}, err
 	}
 
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return fileContentHashes{
+		SHA256:    hex.EncodeToString(sha256Hash.Sum(nil)),
+		LegacyMD5: hex.EncodeToString(legacyMD5Hash.Sum(nil)),
+	}, nil
 }
 
 func calculateStr(strList ...string) string {

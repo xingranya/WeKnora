@@ -99,6 +99,7 @@ class ExcelParser(BaseParser):
         
         # Process each sheet in the Excel file
         for excel_sheet_name in excel_file.sheet_names:
+            self.raise_if_cancelled()
             df = _read_sheet_dataframe(
                 excel_file,
                 excel_sheet_name,
@@ -109,6 +110,7 @@ class ExcelParser(BaseParser):
 
             # Process each row in the DataFrame
             for _, row in df.iterrows():
+                self.raise_if_cancelled()
                 page_content = []
                 # Build key-value pairs for non-null values
                 for k, v in row.items():

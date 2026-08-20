@@ -151,7 +151,7 @@ func (c *PaddleOCRVLCloudReader) submitJob(ctx context.Context, req *types.ReadR
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("API status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result paddleOCRVLCloudSubmitResponse
@@ -159,7 +159,7 @@ func (c *PaddleOCRVLCloudReader) submitJob(ctx context.Context, req *types.ReadR
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if result.Data.JobID == "" {
-		return "", fmt.Errorf("API returned no jobId: %s", string(respBody))
+		return "", fmt.Errorf("API returned no jobId (response_bytes=%d)", len(respBody))
 	}
 
 	logger.Infof(context.Background(), "[PaddleOCR-VL Cloud] job submitted: jobId=%s", result.Data.JobID)
@@ -214,7 +214,7 @@ func (c *PaddleOCRVLCloudReader) pollJob(ctx context.Context, jobID string) (str
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			logger.Errorf(context.Background(), "[PaddleOCR-VL Cloud] poll #%d status %d: %s", pollCount, resp.StatusCode, string(respBody))
+			logger.Errorf(context.Background(), "[PaddleOCR-VL Cloud] poll #%d status %d response_bytes=%d", pollCount, resp.StatusCode, len(respBody))
 			sleepCtx(ctx, paddleOCRVLCloudPollInterval)
 			continue
 		}

@@ -23,11 +23,17 @@ import os
 import re
 import statistics
 import threading
+from collections.abc import Callable
 
 from docreader.config import CONFIG
+from docreader.limits import ImageBudget, ParseCancelledError, ResourceLimitError
 from docreader.models.document import Document
 from docreader.parser.base_parser import BaseParser
-from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.concurrency import (
+    cancellable_lock,
+    parser_worker_limit,
+    terminate_process_pool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +168,31 @@ def _close_pdfium_resource(resource) -> None:
 
 def _normalize_image_quality(quality: int) -> int:
     return min(95, max(1, quality))
+
+
+def _validate_pdf_page_count(page_count: int) -> None:
+    if page_count > CONFIG.pdf_max_pages:
+        raise ResourceLimitError(
+            f"DocReader PDF page count {page_count} exceeds "
+            f"limit {CONFIG.pdf_max_pages}"
+        )
+
+
+def validate_pdf_input_page_count(
+    content: bytes,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> int:
+    """在进入任一 PDF 引擎前读取页数，并应用统一硬上限。"""
+    import pypdfium2 as pdfium
+
+    with cancellable_lock(_PDFIUM_LOCK, is_cancelled):
+        pdf = pdfium.PdfDocument(content)
+        try:
+            page_count = len(pdf)
+            _validate_pdf_page_count(page_count)
+            return page_count
+        finally:
+            _close_pdfium_resource(pdf)
 
 
 def _classify_page(image_area_ratio: float, text_len: int) -> str:
@@ -534,6 +565,8 @@ def _extract_vector_figure_clips(
     scale: float,
     quality: int,
     max_edge: int,
+    budget: ImageBudget | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> list:
     """Render vector figure regions anchored at each ``Figure N.`` caption on the page.
 
@@ -555,8 +588,16 @@ def _extract_vector_figure_clips(
         if not caption_indices:
             return []
 
+        if budget is None:
+            budget = ImageBudget(
+                CONFIG.max_image_count,
+                CONFIG.max_image_size_bytes,
+                CONFIG.max_total_image_size_bytes,
+            )
         results: list = []
         for fig_idx, cap_i in enumerate(caption_indices):
+            if is_cancelled is not None and is_cancelled():
+                raise ParseCancelledError("DocReader request was cancelled")
             cap_line = lines[cap_i]["text"].strip()
             m = _FIGURE_CAPTION_SEARCH_RE.search(cap_line)
             if m:
@@ -579,6 +620,7 @@ def _extract_vector_figure_clips(
 
             bbox = _expand_chart_bbox(bbox, page_w, page_h, margin_frac=0.06)
             jpeg = _render_page_clip_jpeg(page, bbox, scale, quality, max_edge)
+            budget.add_bytes(jpeg)
             fname = f"{base_name}_p{page_index + 1}_fig{fig_idx + 1}.jpg"
             ref_path = f"images/{fname}"
             results.append(
@@ -590,6 +632,8 @@ def _extract_vector_figure_clips(
                 )
             )
         return results
+    except (ParseCancelledError, ResourceLimitError):
+        raise
     except Exception:
         logger.debug("vector figure clip failed on page %d", page_index, exc_info=True)
         return []
@@ -1065,7 +1109,14 @@ def _select_mp_context():
 
 
 def _render_pages_parallel(
-    content: bytes, indices: list, scale: float, quality: int, max_edge: int, workers: int
+    content: bytes,
+    indices: list,
+    scale: float,
+    quality: int,
+    max_edge: int,
+    workers: int,
+    is_cancelled: Callable[[], bool] | None = None,
+    budget: ImageBudget | None = None,
 ) -> dict | None:
     """Render ``indices`` in parallel. Returns ``{index: jpeg_bytes}`` or None.
 
@@ -1073,6 +1124,15 @@ def _render_pages_parallel(
     parallelism is disabled, only one page is requested, or no usable
     multiprocessing start method exists).
     """
+    if budget is None:
+        budget = ImageBudget(
+            CONFIG.max_image_count,
+            CONFIG.max_image_size_bytes,
+            CONFIG.max_total_image_size_bytes,
+        )
+    budget.ensure_count(len(indices))
+    if is_cancelled is not None and is_cancelled():
+        raise ParseCancelledError("DocReader request was cancelled")
     if workers <= 1 or len(indices) <= 1:
         return None
     ctx = _select_mp_context()
@@ -1080,9 +1140,11 @@ def _render_pages_parallel(
         return None
 
     import tempfile
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
     tmp_path = None
+    executor = None
+    pending = set()
     try:
         with tempfile.NamedTemporaryFile(
             prefix="docreader_render_", suffix=".pdf", delete=False
@@ -1091,24 +1153,51 @@ def _render_pages_parallel(
             tmp_path = tmp.name
 
         max_workers = min(workers, len(indices))
-        tasks = [(i, scale, quality, max_edge) for i in indices]
         result: dict = {}
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=max_workers,
             mp_context=ctx,
             initializer=_render_pool_init,
             initargs=(tmp_path,),
-        ) as ex:
-            for index, jpeg in ex.map(_render_pool_task, tasks, chunksize=4):
+        )
+        pending = {
+            executor.submit(_render_pool_task, (i, scale, quality, max_edge))
+            for i in indices
+        }
+        while pending:
+            if is_cancelled is not None and is_cancelled():
+                raise ParseCancelledError("DocReader request was cancelled")
+            completed, pending = wait(
+                pending,
+                timeout=0.1,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in completed:
+                index, jpeg = future.result()
+                budget.add_bytes(jpeg)
                 result[index] = jpeg
+        executor.shutdown(wait=True)
+        executor = None
         return result
+    except (ParseCancelledError, ResourceLimitError):
+        for future in pending:
+            future.cancel()
+        if executor is not None:
+            terminate_process_pool(executor)
+            executor = None
+        raise
     except Exception:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+            executor = None
         logger.warning(
             "parallel page rendering failed; falling back to serial",
             exc_info=True,
         )
         return None
     finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
         if tmp_path:
             try:
                 os.unlink(tmp_path)
@@ -1117,7 +1206,14 @@ def _render_pages_parallel(
 
 
 def _render_scanned_pages(
-    pdf, content: bytes, indices: list, scale: float, quality: int, max_edge: int
+    pdf,
+    content: bytes,
+    indices: list,
+    scale: float,
+    quality: int,
+    max_edge: int,
+    is_cancelled: Callable[[], bool] | None = None,
+    budget: ImageBudget | None = None,
 ) -> dict:
     """Render the given (scanned) page indices to JPEG bytes.
 
@@ -1125,20 +1221,52 @@ def _render_scanned_pages(
     transparently falling back to serial rendering on the already-open ``pdf``
     handle when parallelism is unavailable or fails.
     """
+    if budget is None:
+        budget = ImageBudget(
+            CONFIG.max_image_count,
+            CONFIG.max_image_size_bytes,
+            CONFIG.max_total_image_size_bytes,
+        )
+    budget.ensure_count(len(indices))
     parallel = _render_pages_parallel(
-        content, indices, scale, quality, max_edge, CONFIG.pdf_render_parallelism
+        content,
+        indices,
+        scale,
+        quality,
+        max_edge,
+        CONFIG.pdf_render_parallelism,
+        is_cancelled,
+        budget,
     )
     if parallel is not None:
         return parallel
 
     out: dict = {}
     for i in indices:
+        if is_cancelled is not None and is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")
         page = pdf[i]
         try:
-            out[i] = _render_page_to_jpeg(page, scale, quality, max_edge)
+            jpeg = _render_page_to_jpeg(page, scale, quality, max_edge)
+            budget.add_bytes(jpeg)
+            out[i] = jpeg
         finally:
             _close_pdfium_resource(page)
     return out
+
+
+def _accumulate_rendered_image_budget(image: bytes, current_total: int) -> int:
+    if len(image) > CONFIG.max_image_size_bytes:
+        raise ResourceLimitError(
+            f"DocReader image size {len(image)} bytes exceeds limit "
+            f"{CONFIG.max_image_size_bytes} bytes"
+        )
+    if current_total > CONFIG.max_total_image_size_bytes - len(image):
+        raise ResourceLimitError(
+            "DocReader total image bytes exceed limit "
+            f"{CONFIG.max_total_image_size_bytes} bytes"
+        )
+    return current_total + len(image)
 
 
 def _select_embedded_images(
@@ -1157,6 +1285,9 @@ def _select_embedded_images(
     after filtering by size, page-area share, cross-page repetition (logos /
     watermarks), exact in-page duplicates and a hard count cap.
     """
+    if max_images <= 0:
+        return []
+
     from collections import defaultdict
 
     hash_pages = defaultdict(set)
@@ -1185,21 +1316,39 @@ def _select_embedded_images(
     return kept
 
 
-def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) -> dict:
-    """Extract filtered embedded figures from native text pages.
-
-    Returns ``{page_index: [(ref_path, base64_jpeg, y_top), ...]}`` ordered so
-    callers can place figures after the page text in top-to-bottom order.
-    """
+def _extract_embedded_images(
+    pdf,
+    classes,
+    raw,
+    base_name: str,
+    quality: int,
+    budget: ImageBudget | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict:
+    """在统一预算内提取正文页图片，并返回按页面组织的 base64 JPEG。"""
     import hashlib
 
     text_indices = [i for i, c in enumerate(classes) if c == "text"]
     if not text_indices:
         return {}
+    if budget is None:
+        budget = ImageBudget(
+            CONFIG.max_image_count,
+            CONFIG.max_image_size_bytes,
+            CONFIG.max_total_image_size_bytes,
+        )
 
-    candidates: list = []  # parallel to meta; holds heavy pixel data
+    # 候选图片先压缩到最终尺寸再保留，避免为所有对象长期持有 PIL 原始像素。
+    candidate_budget = ImageBudget(
+        budget.remaining_count,
+        budget.max_image_bytes,
+        budget.remaining_total_bytes,
+    )
+    candidates: list = []
     meta: list = []
     for i in text_indices:
+        if is_cancelled is not None and is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")
         page = pdf[i]
         try:
             width, height = page.get_size()
@@ -1207,6 +1356,8 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
             if page_area <= 0:
                 continue
             for obj in page.get_objects():
+                if is_cancelled is not None and is_cancelled():
+                    raise ParseCancelledError("DocReader request was cancelled")
                 if obj.type != raw.FPDF_PAGEOBJ_IMAGE:
                     continue
                 try:
@@ -1216,17 +1367,45 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
                 area_ratio = abs((right - left) * (top - bottom)) / page_area
                 if area_ratio < EMBED_MIN_AREA_RATIO:
                     continue  # cheap skip before decoding (logos/decorations)
+                bitmap = None
+                pil = None
                 try:
-                    pil = obj.get_bitmap().to_pil()
+                    bitmap = obj.get_bitmap()
+                    pil = bitmap.to_pil()
+                    image_width, image_height = pil.size
+                    if pil.mode not in ("RGB", "L"):
+                        converted = pil.convert("RGB")
+                        pil.close()
+                        pil = converted
+                    max_edge = CONFIG.pdf_render_max_edge
+                    if max_edge > 0 and max(pil.size) > max_edge:
+                        resize_ratio = max_edge / max(pil.size)
+                        resized = pil.resize(
+                            (
+                                max(1, int(pil.width * resize_ratio)),
+                                max(1, int(pil.height * resize_ratio)),
+                            )
+                        )
+                        pil.close()
+                        pil = resized
+                    buf = io.BytesIO()
+                    pil.save(buf, format="JPEG", quality=quality, optimize=True)
+                    jpeg = buf.getvalue()
                 except Exception:
                     continue
-                content_hash = hashlib.md5(pil.tobytes()).hexdigest()
-                candidates.append((i, top, pil))
+                finally:
+                    if pil is not None:
+                        pil.close()
+                    _close_pdfium_resource(bitmap)
+
+                candidate_budget.add_bytes(jpeg)
+                content_hash = hashlib.sha256(jpeg).hexdigest()
+                candidates.append((i, top, jpeg))
                 meta.append(
                     {
                         "page": i,
-                        "width": pil.width,
-                        "height": pil.height,
+                        "width": image_width,
+                        "height": image_height,
                         "area_ratio": area_ratio,
                         "hash": content_hash,
                     }
@@ -1234,31 +1413,30 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
         finally:
             _close_pdfium_resource(page)
 
-    kept_idx = _select_embedded_images(meta, len(text_indices))
+    kept_idx = _select_embedded_images(
+        meta,
+        len(text_indices),
+        max_images=min(EMBED_MAX_IMAGES, budget.remaining_count),
+    )
     if not kept_idx:
         return {}
+
+    selected = [candidates[idx] for idx in kept_idx]
+    candidates.clear()
 
     from collections import defaultdict
 
     result: dict = defaultdict(list)
     per_page_count: dict = defaultdict(int)
-    max_edge = CONFIG.pdf_render_max_edge
-    for idx in kept_idx:
-        page_i, y_top, pil = candidates[idx]
-        if pil.mode not in ("RGB", "L"):
-            pil = pil.convert("RGB")
-        if max_edge > 0 and max(pil.size) > max_edge:
-            ratio = max_edge / max(pil.size)
-            pil = pil.resize(
-                (max(1, int(pil.width * ratio)), max(1, int(pil.height * ratio)))
-            )
-        buf = io.BytesIO()
-        pil.save(buf, format="JPEG", quality=quality, optimize=True)
+    for page_i, y_top, jpeg in selected:
+        if is_cancelled is not None and is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")
+        budget.add_bytes(jpeg)
         per_page_count[page_i] += 1
         fname = f"{base_name}_p{page_i+1}_img{per_page_count[page_i]}.jpg"
         ref_path = f"images/{fname}"
         result[page_i].append(
-            (ref_path, base64.b64encode(buf.getvalue()).decode("utf-8"), y_top)
+            (ref_path, base64.b64encode(jpeg).decode("utf-8"), y_top)
         )
 
     # Top-to-bottom within each page (PDF y grows upward, so larger y first).
@@ -1327,12 +1505,19 @@ class PDFScannedParser(BaseParser):
         try:
             # pdfium lock first, then the render worker limit — same order as
             # PDFParser._route so the two never deadlock against each other.
-            with _PDFIUM_LOCK, parser_worker_limit(
-                "pdf_render", CONFIG.pdf_render_max_workers
+            with cancellable_lock(_PDFIUM_LOCK, self._is_cancelled), parser_worker_limit(
+                "pdf_render", CONFIG.pdf_render_max_workers, self._is_cancelled
             ):
                 pdf = pdfium.PdfDocument(content)
                 try:
                     page_count = len(pdf)
+                    _validate_pdf_page_count(page_count)
+                    budget = ImageBudget(
+                        CONFIG.max_image_count,
+                        CONFIG.max_image_size_bytes,
+                        CONFIG.max_total_image_size_bytes,
+                    )
+                    budget.ensure_count(page_count)
                     scale = max(1, CONFIG.pdf_render_dpi) / 72
                     quality = _normalize_image_quality(CONFIG.pdf_jpeg_quality)
 
@@ -1343,15 +1528,18 @@ class PDFScannedParser(BaseParser):
                         scale,
                         quality,
                         CONFIG.pdf_render_max_edge,
+                        self._is_cancelled,
+                        budget,
                     )
                 finally:
                     _close_pdfium_resource(pdf)
 
             for i in range(page_count):
+                self.raise_if_cancelled()
                 page_filename = f"{base_name}_page_{i+1}.jpg"
                 ref_path = f"images/{page_filename}"
                 markdown_lines.append(f"![{page_filename}]({ref_path})")
-                images[ref_path] = base64.b64encode(rendered[i]).decode("utf-8")
+                images[ref_path] = base64.b64encode(rendered.pop(i)).decode("utf-8")
 
             text = "\n\n".join(markdown_lines)
             return Document(
@@ -1362,6 +1550,8 @@ class PDFScannedParser(BaseParser):
                     "page_count": page_count,
                 },
             )
+        except (ParseCancelledError, ResourceLimitError):
+            raise
         except Exception as e:
             logger.exception("PDFScannedParser failed to parse PDF: %s", e)
             raise e
@@ -1403,7 +1593,9 @@ class PDFParser(BaseParser):
                 self.file_name,
             )
             doc = PDFScannedParser(
-                file_name=self.file_name, file_type=self.file_type
+                file_name=self.file_name,
+                file_type=self.file_type,
+                _is_cancelled=self._is_cancelled,
             ).parse_into_text(content)
 
             # Align metadata fields with automatic scanned route
@@ -1418,6 +1610,8 @@ class PDFParser(BaseParser):
 
         try:
             return self._route(content)
+        except (ParseCancelledError, ResourceLimitError):
+            raise
         except Exception:
             logger.exception(
                 "PDFParser: per-page routing failed for %s; "
@@ -1425,7 +1619,9 @@ class PDFParser(BaseParser):
                 self.file_name,
             )
             return PDFScannedParser(
-                file_name=self.file_name, file_type=self.file_type
+                file_name=self.file_name,
+                file_type=self.file_type,
+                _is_cancelled=self._is_cancelled,
             ).parse_into_text(content)
 
     def _route(self, content: bytes) -> Document:
@@ -1433,7 +1629,7 @@ class PDFParser(BaseParser):
         # route (both the text pass and the render pass) is what prevents the
         # concurrent-upload deadlock; the trailing markdown assembly is cheap
         # pure-Python so keeping it inside the lock costs nothing meaningful.
-        with _PDFIUM_LOCK:
+        with cancellable_lock(_PDFIUM_LOCK, self._is_cancelled):
             return self._route_locked(content)
 
     def _route_locked(self, content: bytes) -> Document:
@@ -1448,12 +1644,19 @@ class PDFParser(BaseParser):
         images: dict = {}
         try:
             page_count = len(pdf)
+            _validate_pdf_page_count(page_count)
+            budget = ImageBudget(
+                CONFIG.max_image_count,
+                CONFIG.max_image_size_bytes,
+                CONFIG.max_total_image_size_bytes,
+            )
 
             # Pass 1: cheap text extraction + image-area classification.
             texts: list = []
             classes: list = []
             vector_clips: dict = {}
             for i in range(page_count):
+                self.raise_if_cancelled()
                 page = pdf[i]
                 try:
                     plain = _extract_page_text(page)
@@ -1482,6 +1685,8 @@ class PDFParser(BaseParser):
                             scale,
                             quality,
                             CONFIG.pdf_render_max_edge,
+                            budget,
+                            self._is_cancelled,
                         )
                         if clips:
                             vector_clips[i] = clips
@@ -1499,10 +1704,13 @@ class PDFParser(BaseParser):
 
             texts = _strip_repeating_lines(texts, classes)
             scanned_indices = [i for i, c in enumerate(classes) if c == "scanned"]
+            budget.ensure_count(len(scanned_indices))
 
             # Pass 2: render only the scanned pages (heavy work, rate-limited).
             if scanned_indices:
-                with parser_worker_limit("pdf_render", CONFIG.pdf_render_max_workers):
+                with parser_worker_limit(
+                    "pdf_render", CONFIG.pdf_render_max_workers, self._is_cancelled
+                ):
                     rendered = _render_scanned_pages(
                         pdf,
                         content,
@@ -1510,8 +1718,12 @@ class PDFParser(BaseParser):
                         scale,
                         quality,
                         CONFIG.pdf_render_max_edge,
+                        self._is_cancelled,
+                        budget,
                     )
-                for i, img_bytes in rendered.items():
+                for i in sorted(rendered):
+                    self.raise_if_cancelled()
+                    img_bytes = rendered.pop(i)
                     ref_path = f"images/{base_name}_page_{i+1}.jpg"
                     images[ref_path] = base64.b64encode(img_bytes).decode("utf-8")
 
@@ -1520,7 +1732,13 @@ class PDFParser(BaseParser):
             embedded: dict = {}
             if EXTRACT_EMBEDDED_IMAGES:
                 embedded = _extract_embedded_images(
-                    pdf, classes, pdfium_r, base_name, quality
+                    pdf,
+                    classes,
+                    pdfium_r,
+                    base_name,
+                    quality,
+                    budget,
+                    self._is_cancelled,
                 )
                 for refs in embedded.values():
                     for ref_path, b64, _y in refs:

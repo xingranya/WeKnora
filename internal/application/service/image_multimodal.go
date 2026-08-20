@@ -140,8 +140,9 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("unmarshal image multimodal payload: %w", err)
 	}
 
-	logger.Infof(ctx, "[ImageMultimodal] Processing image: chunk=%s, url=%s, ocr=%v, caption=%v",
-		payload.ChunkID, payload.ImageURL, payload.EnableOCR, payload.EnableCaption)
+	logger.Infof(ctx, "[ImageMultimodal] Processing image: knowledge=%s chunk=%s index=%d url=%q ocr=%v caption=%v",
+		payload.KnowledgeID, payload.ChunkID, payload.ImageIndex, secutils.SanitizeAuditLog(payload.ImageURL),
+		payload.EnableOCR, payload.EnableCaption)
 
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
 	if payload.Language != "" {
@@ -157,8 +158,9 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 	}
 	if drop {
 		logger.Infof(ctx,
-			"[ImageMultimodal] Dropping task chunk=%s knowledge=%s kb=%s image=%s",
-			payload.ChunkID, payload.KnowledgeID, payload.KnowledgeBaseID, payload.ImageURL)
+			"[ImageMultimodal] Dropping task chunk=%s knowledge=%s kb=%s image_index=%d url=%q",
+			payload.ChunkID, payload.KnowledgeID, payload.KnowledgeBaseID, payload.ImageIndex,
+			logger.AuditText(payload.ImageURL, 4096))
 		// Still count this image toward the parent finalize gate so a batch
 		// of dropped orphans cannot strand multimodal:pending forever.
 		s.checkAndFinalizeAllImages(ctx, payload)
@@ -177,7 +179,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		if parent != nil {
 			name := fmt.Sprintf("multimodal.image[%d]", payload.ImageIndex)
 			imgSpan = tracker.BeginSubSpan(ctx, parent, name, types.SpanKindGeneration, types.JSONMap{
-				"image_url":         payload.ImageURL,
+				"image_url":         secutils.SanitizeAuditLog(payload.ImageURL),
 				"image_source_type": payload.ImageSourceType,
 				"enable_ocr":        payload.EnableOCR,
 				"enable_caption":    payload.EnableCaption,
@@ -219,8 +221,8 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 			s.checkAndFinalizeAllImages(ctx, payload)
 		} else {
 			logger.Infof(ctx,
-				"[ImageMultimodal] Skip finalize on retryable error for %s (will count on last attempt)",
-				payload.ImageURL)
+				"[ImageMultimodal] Skip finalize on retryable error for knowledge=%s image_index=%d url=%q",
+				payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096))
 		}
 	}()
 
@@ -245,7 +247,8 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 	// image, skip it (deferred finalize will count it).
 	imgBytes, readErr := s.readImageBytes(ctx, payload)
 	if readErr != nil {
-		logger.Errorf(ctx, "[ImageMultimodal] Skip unreadable image %s: %v", payload.ImageURL, readErr)
+		logger.Errorf(ctx, "[ImageMultimodal] Skip unreadable image: knowledge=%s image_index=%d url=%q err=%v",
+			payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096), readErr)
 		imgOut["skipped"] = "unreadable_image"
 		imgOut["read_error"] = readErr.Error()
 		return nil
@@ -261,7 +264,8 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		prompt := vlmOCRPrompt
 		if payload.ImageSourceType == "scanned_pdf" {
 			prompt = vlmOCRScannedPDFPrompt
-			logger.Infof(ctx, "[ImageMultimodal] Using scanned PDF prompt for OCR: %s", payload.ImageURL)
+			logger.Infof(ctx, "[ImageMultimodal] Using scanned PDF prompt for OCR: knowledge=%s image_index=%d url=%q",
+				payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096))
 			imgOut["ocr_prompt"] = "scanned_pdf"
 		} else {
 			imgOut["ocr_prompt"] = "default"
@@ -270,16 +274,21 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 
 		ocrText, ocrErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, prompt)
 		if ocrErr != nil {
-			logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
+			logger.Warnf(ctx, "[ImageMultimodal] OCR failed: knowledge=%s image_index=%d url=%q err=%v",
+				payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096), ocrErr)
 			imgOut["ocr_error"] = ocrErr.Error()
 		} else {
 			ocrText = sanitizeOCRText(ocrText)
 			if ocrText != "" {
 				imageInfo.OCRText = ocrText
 				imgOut["ocr_chars"] = len([]rune(ocrText))
-				imgOut["ocr_preview"] = previewText(ocrText, 200)
+				imgOut["ocr_preview"] = secutils.SanitizeAuditLog(previewText(ocrText, 200))
+				logger.Infof(ctx, "[ImageMultimodal] OCR completed: knowledge=%s image_index=%d url=%q text=%q",
+					payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096),
+					logger.AuditText(ocrText, 4096))
 			} else {
-				logger.Warnf(ctx, "[ImageMultimodal] OCR returned empty/invalid content for %s, discarded", payload.ImageURL)
+				logger.Warnf(ctx, "[ImageMultimodal] OCR returned empty/invalid content: knowledge=%s image_index=%d url=%q",
+					payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096))
 				imgOut["ocr_chars"] = 0
 				imgOut["ocr_skipped"] = "empty_or_invalid"
 			}
@@ -288,12 +297,16 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 
 	caption, capErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, buildVLMCaptionPrompt(ctx, vlmCfg))
 	if capErr != nil {
-		logger.Warnf(ctx, "[ImageMultimodal] Caption failed for %s: %v", payload.ImageURL, capErr)
+		logger.Warnf(ctx, "[ImageMultimodal] Caption failed: knowledge=%s image_index=%d url=%q err=%v",
+			payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096), capErr)
 		imgOut["caption_error"] = capErr.Error()
 	} else if caption != "" {
 		imageInfo.Caption = caption
 		imgOut["caption_chars"] = len([]rune(caption))
-		imgOut["caption_preview"] = previewText(caption, 200)
+		imgOut["caption_preview"] = secutils.SanitizeAuditLog(previewText(caption, 200))
+		logger.Infof(ctx, "[ImageMultimodal] Caption completed: knowledge=%s image_index=%d url=%q caption=%q",
+			payload.KnowledgeID, payload.ImageIndex, logger.AuditText(payload.ImageURL, 4096),
+			logger.AuditText(caption, 4096))
 	}
 
 	// Build child chunks for OCR and caption results
@@ -347,8 +360,9 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		return handleErr
 	}
 	for _, c := range newChunks {
-		logger.Infof(ctx, "[ImageMultimodal] Created %s chunk %s for image %s, len=%d",
-			c.ChunkType, c.ID, payload.ImageURL, len(c.Content))
+		logger.Infof(ctx, "[ImageMultimodal] Created %s chunk %s for knowledge=%s image_index=%d url=%q content=%q",
+			c.ChunkType, c.ID, payload.KnowledgeID, payload.ImageIndex,
+			logger.AuditText(payload.ImageURL, 4096), logger.AuditText(c.Content, 4096))
 	}
 
 	// Index chunks so they can be retrieved

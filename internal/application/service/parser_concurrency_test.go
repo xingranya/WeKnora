@@ -139,22 +139,29 @@ func TestTemporaryDocumentReadCancelsWhileWaitingForMinerU(t *testing.T) {
 func TestTemporaryDocumentReadDoesNotGateOtherParsers(t *testing.T) {
 	docparser.ConfigureConcurrency(nil)
 	t.Cleanup(func() { docparser.ConfigureConcurrency(nil) })
-	_, releaseKnowledge, err := gateParserRead(
+	t.Setenv("DOCREADER_GRPC_MAX_WORKERS", "1")
+	t.Setenv("WEKNORA_DOCREADER_MAX_CONCURRENCY", "1")
+	_, releaseKnowledge, err := gateParserReadForRoute(
 		context.Background(),
-		docparser.MinerUEngineName,
-		map[string]string{"mineru_max_concurrency": "1"},
+		docparser.BuiltinEngineName,
+		"pdf",
+		false,
+		nil,
 	)
 	require.NoError(t, err)
 	defer releaseKnowledge()
 
 	reader := &signalingTemporaryDocumentReader{entered: make(chan context.Context, 1)}
-	result, err := readTemporaryDocumentWithParserGate(
+	leaseCtx, release, err := gateParserReadForRoute(
 		context.Background(),
-		docparser.BuiltinEngineName,
+		docparser.SimpleEngineName,
+		"txt",
+		false,
 		nil,
-		reader,
-		&types.ReadRequest{FileName: "document.docx"},
 	)
+	require.NoError(t, err)
+	release()
+	result, err := reader.Read(leaseCtx, &types.ReadRequest{FileName: "document.txt"})
 	require.NoError(t, err)
 	require.Equal(t, "parsed", result.MarkdownContent)
 }
@@ -164,4 +171,69 @@ func TestParserConcurrencyLimitUsesEnvironmentOverride(t *testing.T) {
 	require.Equal(t, 3, parserConcurrencyLimit(map[string]string{
 		"mineru_max_concurrency": "2",
 	}))
+}
+
+func TestDocReaderConcurrencyLimitNeverExceedsWorkerCount(t *testing.T) {
+	t.Setenv("DOCREADER_GRPC_MAX_WORKERS", "4")
+	t.Setenv("WEKNORA_DOCREADER_MAX_CONCURRENCY", "10")
+	require.Equal(t, 4, docReaderConcurrencyLimit())
+
+	t.Setenv("WEKNORA_DOCREADER_MAX_CONCURRENCY", "2")
+	require.Equal(t, 2, docReaderConcurrencyLimit())
+}
+
+func TestRemoteDocReaderRoutesShareWorkerGate(t *testing.T) {
+	docparser.ConfigureConcurrency(nil)
+	t.Cleanup(func() { docparser.ConfigureConcurrency(nil) })
+	t.Setenv("DOCREADER_GRPC_MAX_WORKERS", "1")
+	t.Setenv("WEKNORA_DOCREADER_MAX_CONCURRENCY", "1")
+
+	_, releaseFirst, err := gateParserReadForRoute(
+		context.Background(),
+		docparser.BuiltinEngineName,
+		"pdf",
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	firstReleased := false
+	t.Cleanup(func() {
+		if !firstReleased {
+			releaseFirst()
+		}
+	})
+
+	acquired := make(chan func(), 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		_, release, acquireErr := gateParserReadForRoute(
+			ctx,
+			"remote-only",
+			"pdf",
+			false,
+			nil,
+		)
+		if acquireErr != nil {
+			acquired <- nil
+			return
+		}
+		acquired <- release
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("远端解析任务不应绕过 DocReader worker 闸门")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirst()
+	firstReleased = true
+	select {
+	case release := <-acquired:
+		require.NotNil(t, release)
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("DocReader 槽位释放后，等待任务应继续执行")
+	}
 }

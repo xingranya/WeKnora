@@ -89,11 +89,14 @@ func (c *MinerUReader) Read(ctx context.Context, req *types.ReadRequest) (*types
 	if size <= 0 {
 		size = int64(len(req.FileContent))
 	}
-	logger.Infof(context.Background(), "[MinerU] Parsing file=%s size=%d via %s", req.FileName, size, c.endpoint)
+	logger.Infof(context.Background(), "[MinerU] Parsing file: size=%d type=%s", size, req.FileType)
 
 	mdContent, imagesB64, err := c.callFileParse(ctx, req, req.FileName, req.FileType)
 	if err != nil {
 		return nil, fmt.Errorf("MinerU file_parse: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// MinerU already returns markdown with embedded HTML blocks (e.g. <table>, <details>).
@@ -102,7 +105,7 @@ func (c *MinerUReader) Read(ctx context.Context, req *types.ReadRequest) (*types
 	mdContent = normalizeMinerUMarkdown(mdContent)
 
 	// Process images: decode base64, build ImageRef list, replace refs in markdown
-	imageRefs, mdContent, err := c.processImages(mdContent, imagesB64)
+	imageRefs, mdContent, err := c.processImagesWithContext(ctx, mdContent, imagesB64)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +178,17 @@ func minerUResultLookupKeys(uploadFileName string) []string {
 }
 
 func parseMinerUFileParseResponse(respBody []byte, uploadFileName string) (string, map[string]string, string, error) {
+	return parseMinerUFileParseResponseContext(context.Background(), respBody, uploadFileName)
+}
+
+func parseMinerUFileParseResponseContext(
+	ctx context.Context,
+	respBody []byte,
+	uploadFileName string,
+) (string, map[string]string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, "", err
+	}
 	var envelope struct {
 		Results map[string]json.RawMessage `json:"results"`
 	}
@@ -187,6 +201,9 @@ func parseMinerUFileParseResponse(respBody []byte, uploadFileName string) (strin
 
 	keys := minerUResultLookupKeys(uploadFileName)
 	for key := range envelope.Results {
+		if err := ctx.Err(); err != nil {
+			return "", nil, "", err
+		}
 		matched := false
 		for _, preferred := range keys {
 			if key == preferred {
@@ -199,6 +216,9 @@ func parseMinerUFileParseResponse(respBody []byte, uploadFileName string) (strin
 		}
 	}
 	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return "", nil, "", err
+		}
 		raw, ok := envelope.Results[key]
 		if !ok {
 			continue
@@ -212,6 +232,14 @@ func parseMinerUFileParseResponse(respBody []byte, uploadFileName string) (strin
 		}
 		if len(entry.Images) > mineruMaxImageCount {
 			return "", nil, "", fmt.Errorf("MinerU image count exceeds %d limit", mineruMaxImageCount)
+		}
+		if err := validateMinerUImageLimits(
+			ctx,
+			entry.Images,
+			mineruMaxImageBytes,
+			mineruMaxDecodedImages,
+		); err != nil {
+			return "", nil, "", err
 		}
 		if entry.MDContent != "" || len(entry.Images) > 0 {
 			return entry.MDContent, entry.Images, key, nil
@@ -291,7 +319,13 @@ func (c *MinerUReader) callFileParse(
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, mineruMaxErrorBytes))
-		return "", nil, fmt.Errorf("MinerU API status %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "[MinerU] API error: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return "", nil, fmt.Errorf(
+			"MinerU API status %d (response_bytes=%d)",
+			resp.StatusCode,
+			len(respBody),
+		)
 	}
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, mineruMaxResponseBytes+1))
@@ -302,26 +336,26 @@ func (c *MinerUReader) callFileParse(
 		return "", nil, fmt.Errorf("MinerU response exceeds %dMB limit", mineruMaxResponseBytes/(1024*1024))
 	}
 
-	if len(respBody) > 4000 {
-		logger.Infof(context.Background(), "[MinerU] Raw response (truncated to 4000 chars): %s ...", string(respBody[:4000]))
-	} else {
-		logger.Infof(context.Background(), "[MinerU] Raw response: %s", string(respBody))
-	}
-
-	// 小响应保留结构化调试；大响应避免额外构造一份完整 JSON 对象。
-	if len(respBody) <= 4*1024*1024 {
-		var rawMap map[string]interface{}
-		if err := json.Unmarshal(respBody, &rawMap); err == nil {
-			c.logMinerUResponseStructure(rawMap, "")
-		}
-	}
-
-	mdContent, imagesB64, resultKey, err := parseMinerUFileParseResponse(respBody, uploadFileName)
+	mdContent, imagesB64, resultKey, err := parseMinerUFileParseResponseContext(ctx, respBody, uploadFileName)
 	if err != nil {
 		return "", nil, err
 	}
 	if resultKey != "" {
-		logger.Infof(context.Background(), "[MinerU] Using response path: results.%s", resultKey)
+		var encodedImageChars int64
+		imagePaths := make([]string, 0, len(imagesB64))
+		for imagePath, encoded := range imagesB64 {
+			encodedImageChars += int64(len(encoded))
+			imagePaths = append(imagePaths, imagePath)
+		}
+		logger.Infof(
+			ctx,
+			"[MinerU] Response parsed: response_bytes=%d markdown=%q image_paths=%q images=%d encoded_image_chars=%d",
+			len(respBody),
+			logger.AuditText(mdContent, 8192),
+			logger.AuditText(strings.Join(imagePaths, ","), 4096),
+			len(imagesB64),
+			encodedImageChars,
+		)
 		return mdContent, imagesB64, nil
 	}
 
@@ -332,13 +366,32 @@ func (c *MinerUReader) callFileParse(
 // processImages decodes base64 images from MinerU response and returns ImageRef list.
 // It also replaces image references in the markdown content.
 func (c *MinerUReader) processImages(mdContent string, imagesB64 map[string]string) ([]types.ImageRef, string, error) {
+	return c.processImagesWithContext(context.Background(), mdContent, imagesB64)
+}
+
+func (c *MinerUReader) processImagesWithContext(
+	ctx context.Context,
+	mdContent string,
+	imagesB64 map[string]string,
+) ([]types.ImageRef, string, error) {
 	if len(imagesB64) > mineruMaxImageCount {
 		return nil, mdContent, fmt.Errorf("MinerU image count exceeds %d limit", mineruMaxImageCount)
+	}
+	if err := validateMinerUImageLimits(
+		ctx,
+		imagesB64,
+		mineruMaxImageBytes,
+		mineruMaxDecodedImages,
+	); err != nil {
+		return nil, mdContent, err
 	}
 	var refs []types.ImageRef
 	var decodedTotal int64
 
 	for ipath, b64Str := range imagesB64 {
+		if err := ctx.Err(); err != nil {
+			return nil, mdContent, err
+		}
 		matchedRefs := mineruImageOriginalRefs(mdContent, ipath)
 		if len(matchedRefs) == 0 {
 			continue
@@ -377,6 +430,9 @@ func (c *MinerUReader) processImages(mdContent string, imagesB64 map[string]stri
 		}
 
 		for _, originalRef := range matchedRefs {
+			if err := ctx.Err(); err != nil {
+				return nil, mdContent, err
+			}
 			refs = append(refs, types.ImageRef{
 				Filename:    ipath,
 				OriginalRef: originalRef,
@@ -389,9 +445,31 @@ func (c *MinerUReader) processImages(mdContent string, imagesB64 map[string]stri
 	return refs, mdContent, nil
 }
 
-// logMinerUResponseStructure logs the structure of the MinerU API response.
-func (c *MinerUReader) logMinerUResponseStructure(obj interface{}, prefix string) {
-	logResponseStructure("MinerU", obj, prefix)
+func validateMinerUImageLimits(
+	ctx context.Context,
+	images map[string]string,
+	maxImageBytes int64,
+	maxTotalBytes int64,
+) error {
+	var decodedTotal int64
+	for _, value := range images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		encoded := value
+		if match := b64DataURIPattern.FindStringSubmatch(value); len(match) == 3 {
+			encoded = match[2]
+		}
+		decodedSize := int64(base64.StdEncoding.DecodedLen(len(encoded)))
+		if decodedSize > maxImageBytes {
+			return fmt.Errorf("MinerU image exceeds %dMB decoded limit", maxImageBytes/(1024*1024))
+		}
+		if decodedTotal > maxTotalBytes-decodedSize {
+			return fmt.Errorf("MinerU decoded images exceed %dMB total limit", maxTotalBytes/(1024*1024))
+		}
+		decodedTotal += decodedSize
+	}
+	return nil
 }
 
 // validateMinerUOutboundURL rejects MinerU endpoints that would reach private

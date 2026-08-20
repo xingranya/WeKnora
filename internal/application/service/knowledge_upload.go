@@ -36,6 +36,7 @@ const (
 	defaultKnowledgeUploadTenantInflight = int64(10 * 1024 * 1024 * 1024)
 	knowledgeUploadRootIdentityKey       = "weknora:knowledge-upload:temp-root-identity"
 	knowledgeUploadRootIdentityFile      = ".weknora-upload-root-id"
+	knowledgeUploadFinalizeGateKey       = "knowledge_upload_finalize"
 )
 
 type knowledgeUploadRuntime struct {
@@ -45,6 +46,7 @@ type knowledgeUploadRuntime struct {
 type knowledgeUploadAtomicCreator interface {
 	CreateKnowledgeWithFileHashLock(
 		ctx context.Context, knowledge *types.Knowledge, sourceFileQuotaBytes int64,
+		compatibleFileHashes ...string,
 	) (existing *types.Knowledge, created bool, err error)
 }
 
@@ -88,6 +90,14 @@ func knowledgeUploadMaxBytes() int64 {
 	return envInt64("KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB", 2048) * 1024 * 1024
 }
 
+func parserUploadMaxBytes(parserEngine string) int64 {
+	parserMaxBytes := docparser.ParserMaxFileSizeBytes(parserEngine)
+	if uploadMaxBytes := knowledgeUploadMaxBytes(); parserMaxBytes > uploadMaxBytes {
+		return uploadMaxBytes
+	}
+	return parserMaxBytes
+}
+
 func knowledgeUploadChunkBytes() (int64, error) {
 	raw := strings.TrimSpace(os.Getenv("KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB"))
 	if raw == "" {
@@ -102,6 +112,10 @@ func knowledgeUploadChunkBytes() (int64, error) {
 
 func knowledgeUploadTTL() time.Duration {
 	return time.Duration(envInt64("KNOWLEDGE_UPLOAD_SESSION_TTL_HOURS", 24)) * time.Hour
+}
+
+func knowledgeUploadFinalizeConcurrency() int {
+	return int(envInt64("KNOWLEDGE_UPLOAD_FINALIZE_MAX_CONCURRENCY", 1))
 }
 
 func knowledgeUploadPersistentRoot() (string, error) {
@@ -138,41 +152,78 @@ func knowledgeUploadTempRoot() (string, error) {
 	return tempRoot, nil
 }
 
+func syncKnowledgeUploadDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
 func ensureKnowledgeUploadRootIdentity(tempRoot string) (string, error) {
 	if err := os.MkdirAll(tempRoot, 0o700); err != nil {
 		return "", fmt.Errorf("create upload temp root: %w", err)
 	}
 	identityPath := filepath.Join(tempRoot, knowledgeUploadRootIdentityFile)
-	identity := uuid.NewString()
-	file, err := os.OpenFile(identityPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err == nil {
-		if _, writeErr := io.WriteString(file, identity); writeErr != nil {
-			_ = file.Close()
-			_ = os.Remove(identityPath)
-			return "", fmt.Errorf("write upload temp root identity: %w", writeErr)
-		}
-		if closeErr := file.Close(); closeErr != nil {
-			_ = os.Remove(identityPath)
-			return "", fmt.Errorf("close upload temp root identity: %w", closeErr)
+	if content, err := os.ReadFile(identityPath); err == nil {
+		identity := strings.TrimSpace(string(content))
+		if _, parseErr := uuid.Parse(identity); parseErr != nil {
+			return "", fmt.Errorf("invalid upload temp root identity: %w", parseErr)
 		}
 		return identity, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read upload temp root identity: %w", err)
 	}
-	if !errors.Is(err, os.ErrExist) {
-		return "", fmt.Errorf("create upload temp root identity: %w", err)
+
+	identity := uuid.NewString()
+	tempFile, err := os.CreateTemp(tempRoot, ".upload-root-id-*")
+	if err != nil {
+		return "", fmt.Errorf("create upload temp root identity staging file: %w", err)
 	}
-	content, readErr := os.ReadFile(identityPath)
-	if readErr != nil {
-		return "", fmt.Errorf("read upload temp root identity: %w", readErr)
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+	if err := tempFile.Chmod(0o600); err != nil {
+		_ = tempFile.Close()
+		return "", fmt.Errorf("chmod upload temp root identity staging file: %w", err)
 	}
-	identity = strings.TrimSpace(string(content))
-	if _, parseErr := uuid.Parse(identity); parseErr != nil {
-		return "", fmt.Errorf("invalid upload temp root identity: %w", parseErr)
+	if _, err := io.WriteString(tempFile, identity); err != nil {
+		_ = tempFile.Close()
+		return "", fmt.Errorf("write upload temp root identity: %w", err)
 	}
-	return identity, nil
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return "", fmt.Errorf("sync upload temp root identity: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("close upload temp root identity: %w", err)
+	}
+
+	// 同目录硬链接把完整内容一次性发布；并发副本只有一个能成功，其他副本读取赢家。
+	if err := os.Link(tempPath, identityPath); err == nil {
+		if err := syncKnowledgeUploadDirectory(tempRoot); err != nil {
+			return "", fmt.Errorf("sync published upload temp root identity: %w", err)
+		}
+		return identity, nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("publish upload temp root identity: %w", err)
+	}
+	content, err := os.ReadFile(identityPath)
+	if err != nil {
+		return "", fmt.Errorf("read concurrent upload temp root identity: %w", err)
+	}
+	winner := strings.TrimSpace(string(content))
+	if _, err := uuid.Parse(winner); err != nil {
+		return "", fmt.Errorf("invalid concurrent upload temp root identity: %w", err)
+	}
+	if err := syncKnowledgeUploadDirectory(tempRoot); err != nil {
+		return "", fmt.Errorf("sync concurrent upload temp root identity: %w", err)
+	}
+	return winner, nil
 }
 
 func validateKnowledgeUploadTempStorage(ctx context.Context, redisClient *redis.Client) error {
-	if redisClient == nil || strings.TrimSpace(os.Getenv("KNOWLEDGE_UPLOAD_TEMP_DIR")) == "" {
+	if redisClient == nil {
 		return nil
 	}
 	tempRoot, err := knowledgeUploadTempRoot()
@@ -234,12 +285,7 @@ func (s *knowledgeService) InitializeKnowledgeUpload(
 		return nil, err
 	}
 	parserEngine := eff.ChunkingConfig.ResolveParserEngine(getFileType(safeName))
-	parserMaxBytes := int64(100 * 1024 * 1024)
-	if parserEngine == "" || parserEngine == docparser.BuiltinEngineName {
-		parserMaxBytes = 50 * 1024 * 1024
-	} else if parserEngine == docparser.MinerUEngineName {
-		parserMaxBytes = knowledgeUploadMaxBytes()
-	}
+	parserMaxBytes := parserUploadMaxBytes(parserEngine)
 	if init.FileSize > parserMaxBytes {
 		return nil, werrors.NewBadRequestError(fmt.Sprintf(
 			"当前解析引擎最多支持 %dMB 文件，请选择支持大文件的解析引擎",
@@ -455,17 +501,42 @@ func validateKnowledgeUploadPartRange(
 	return expectedSize, nil
 }
 
-func calculatePathMD5(path string) (string, error) {
+// calculatePathContentHashes 单次流式读取同时产生新 SHA-256 身份和旧 MD5 兼容键。
+// 新知识只保存 SHA-256；MD5 仅用于识别升级前已经存在的文件。
+func calculatePathContentHashes(ctx context.Context, path string) (fileContentHashes, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return fileContentHashes{}, err
 	}
 	defer file.Close()
-	hash := md5.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+	sha256Hash := sha256.New()
+	legacyMD5Hash := md5.New()
+	buffer := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fileContentHashes{}, err
+		}
+		readBytes, readErr := file.Read(buffer)
+		if readBytes > 0 {
+			chunk := buffer[:readBytes]
+			if _, err := sha256Hash.Write(chunk); err != nil {
+				return fileContentHashes{}, err
+			}
+			if _, err := legacyMD5Hash.Write(chunk); err != nil {
+				return fileContentHashes{}, err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return fileContentHashes{}, readErr
+		}
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return fileContentHashes{
+		SHA256:    hex.EncodeToString(sha256Hash.Sum(nil)),
+		LegacyMD5: hex.EncodeToString(legacyMD5Hash.Sum(nil)),
+	}, nil
 }
 
 func isKnowledgeUploadKnowledgeNotFound(err error) bool {
@@ -594,19 +665,26 @@ func (s *knowledgeService) createKnowledgeFromStagedUpload(
 	} else if !isKnowledgeUploadKnowledgeNotFound(findErr) {
 		return nil, findErr
 	}
-	hash, err := calculatePathMD5(session.TempPath)
+	hashes, err := calculatePathContentHashes(ctx, session.TempPath)
 	if err != nil {
 		return nil, err
 	}
-	exists, existing, err := s.repo.CheckKnowledgeExists(ctx, session.TenantID, session.KnowledgeBaseID, &types.KnowledgeCheckParams{
-		Type: "file", FileName: session.FileName, FileType: getFileType(session.FileName),
-		FileSize: session.FileSize, FileHash: hash,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		return existing, types.NewDuplicateFileError(existing)
+	for _, compatibleHash := range []string{hashes.SHA256, hashes.LegacyMD5} {
+		exists, existing, checkErr := s.repo.CheckKnowledgeExists(
+			ctx,
+			session.TenantID,
+			session.KnowledgeBaseID,
+			&types.KnowledgeCheckParams{
+				Type: "file", FileName: session.FileName, FileType: getFileType(session.FileName),
+				FileSize: session.FileSize, FileHash: compatibleHash,
+			},
+		)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if exists {
+			return existing, types.NewDuplicateFileError(existing)
+		}
 	}
 	if tenant, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenant.StorageQuota > 0 &&
 		(tenant.StorageUsed >= tenant.StorageQuota || session.FileSize > tenant.StorageQuota-tenant.StorageUsed) {
@@ -620,7 +698,7 @@ func (s *knowledgeService) createKnowledgeFromStagedUpload(
 		ID: session.ID, TenantID: session.TenantID, KnowledgeBaseID: session.KnowledgeBaseID,
 		Type: "file", Channel: defaultChannel(options.Channel), Title: session.FileName,
 		FileName: session.FileName, FolderPath: session.FolderPath, FileType: getFileType(session.FileName),
-		FileSize: session.FileSize, FileHash: hash, ParseStatus: "pending", EnableStatus: "disabled",
+		FileSize: session.FileSize, FileHash: hashes.SHA256, ParseStatus: "pending", EnableStatus: "disabled",
 		EmbeddingModelID: kb.EmbeddingModelID, Metadata: types.JSON(metadataBytes),
 	}
 	if options.ProcessConfig != nil {
@@ -645,7 +723,9 @@ func (s *knowledgeService) createKnowledgeFromStagedUpload(
 			cleanupErr,
 		)
 	}
-	existing, created, err := creator.CreateKnowledgeWithFileHashLock(ctx, knowledge, session.FileSize)
+	existing, created, err := creator.CreateKnowledgeWithFileHashLock(
+		ctx, knowledge, session.FileSize, hashes.LegacyMD5,
+	)
 	if err != nil {
 		cleanupErr := s.clearKnowledgeUploadFinalFile(ctx, session, fileSvc)
 		return nil, errors.Join(err, cleanupErr)
@@ -720,7 +800,17 @@ func (s *knowledgeService) completeKnowledgeUpload(ctx context.Context, kbID, up
 			return nil, err
 		}
 	}
-	knowledge, err := s.createKnowledgeFromStagedUpload(ctx, session)
+	finalizeCtx, releaseFinalize, err := docparser.GateParser(
+		ctx,
+		knowledgeUploadFinalizeGateKey,
+		knowledgeUploadFinalizeConcurrency(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("wait for upload finalization slot: %w", err)
+	}
+	defer releaseFinalize()
+
+	knowledge, err := s.createKnowledgeFromStagedUpload(finalizeCtx, session)
 	if err != nil {
 		session.Status = types.KnowledgeUploadFailed
 		session.ErrorMessage = err.Error()

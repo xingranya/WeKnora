@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -62,8 +63,18 @@ type HTTPDocumentReader struct {
 	client  *http.Client
 }
 
+func validateHTTPDocReaderRuntime(baseURL string) error {
+	if baseURL != "" && strings.EqualFold(strings.TrimSpace(os.Getenv("GIN_MODE")), "release") {
+		return fmt.Errorf("HTTP docreader transport is disabled in release mode; configure gRPC instead")
+	}
+	return nil
+}
+
 func NewHTTPDocumentReader(baseURL string) (*HTTPDocumentReader, error) {
 	baseURL = strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
+	if err := validateHTTPDocReaderRuntime(baseURL); err != nil {
+		return nil, err
+	}
 	if baseURL != "" {
 		if err := secutils.ValidateURLForSSRF(baseURL); err != nil {
 			return nil, fmt.Errorf("docreader address failed SSRF validation: %w", err)
@@ -76,7 +87,7 @@ func NewHTTPDocumentReader(baseURL string) (*HTTPDocumentReader, error) {
 		client:  secutils.NewSSRFSafeHTTPClient(clientCfg),
 	}
 	if p.baseURL != "" {
-		logger.Infof(context.Background(), "INFO: HTTP docreader base URL: %s", p.baseURL)
+		logger.Info(context.Background(), "HTTP docreader base URL configured")
 	}
 	return p, nil
 }
@@ -89,6 +100,9 @@ func (p *HTTPDocumentReader) base() string {
 
 func (p *HTTPDocumentReader) Reconnect(addr string) error {
 	addr = strings.TrimSuffix(strings.TrimSpace(addr), "/")
+	if err := validateHTTPDocReaderRuntime(addr); err != nil {
+		return err
+	}
 	if addr != "" {
 		if err := secutils.ValidateURLForSSRF(addr); err != nil {
 			return fmt.Errorf("docreader address failed SSRF validation: %w", err)
@@ -97,17 +111,21 @@ func (p *HTTPDocumentReader) Reconnect(addr string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.baseURL = addr
-	logger.Infof(context.Background(), "INFO: HTTP docreader base URL set to %s", p.baseURL)
+	logger.Infof(context.Background(), "HTTP docreader base URL configured=%v", p.baseURL != "")
 	return nil
 }
 
 func (p *HTTPDocumentReader) IsConnected() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.baseURL != ""
+	base := p.base()
+	return base != "" && validateHTTPDocReaderRuntime(base) == nil
 }
 
-func (p *HTTPDocumentReader) Close() error { return nil }
+func (p *HTTPDocumentReader) Close() error {
+	p.mu.Lock()
+	p.baseURL = ""
+	p.mu.Unlock()
+	return nil
+}
 
 type httpListEnginesRequest struct {
 	ConfigOverrides map[string]string `json:"config_overrides,omitempty"`
@@ -129,6 +147,9 @@ func (p *HTTPDocumentReader) ListEngines(ctx context.Context, overrides map[stri
 	base := p.base()
 	if base == "" {
 		return nil, errNotConnected
+	}
+	if err := validateHTTPDocReaderRuntime(base); err != nil {
+		return nil, err
 	}
 	if err := secutils.ValidateURLForSSRF(base); err != nil {
 		return nil, fmt.Errorf("docreader address failed SSRF validation: %w", err)
@@ -197,6 +218,9 @@ func (p *HTTPDocumentReader) Read(ctx context.Context, req *types.ReadRequest) (
 	base := p.base()
 	if base == "" {
 		return nil, errNotConnected
+	}
+	if err := validateHTTPDocReaderRuntime(base); err != nil {
+		return nil, err
 	}
 	if err := secutils.ValidateURLForSSRF(base); err != nil {
 		return nil, fmt.Errorf("docreader address failed SSRF validation: %w", err)

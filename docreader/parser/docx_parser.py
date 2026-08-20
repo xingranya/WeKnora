@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from io import BytesIO
 from multiprocessing import Manager
@@ -42,7 +42,9 @@ from docx.image.exceptions import (
 from PIL import Image
 
 from docreader.config import CONFIG
+from docreader.limits import ParseCancelledError
 from docreader.models.document import Document as DocumentModel
+from docreader.parser.concurrency import terminate_process_pool
 from docreader.parser.base_parser import BaseParser
 from docreader.utils import endecode
 
@@ -125,6 +127,7 @@ class DocxParser(BaseParser):
                 import base64
                 import uuid as _uuid
 
+                self.raise_if_cancelled()
                 try:
                     with open(local_path, "rb") as f:
                         raw = f.read()
@@ -132,6 +135,8 @@ class DocxParser(BaseParser):
                     ref = f"images/{_uuid.uuid4().hex}{ext}"
                     inline_images[ref] = base64.b64encode(raw).decode()
                     return ref
+                except ParseCancelledError:
+                    raise
                 except Exception as exc:
                     logger.warning("Failed to read temp image %s: %s", local_path, exc)
                     return ""
@@ -141,6 +146,7 @@ class DocxParser(BaseParser):
                 max_image_size=1920,
                 enable_multimodal=True,
                 upload_file=_inline_upload,
+                is_cancelled=self._is_cancelled,
             )
             all_lines, tables = docx_processor(
                 binary=content,
@@ -160,6 +166,7 @@ class DocxParser(BaseParser):
             image_parts: Dict[str, str] = {}
 
             for sec_idx, line in enumerate(all_lines):
+                self.raise_if_cancelled()
                 try:
                     if line.text is not None and line.text != "":
                         text_parts.append(line.text)
@@ -202,6 +209,8 @@ class DocxParser(BaseParser):
 
             image_parts.update(inline_images)
             return DocumentModel(content=text, images=image_parts)
+        except ParseCancelledError:
+            raise
         except Exception as e:
             logger.error(f"Error parsing DOCX document: {str(e)}")
             logger.error(f"Detailed stack trace: {traceback.format_exc()}")
@@ -232,6 +241,7 @@ class DocxParser(BaseParser):
             logger.info(f"Extracting text from {para_count} paragraphs")
             para_with_text = 0
             for i, para in enumerate(doc.paragraphs):
+                self.raise_if_cancelled()
                 if i % 100 == 0:
                     logger.info(f"Processing paragraph {i + 1}/{para_count}")
                 if para.text.strip():
@@ -246,11 +256,13 @@ class DocxParser(BaseParser):
             tables_with_content = 0
             rows_processed = 0
             for i, table in enumerate(doc.tables):
+                self.raise_if_cancelled()
                 if i % 10 == 0:
                     logger.info(f"Processing table {i + 1}/{table_count}")
 
                 table_has_content = False
                 for row in table.rows:
+                    self.raise_if_cancelled()
                     rows_processed += 1
                     row_text = " | ".join(
                         [cell.text.strip() for cell in row.cells if cell.text.strip()]
@@ -281,6 +293,8 @@ class DocxParser(BaseParser):
                 return DocumentModel()
 
             return DocumentModel(content=result_text)
+        except ParseCancelledError:
+            raise
         except Exception as backup_error:
             processing_time = time.time() - start_time
             logger.error(
@@ -291,13 +305,24 @@ class DocxParser(BaseParser):
 
 
 class Docx:
-    def __init__(self, max_image_size=1920, enable_multimodal=False, upload_file=None):
+    def __init__(
+        self,
+        max_image_size=1920,
+        enable_multimodal=False,
+        upload_file=None,
+        is_cancelled=None,
+    ):
         logger.info("Initializing DOCX processor")
         self.max_image_size = max_image_size  # Maximum image size limit
         # Image cache to avoid processing the same image repeatedly
         self.picture_cache = {}
         self.enable_multimodal = enable_multimodal
         self.upload_file = upload_file
+        self.is_cancelled = is_cancelled
+
+    def _raise_if_cancelled(self):
+        if self.is_cancelled is not None and self.is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")
 
     def get_picture(self, document, paragraph) -> Optional[Image.Image]:
         logger.info("Extracting image from paragraph")
@@ -671,11 +696,10 @@ class Docx:
             temp_file_path,
         )
 
-        # Execute multiprocess tasks
-        self._execute_multiprocess_tasks(args_list, max_workers)
-
-        # Clean up temporary file
-        self._cleanup_temp_file(temp_file_path)
+        try:
+            self._execute_multiprocess_tasks(args_list, max_workers)
+        finally:
+            self._cleanup_temp_file(temp_file_path)
 
     def _check_document_has_images(self):
         """Check if the document contains images
@@ -750,6 +774,7 @@ class Docx:
         """
         args_list = []
         for page_num in pages_to_process:
+            self._raise_if_cancelled()
             args_list.append(
                 (
                     page_num,
@@ -781,9 +806,11 @@ class Docx:
                 f"Processing {len(args_list)} pages using {max_workers} processes"
             )
 
-            # Use ProcessPoolExecutor to truly implement multi-core parallelization
+            # 使用独立进程处理页面；取消时不再阻塞 gRPC 工作线程等待全部子任务。
             batch_start_time = time.time()
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            executor = ProcessPoolExecutor(max_workers=max_workers)
+            future_to_idx = {}
+            try:
                 logger.info(f"Started ProcessPoolExecutor with {max_workers} workers")
 
                 # Submit all tasks
@@ -799,6 +826,17 @@ class Docx:
                 self._collect_process_results(
                     future_to_idx, args_list, batch_start_time
                 )
+                executor.shutdown(wait=True)
+                executor = None
+            except ParseCancelledError:
+                for future in future_to_idx:
+                    future.cancel()
+                terminate_process_pool(executor)
+                executor = None
+                raise
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
 
     def _collect_process_results(self, future_to_idx, args_list, batch_start_time):
         """Collect multiprocess processing results
@@ -816,38 +854,46 @@ class Docx:
         results = []
         temp_img_paths = set()  # Collect all temporary image paths
 
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            page_num = args_list[idx][0]
-            try:
-                page_lines = future.result()
+        pending = set(future_to_idx)
+        while pending:
+            self._raise_if_cancelled()
+            completed, pending = wait(
+                pending,
+                timeout=0.1,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in completed:
+                idx = future_to_idx[future]
+                page_num = args_list[idx][0]
+                try:
+                    page_lines = future.result()
 
-                # Collect temporary image paths for later cleanup
-                for line in page_lines:
-                    for image_data in line.images:
-                        if image_data.local_path and image_data.local_path.startswith(
-                            "/tmp/docx_img_"
-                        ):
-                            temp_img_paths.add(image_data.local_path)
+                    # Collect temporary image paths for later cleanup
+                    for line in page_lines:
+                        for image_data in line.images:
+                            if image_data.local_path and image_data.local_path.startswith(
+                                "/tmp/docx_img_"
+                            ):
+                                temp_img_paths.add(image_data.local_path)
 
-                results.extend(page_lines)
-                completed_count += 1
+                    results.extend(page_lines)
+                    completed_count += 1
 
-                if completed_count % max(
-                    1, len(args_list) // 10
-                ) == 0 or completed_count == len(args_list):
-                    elapsed_ms = int((time.time() - batch_start_time) * 1000)
-                    progress_pct = int((completed_count / len(args_list)) * 100)
-                    logger.info(
-                        f"Progress: {completed_count}/{len(args_list)} pages processed "
-                        f"({progress_pct}%, elapsed: {elapsed_ms}ms)"
+                    if completed_count % max(
+                        1, len(args_list) // 10
+                    ) == 0 or completed_count == len(args_list):
+                        elapsed_ms = int((time.time() - batch_start_time) * 1000)
+                        progress_pct = int((completed_count / len(args_list)) * 100)
+                        logger.info(
+                            f"Progress: {completed_count}/{len(args_list)} pages processed "
+                            f"({progress_pct}%, elapsed: {elapsed_ms}ms)"
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error processing page {page_num}: {str(e)}")
+                    logger.error(
+                        f"Detailed traceback for page {page_num}: {traceback.format_exc()}"
                     )
-
-            except Exception as e:
-                logger.error(f"Error processing page {page_num}: {str(e)}")
-                logger.error(
-                    f"Detailed traceback for page {page_num}: {traceback.format_exc()}"
-                )
 
         # Process completion
         processing_elapsed_ms = int((time.time() - batch_start_time) * 1000)

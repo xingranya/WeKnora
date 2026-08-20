@@ -188,7 +188,7 @@ func TestCreateKnowledgeWithFileHashLockRechecksAndReservesQuota(t *testing.T) {
 	require.NoError(t, db.Create(tenant).Error)
 
 	creator := repo.(interface {
-		CreateKnowledgeWithFileHashLock(context.Context, *types.Knowledge, int64) (*types.Knowledge, bool, error)
+		CreateKnowledgeWithFileHashLock(context.Context, *types.Knowledge, int64, ...string) (*types.Knowledge, bool, error)
 	})
 	first := &types.Knowledge{
 		ID: "knowledge-1", TenantID: tenant.ID, KnowledgeBaseID: "kb-1", Type: "file",
@@ -223,6 +223,36 @@ func TestCreateKnowledgeWithFileHashLockRechecksAndReservesQuota(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&types.Knowledge{}).Count(&count).Error)
 	require.Equal(t, int64(1), count)
+}
+
+func TestCreateKnowledgeWithFileHashLockFindsLegacyCompatibleHash(t *testing.T) {
+	repo, db := setupKnowledgeUploadTestRepositoryAndDB(t)
+	creator := repo.(interface {
+		CreateKnowledgeWithFileHashLock(context.Context, *types.Knowledge, int64, ...string) (*types.Knowledge, bool, error)
+	})
+	ctx := context.Background()
+	tenant := &types.Tenant{ID: 62, Name: "legacy-hash", StorageQuota: 1024}
+	require.NoError(t, db.Create(tenant).Error)
+
+	legacy := &types.Knowledge{
+		ID: "legacy-md5", TenantID: tenant.ID, KnowledgeBaseID: "kb-1", Type: "file",
+		FileName: "legacy.pdf", FileType: "pdf", FileHash: "legacy-md5-hash",
+		ParseStatus: types.ParseStatusPending,
+	}
+	require.NoError(t, db.Create(legacy).Error)
+
+	candidate := &types.Knowledge{
+		ID: "new-sha256", TenantID: tenant.ID, KnowledgeBaseID: "kb-1", Type: "file",
+		FileName: "same.pdf", FileType: "pdf", FileHash: "new-sha256-hash",
+		ParseStatus: types.ParseStatusPending,
+	}
+	existing, created, err := creator.CreateKnowledgeWithFileHashLock(
+		ctx, candidate, 0, "legacy-md5-hash",
+	)
+	require.NoError(t, err)
+	require.False(t, created)
+	require.NotNil(t, existing)
+	require.Equal(t, legacy.ID, existing.ID)
 }
 
 func TestKnowledgeUploadHashLockKeyIsDeterministicAndScoped(t *testing.T) {

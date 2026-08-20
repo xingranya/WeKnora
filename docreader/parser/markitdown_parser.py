@@ -1,13 +1,15 @@
 import io
 import logging
+from types import SimpleNamespace
 
 from markitdown import MarkItDown
 
 from docreader.config import CONFIG
+from docreader.limits import ParseCancelledError
 from docreader.models.document import Document
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.chain_parser import PipelineParser
-from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.concurrency import parser_worker_limit, run_in_cancellable_process
 from docreader.parser.docx_merge import fill_vertical_merged_cells_docx
 from docreader.parser.markdown_parser import MarkdownParser
 from docreader.parser.ppt_convert import normalize_ppt_bytes
@@ -17,6 +19,19 @@ from docreader.parser.pptx_media import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_markitdown_payload(
+    content: bytes,
+    ext: str | None,
+    keep_data_uris: bool,
+) -> str:
+    result = MarkItDown().convert(
+        io.BytesIO(content),
+        file_extension=ext,
+        keep_data_uris=keep_data_uris,
+    )
+    return result.text_content
 
 
 class StdMarkitdownParser(BaseParser):
@@ -39,6 +54,10 @@ class StdMarkitdownParser(BaseParser):
         """
         ext = self.file_type
         ft = (ext or "").lstrip(".").lower()
+        if ft == "pdf":
+            from docreader.parser.pdf_parser import validate_pdf_input_page_count
+
+            validate_pdf_input_page_count(content, self._is_cancelled)
         pptx_bytes: bytes | None = None
         if ft in ("ppt", "pptx"):
             content, ext = normalize_ppt_bytes(content, ft)
@@ -49,7 +68,10 @@ class StdMarkitdownParser(BaseParser):
         if ext and not ext.startswith("."):
             ext = "." + ext
 
-        with parser_worker_limit("markitdown", CONFIG.markitdown_max_workers):
+        with parser_worker_limit(
+            "markitdown", CONFIG.markitdown_max_workers, self._is_cancelled
+        ):
+            self.raise_if_cancelled()
             result = self._convert_markitdown(content, ext, keep_data_uris=True)
             if result is None:
                 logger.warning(
@@ -57,6 +79,7 @@ class StdMarkitdownParser(BaseParser):
                     ft or ext,
                 )
                 result = self._convert_markitdown(content, ext, keep_data_uris=False)
+            self.raise_if_cancelled()
 
         text = result.text_content
         images: dict[str, str] = {}
@@ -67,6 +90,22 @@ class StdMarkitdownParser(BaseParser):
     def _convert_markitdown(
         self, content: bytes, ext: str | None, *, keep_data_uris: bool
     ):
+        if self._is_cancelled is not None:
+            try:
+                text = run_in_cancellable_process(
+                    _convert_markitdown_payload,
+                    content,
+                    ext,
+                    keep_data_uris,
+                    is_cancelled=self._is_cancelled,
+                )
+                return SimpleNamespace(text_content=text)
+            except ParseCancelledError:
+                raise
+            except Exception:
+                if keep_data_uris:
+                    return None
+                raise
         try:
             return self.markitdown.convert(
                 io.BytesIO(content),

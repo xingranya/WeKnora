@@ -9,6 +9,7 @@ This module provides two chain-of-responsibility pattern implementations for doc
 import logging
 from typing import Dict, List, Tuple, Type
 
+from docreader.limits import ParseCancelledError, ResourceLimitError
 from docreader.models.document import Document
 from docreader.parser.base_parser import BaseParser
 from docreader.utils import endecode
@@ -56,9 +57,12 @@ class FirstParser(BaseParser):
                      or an empty Document if all parsers fail
         """
         for p in self._parsers:
+            self.raise_if_cancelled()
             logger.info(f"FirstParser: using parser {p.__class__.__name__}")
             try:
-                document = p.parse_into_text(content)
+                document = p.parse(content)
+            except (ParseCancelledError, ResourceLimitError):
+                raise
             except Exception:
                 logger.exception(
                     "FirstParser: parser %s raised exception; trying next parser",
@@ -137,9 +141,10 @@ class PipelineParser(BaseParser):
         metadata: Dict = {}
         document = Document()
         for p in self._parsers:
+            self.raise_if_cancelled()
             logger.info(f"PipelineParser: using parser {p.__class__.__name__}")
             # Parse content with current parser
-            document = p.parse_into_text(content)
+            document = p.parse(content)
             # Convert document content back to bytes for next parser
             content = endecode.encode_bytes(document.content)
             # Accumulate images and metadata from this parser

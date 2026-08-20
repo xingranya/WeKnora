@@ -101,9 +101,9 @@ func (p *WeKnoraCloudSignedDocumentReader) Read(ctx context.Context, req *types.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		logger.Errorf(context.Background(), "[WeKnoraCloud] http read unexpected status %d: %s", resp.StatusCode, string(bodyBytes))
-		return nil, fmt.Errorf("http read status %d: %s", resp.StatusCode, string(bodyBytes))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
+		logger.Errorf(context.Background(), "[WeKnoraCloud] http read unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("http read status %d", resp.StatusCode)
 	}
 	var submit weKnoraCloudAsyncSubmitResponse
 	if err := json.NewDecoder(resp.Body).Decode(&submit); err != nil {
@@ -111,10 +111,10 @@ func (p *WeKnoraCloudSignedDocumentReader) Read(ctx context.Context, req *types.
 		return nil, fmt.Errorf("http decode read submit response: %w", err)
 	}
 	if strings.TrimSpace(submit.TaskID) == "" {
-		logger.Errorf(context.Background(), "[WeKnoraCloud] submit response missing task_id (status=%q message=%q)", submit.Status, submit.Message)
+		logger.Errorf(context.Background(), "[WeKnoraCloud] submit response missing task_id")
 		return nil, fmt.Errorf("weknoracloud docreader submit response missing task_id")
 	}
-	logger.Infof(ctx, "[WeKnoraCloud] task submitted task_id=%s file=%q type=%q", submit.TaskID, req.FileName, req.FileType)
+	logger.Infof(ctx, "[WeKnoraCloud] task submitted task_id=%s type=%q", submit.TaskID, req.FileType)
 	return p.pollTaskResult(ctx, submit.TaskID)
 }
 

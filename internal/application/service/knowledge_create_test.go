@@ -18,9 +18,10 @@ import (
 type createKnowledgeFileRepoStub struct {
 	interfaces.KnowledgeRepository
 
-	createCalls      int
-	createErr        error
-	createdKnowledge *types.Knowledge
+	createCalls       int
+	createErr         error
+	createdKnowledge  *types.Knowledge
+	checkedFileHashes []string
 }
 
 func (r *createKnowledgeFileRepoStub) EnsureKnowledgeFolderPath(
@@ -35,6 +36,9 @@ func (r *createKnowledgeFileRepoStub) CheckKnowledgeExists(
 	kbID string,
 	params *types.KnowledgeCheckParams,
 ) (bool, *types.Knowledge, error) {
+	if params != nil {
+		r.checkedFileHashes = append(r.checkedFileHashes, params.FileHash)
+	}
 	return false, nil, nil
 }
 
@@ -194,6 +198,11 @@ func TestCreateKnowledgeFromFilePersistsStoredFilePathOnCreate(t *testing.T) {
 	require.Equal(t, fileSvc.savedWithKnowledgeID, knowledge.ID)
 	require.Equal(t, 1, repo.createCalls)
 	require.NotNil(t, repo.createdKnowledge)
+	require.Equal(t, []string{
+		"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		"5d41402abc4b2a76b9719d911017c592",
+	}, repo.checkedFileHashes)
+	require.Equal(t, repo.checkedFileHashes[0], repo.createdKnowledge.FileHash)
 	require.Equal(t, "stored/"+knowledge.ID, repo.createdKnowledge.FilePath)
 	require.Equal(t, 1, task.calls)
 }
@@ -316,6 +325,13 @@ func TestCreateKnowledgeFromFile_PersistsProcessOverrides(t *testing.T) {
 	metadataMap, err := repo.createdKnowledge.Metadata.Map()
 	require.NoError(t, err)
 	require.Equal(t, "test", metadataMap["source"])
+}
+
+func TestCalculateMultipartFileContentHashesUsesSHA256AndLegacyMD5(t *testing.T) {
+	hashes, err := calculateMultipartFileContentHashes(newMultipartFileHeader(t, "doc.txt", "hello"))
+	require.NoError(t, err)
+	require.Equal(t, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", hashes.SHA256)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", hashes.LegacyMD5)
 }
 
 func newCreateKnowledgeFileContext() context.Context {

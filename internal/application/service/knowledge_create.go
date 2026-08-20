@@ -95,36 +95,43 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return nil, ErrInvalidFileType
 	}
 
-	// Calculate file hash for deduplication
-	logger.Info(ctx, "Calculating file hash")
-	hash, err := calculateFileHash(file)
+	// 新记录使用 SHA-256；同时查询旧 MD5，避免升级前文件被重复导入。
+	logger.Info(ctx, "Calculating file content hashes")
+	hashes, err := calculateMultipartFileContentHashes(file)
 	if err != nil {
-		logger.Errorf(ctx, "Failed to calculate file hash: %v", err)
+		logger.Errorf(ctx, "Failed to calculate file content hashes: %v", err)
 		return nil, err
 	}
 
 	// Check if file already exists
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(ctx, "Checking if file exists, tenant ID: %d", tenantID)
-	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, &types.KnowledgeCheckParams{
-		Type:     "file",
-		FileName: fileName,
-		FileType: getFileType(fileName),
-		FileSize: file.Size,
-		FileHash: hash,
-	})
-	if err != nil {
-		logger.Errorf(ctx, "Failed to check knowledge existence: %v", err)
-		return nil, err
-	}
-	if exists {
-		logger.Infof(ctx, "File already exists: %s", fileName)
-		// Update creation time for existing knowledge
-		if err := s.repo.UpdateKnowledgeColumn(ctx, existingKnowledge.ID, "created_at", time.Now()); err != nil {
-			logger.Errorf(ctx, "Failed to update existing knowledge: %v", err)
-			return nil, err
+	for _, compatibleHash := range []string{hashes.SHA256, hashes.LegacyMD5} {
+		exists, existingKnowledge, checkErr := s.repo.CheckKnowledgeExists(
+			ctx,
+			tenantID,
+			kbID,
+			&types.KnowledgeCheckParams{
+				Type:     "file",
+				FileName: fileName,
+				FileType: getFileType(fileName),
+				FileSize: file.Size,
+				FileHash: compatibleHash,
+			},
+		)
+		if checkErr != nil {
+			logger.Errorf(ctx, "Failed to check knowledge existence: %v", checkErr)
+			return nil, checkErr
 		}
-		return existingKnowledge, types.NewDuplicateFileError(existingKnowledge)
+		if exists {
+			logger.Infof(ctx, "File already exists: %s", fileName)
+			// Update creation time for existing knowledge
+			if err := s.repo.UpdateKnowledgeColumn(ctx, existingKnowledge.ID, "created_at", time.Now()); err != nil {
+				logger.Errorf(ctx, "Failed to update existing knowledge: %v", err)
+				return nil, err
+			}
+			return existingKnowledge, types.NewDuplicateFileError(existingKnowledge)
+		}
 	}
 
 	// Check storage quota
@@ -185,7 +192,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		FolderPath:       folderPath,
 		FileType:         getFileType(safeFilename),
 		FileSize:         file.Size,
-		FileHash:         hash,
+		FileHash:         hashes.SHA256,
 		ParseStatus:      "pending",
 		EnableStatus:     "disabled",
 		CreatedAt:        time.Now(),
@@ -216,7 +223,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
 		logger.Errorf(ctx, "Failed to create knowledge record, ID: %s, error: %v", knowledge.ID, err)
 		if deleteErr := fileSvc.DeleteFile(ctx, filePath); deleteErr != nil {
-			logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed, path: %s, error: %v", filePath, deleteErr)
+			logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed: %v", deleteErr)
 		}
 		return nil, err
 	}
@@ -336,7 +343,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	processOverrides *types.KnowledgeProcessOverrides,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from URL")
-	logger.Infof(ctx, "Knowledge base ID: %s, URL: %s", kbID, rawURL)
+	logger.Infof(ctx, "Knowledge base ID: %s, url=%q", kbID, secutils.SanitizeAuditLog(rawURL))
 
 	// Route to file_url logic when the URL points to a downloadable file
 	if isFileURL(rawURL, fileName, fileType) {
@@ -368,7 +375,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 	// SSRF protection: validate URL is safe to fetch (uses centralised entry-point with whitelist support)
 	if err := secutils.ValidateURLForSSRF(url); err != nil {
-		logger.Errorf(ctx, "URL rejected for SSRF protection: %s, err: %v", url, err)
+		logger.Errorf(ctx, "URL rejected for SSRF protection: %v", err)
 		return nil, ErrInvalidURL
 	}
 
@@ -386,7 +393,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		return nil, err
 	}
 	if exists {
-		logger.Infof(ctx, "URL already exists: %s", url)
+		logger.Infof(ctx, "URL already exists in knowledge base")
 		// Update creation time for existing knowledge
 		existingKnowledge.CreatedAt = time.Now()
 		existingKnowledge.UpdatedAt = time.Now()
@@ -549,7 +556,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	processOverrides *types.KnowledgeProcessOverrides,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file URL")
-	logger.Infof(ctx, "Knowledge base ID: %s, file URL: %s", kbID, fileURL)
+	logger.Infof(ctx, "Knowledge base ID: %s, file_url=%q", kbID, secutils.SanitizeAuditLog(fileURL))
 
 	// Get knowledge base configuration
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
@@ -572,7 +579,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		return nil, ErrInvalidURL
 	}
 	if err := secutils.ValidateURLForSSRF(fileURL); err != nil {
-		logger.Errorf(ctx, "File URL rejected for SSRF protection: %s, err: %v", fileURL, err)
+		logger.Errorf(ctx, "File URL rejected for SSRF protection: %v", err)
 		return nil, ErrInvalidURL
 	}
 
@@ -583,7 +590,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	if fileName != "" {
 		safeFilename, ok := secutils.ValidateInput(fileName)
 		if !ok {
-			logger.Errorf(ctx, "Invalid filename: %s", fileName)
+			logger.Errorf(ctx, "Invalid filename (chars=%d)", len([]rune(fileName)))
 			return nil, werrors.NewValidationError("文件名包含非法字符")
 		}
 		fileName = safeFilename
@@ -623,7 +630,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		return nil, err
 	}
 	if exists {
-		logger.Infof(ctx, "File URL already exists: %s", fileURL)
+		logger.Infof(ctx, "File URL already exists in knowledge base")
 		existingKnowledge.CreatedAt = time.Now()
 		existingKnowledge.UpdatedAt = time.Now()
 		if err := s.repo.UpdateKnowledge(ctx, existingKnowledge); err != nil {

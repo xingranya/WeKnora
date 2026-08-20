@@ -102,6 +102,7 @@ func knowledgeUploadHashLockKey(tenantID uint64, kbID, fileType, fileHash string
 // 并在同一事务内重新检查重复文件和原子预留原始文件配额。
 func (r *knowledgeRepository) CreateKnowledgeWithFileHashLock(
 	ctx context.Context, knowledge *types.Knowledge, sourceFileQuotaBytes int64,
+	compatibleFileHashes ...string,
 ) (existing *types.Knowledge, created bool, err error) {
 	if knowledge == nil || knowledge.FileHash == "" {
 		return nil, false, fmt.Errorf("knowledge and file hash are required")
@@ -132,10 +133,24 @@ func (r *knowledgeRepository) CreateKnowledgeWithFileHashLock(
 			}
 		}
 
+		candidateHashes := make([]string, 0, len(compatibleFileHashes)+1)
+		seenHashes := make(map[string]struct{}, len(compatibleFileHashes)+1)
+		for _, candidateHash := range append([]string{knowledge.FileHash}, compatibleFileHashes...) {
+			candidateHash = strings.TrimSpace(candidateHash)
+			if candidateHash == "" {
+				continue
+			}
+			if _, exists := seenHashes[candidateHash]; exists {
+				continue
+			}
+			seenHashes[candidateHash] = struct{}{}
+			candidateHashes = append(candidateHashes, candidateHash)
+		}
+
 		var duplicate types.Knowledge
 		duplicateQuery := tx.Model(&types.Knowledge{}).
-			Where("tenant_id = ? AND knowledge_base_id = ? AND parse_status <> ? AND type = ? AND file_hash = ?",
-				knowledge.TenantID, knowledge.KnowledgeBaseID, types.ParseStatusFailed, "file", knowledge.FileHash)
+			Where("tenant_id = ? AND knowledge_base_id = ? AND parse_status <> ? AND type = ? AND file_hash IN ?",
+				knowledge.TenantID, knowledge.KnowledgeBaseID, types.ParseStatusFailed, "file", candidateHashes)
 		if knowledge.FileType != "" {
 			duplicateQuery = duplicateQuery.Where("LOWER(file_type) = ?", strings.ToLower(knowledge.FileType))
 		}

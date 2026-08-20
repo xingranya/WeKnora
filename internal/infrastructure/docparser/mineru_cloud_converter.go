@@ -62,7 +62,7 @@ func (c *MinerUCloudReader) Read(ctx context.Context, req *types.ReadRequest) (*
 		return &types.ReadResult{Error: "no file content provided"}, nil
 	}
 
-	logger.Infof(context.Background(), "[MinerUCloud] Parsing file=%s size=%d via %s", req.FileName, len(content), c.baseURL)
+	logger.Infof(context.Background(), "[MinerUCloud] Parsing file: size=%d type=%s", len(content), req.FileType)
 
 	ext := filepath.Ext(req.FileName)
 	if ext == "" && req.FileType != "" {
@@ -144,8 +144,8 @@ func (c *MinerUCloudReader) applyUploadURLs(ctx context.Context, fileName, ext s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("API status %d: %s", resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return "", "", fmt.Errorf("API status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result batchApplyResponse

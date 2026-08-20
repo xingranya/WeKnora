@@ -30,6 +30,12 @@ def _get_int(keys: Iterable[str], default: int) -> int:
         return default
 
 
+def _get_positive_int(keys: Iterable[str], default: int) -> int:
+    """读取正整数；空值、非法值和非正数统一回退到安全默认值。"""
+    value = _get_int(keys, default)
+    return value if value > 0 else default
+
+
 def _get_bool(keys: Iterable[str], default: bool) -> bool:
     v, _ = _get_first_env(keys)
     if v is None or str(v).strip() == "":
@@ -49,11 +55,15 @@ def _mask_secret(v: str) -> str:
 class DocReaderConfig:
     # gRPC
     grpc_max_workers: int
-    grpc_max_file_size_mb: int
+    grpc_max_message_bytes: int
     grpc_port: int
+    max_image_count: int
+    max_image_size_bytes: int
+    max_total_image_size_bytes: int
 
     # Parser
     docx_max_pages: int
+    pdf_max_pages: int
     markitdown_max_workers: int
     odl_max_workers: int
     odl_hybrid: str
@@ -78,14 +88,28 @@ class DocReaderConfig:
 def load_config() -> DocReaderConfig:
     """Load config from environment variables (lightweight version)."""
 
-    grpc_max_workers = _get_int(["DOCREADER_GRPC_MAX_WORKERS", "GRPC_MAX_WORKERS"], 4)
-    grpc_max_file_size_mb = (
-        _get_int(["DOCREADER_GRPC_MAX_FILE_SIZE_MB", "MAX_FILE_SIZE_MB"], 50)
+    grpc_max_workers = _get_positive_int(
+        ["DOCREADER_GRPC_MAX_WORKERS", "GRPC_MAX_WORKERS"], 4
+    )
+    grpc_max_message_bytes = (
+        _get_positive_int(
+            ["DOCREADER_GRPC_MAX_FILE_SIZE_MB", "MAX_FILE_SIZE_MB"], 50
+        )
         * 1024
         * 1024
     )
     grpc_port = _get_int(["DOCREADER_GRPC_PORT", "PORT"], 50051)
+    max_image_count = _get_positive_int(["DOCREADER_MAX_IMAGE_COUNT"], 256)
+    max_image_size_bytes = (
+        _get_positive_int(["DOCREADER_MAX_IMAGE_SIZE_MB"], 16) * 1024 * 1024
+    )
+    max_total_image_size_bytes = (
+        _get_positive_int(["DOCREADER_MAX_TOTAL_IMAGE_SIZE_MB"], 128)
+        * 1024
+        * 1024
+    )
     docx_max_pages = _get_int(["DOCREADER_DOCX_MAX_PAGES"], 0)
+    pdf_max_pages = _get_positive_int(["DOCREADER_PDF_MAX_PAGES"], 1000)
     markitdown_max_workers = _get_int(["DOCREADER_MARKITDOWN_MAX_WORKERS"], 1)
     odl_max_workers = _get_int(["DOCREADER_ODL_MAX_WORKERS"], 1)
     odl_hybrid = _get_str(["DOCREADER_ODL_HYBRID"], "off")
@@ -130,9 +154,13 @@ def load_config() -> DocReaderConfig:
 
     return DocReaderConfig(
         grpc_max_workers=grpc_max_workers,
-        grpc_max_file_size_mb=grpc_max_file_size_mb,
+        grpc_max_message_bytes=grpc_max_message_bytes,
         grpc_port=grpc_port,
+        max_image_count=max_image_count,
+        max_image_size_bytes=max_image_size_bytes,
+        max_total_image_size_bytes=max_total_image_size_bytes,
         docx_max_pages=docx_max_pages,
+        pdf_max_pages=pdf_max_pages,
         markitdown_max_workers=markitdown_max_workers,
         odl_max_workers=odl_max_workers,
         odl_hybrid=odl_hybrid,
@@ -158,9 +186,13 @@ def dump_config(mask_secrets: bool = True) -> Dict[str, Any]:
     cfg = CONFIG
     d: Dict[str, Any] = {
         "DOCREADER_GRPC_MAX_WORKERS": cfg.grpc_max_workers,
-        "DOCREADER_GRPC_MAX_FILE_SIZE_MB": cfg.grpc_max_file_size_mb,
+        "DOCREADER_GRPC_MAX_MESSAGE_BYTES": cfg.grpc_max_message_bytes,
         "DOCREADER_GRPC_PORT": cfg.grpc_port,
+        "DOCREADER_MAX_IMAGE_COUNT": cfg.max_image_count,
+        "DOCREADER_MAX_IMAGE_SIZE_BYTES": cfg.max_image_size_bytes,
+        "DOCREADER_MAX_TOTAL_IMAGE_SIZE_BYTES": cfg.max_total_image_size_bytes,
         "DOCREADER_DOCX_MAX_PAGES": cfg.docx_max_pages,
+        "DOCREADER_PDF_MAX_PAGES": cfg.pdf_max_pages,
         "DOCREADER_MARKITDOWN_MAX_WORKERS": cfg.markitdown_max_workers,
         "DOCREADER_ODL_MAX_WORKERS": cfg.odl_max_workers,
         "DOCREADER_ODL_HYBRID": cfg.odl_hybrid,

@@ -9,6 +9,7 @@ from typing import List, Optional
 import textract
 
 from docreader.config import CONFIG
+from docreader.limits import ParseCancelledError
 from docreader.models.document import Document
 from docreader.parser.docx2_parser import Docx2Parser
 from docreader.utils.tempfile import TempDirContext, TempFileContext
@@ -19,7 +20,12 @@ logger = logging.getLogger(__name__)
 class SandboxExecutor:
     """Sandbox executor for running commands with proxy configuration"""
 
-    def __init__(self, proxy: Optional[str] = None, default_timeout: int = 60):
+    def __init__(
+        self,
+        proxy: Optional[str] = None,
+        default_timeout: int = 60,
+        is_cancelled=None,
+    ):
         """Initialize sandbox executor with configuration
 
         Args:
@@ -30,6 +36,7 @@ class SandboxExecutor:
         # Use 'or None' to convert empty string to None, then apply default value
         self.proxy = proxy or CONFIG.external_https_proxy or "http://128.0.0.1:1"
         self.default_timeout = default_timeout
+        self.is_cancelled = is_cancelled
 
     def execute_in_sandbox(self, cmd: List[str]) -> tuple:
         """Execute command in sandbox with proxy configuration
@@ -48,6 +55,8 @@ class SandboxExecutor:
         for method in sandbox_methods:
             try:
                 return method(cmd)
+            except ParseCancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Sandbox method {method.__name__} failed: {e}")
                 continue
@@ -63,6 +72,9 @@ class SandboxExecutor:
         Returns:
             Tuple of (stdout, stderr, returncode)
         """
+        if self.is_cancelled is not None and self.is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")
+
         # Set up environment with proxy configuration
         env = os.environ.copy()
         if self.proxy:
@@ -82,14 +94,24 @@ class SandboxExecutor:
             env=env,
         )
 
-        try:
-            stdout, stderr = process.communicate(timeout=self.default_timeout)
-            return stdout, stderr, process.returncode
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raise RuntimeError(
-                f"Command execution timeout after {self.default_timeout} seconds"
-            )
+        deadline = time.monotonic() + self.default_timeout
+        while True:
+            if self.is_cancelled is not None and self.is_cancelled():
+                process.kill()
+                process.communicate()
+                raise ParseCancelledError("DocReader request was cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                process.communicate()
+                raise RuntimeError(
+                    f"Command execution timeout after {self.default_timeout} seconds"
+                )
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                return stdout, stderr, process.returncode
+            except subprocess.TimeoutExpired:
+                continue
 
 
 logger = logging.getLogger(__name__)
@@ -101,7 +123,7 @@ class DocParser(Docx2Parser):
     def __init__(self, *args, **kwargs):
         """Initialize DOC parser with sandbox executor"""
         super().__init__(*args, **kwargs)
-        self.sandbox_executor = SandboxExecutor()
+        self.sandbox_executor = SandboxExecutor(is_cancelled=self._is_cancelled)
 
     def parse_into_text(self, content: bytes) -> Document:
         logger.info(f"Parsing DOC document, content size: {len(content)} bytes")
@@ -120,10 +142,13 @@ class DocParser(Docx2Parser):
         # Save byte content as a temporary file
         with TempFileContext(content, ".doc") as temp_file_path:
             for handle in handle_chain:
+                self.raise_if_cancelled()
                 try:
                     document = handle(temp_file_path)
                     if document:
                         return document
+                except ParseCancelledError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse DOC with {handle.__name__} {e}")
 

@@ -176,7 +176,7 @@ func (c *PaddleOCRVLReader) callLayoutParsing(
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("PaddleOCR-VL API status %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, fmt.Errorf("PaddleOCR-VL API status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result paddleOCRVLResponse

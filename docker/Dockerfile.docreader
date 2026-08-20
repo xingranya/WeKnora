@@ -7,7 +7,8 @@ ARG APT_MIRROR=""
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s@http://deb.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources && \
         sed -i "s@http://security.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources; \
-    fi
+    fi && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' > /etc/apt/apt.conf.d/80-weknora-retries
 
 WORKDIR /app
 
@@ -85,7 +86,8 @@ ARG APT_MIRROR=""
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s@http://deb.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources && \
         sed -i "s@http://security.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources; \
-    fi
+    fi && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' > /etc/apt/apt.conf.d/80-weknora-retries
 
 WORKDIR /app
 
@@ -152,8 +154,9 @@ COPY --from=builder /app/docreader docreader
 # 创建共享临时图片目录
 RUN mkdir -p /tmp/docreader
 
-# 暴露 gRPC 端口
-EXPOSE 50051
+# 暴露 gRPC 端口；构建参数需与 Compose 的运行时端口保持一致。
+ARG DOCREADER_GRPC_PORT=50051
+EXPOSE ${DOCREADER_GRPC_PORT}
 
 # 直接运行 Python 服务（日志输出到 stdout/stderr）
 CMD ["uv", "run", "-m", "docreader.main"]

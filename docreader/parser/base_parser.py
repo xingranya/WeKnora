@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from docreader.models.document import Document
+from docreader.limits import ParseCancelledError
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -26,6 +27,7 @@ class BaseParser(ABC):
     ):
         self.file_name = file_name
         self.file_type = file_type or os.path.splitext(file_name)[1].lstrip(".")
+        self._is_cancelled = kwargs.pop("_is_cancelled", None)
 
         logger.info(
             "Initializing parser for file=%s, type=%s",
@@ -47,15 +49,21 @@ class BaseParser(ABC):
 
         No chunking, no OCR, no VLM caption — those are done in Go.
         """
+        self.raise_if_cancelled()
         logger.info(
             "Parsing document with %s, bytes: %d",
             self.__class__.__name__,
             len(content),
         )
         document = self.parse_into_text(content)
+        self.raise_if_cancelled()
         logger.info(
             "Extracted %d characters from %s",
             len(document.content),
             self.file_name,
         )
         return document
+
+    def raise_if_cancelled(self) -> None:
+        if self._is_cancelled is not None and self._is_cancelled():
+            raise ParseCancelledError("DocReader request was cancelled")

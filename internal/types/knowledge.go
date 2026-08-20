@@ -166,6 +166,7 @@ type Knowledge struct {
 	// File size of the knowledge
 	FileSize int64 `json:"file_size"`
 	// File hash of the knowledge
+	// FileHash 新文件使用 64 位 SHA-256；升级前记录可能保留 32 位 MD5，去重路径需兼容两者。
 	FileHash string `json:"file_hash"`
 	// File path of the knowledge
 	FilePath string `json:"file_path"`

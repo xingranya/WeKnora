@@ -140,6 +140,9 @@ func ListAllEngines(
 		if seen[re.Name] {
 			continue
 		}
+		if re.MaxFileSizeBytes <= 0 {
+			re.MaxFileSizeBytes = DocReaderPayloadMaxBytes()
+		}
 		result = append(result, re)
 	}
 
@@ -147,14 +150,33 @@ func ListAllEngines(
 }
 
 func engineMaxFileSize(name string) int64 {
+	return ParserMaxFileSizeBytes(name)
+}
+
+// ParserMaxFileSizeBytes 返回解析器入口允许的文件正文上限。
+func ParserMaxFileSizeBytes(name string) int64 {
 	switch name {
 	case MinerUEngineName:
 		return 2 * 1024 * 1024 * 1024
-	case BuiltinEngineName:
-		return 50 * 1024 * 1024
+	case "", BuiltinEngineName, AnydocEngineName:
+		return DocReaderPayloadMaxBytes()
 	default:
+		if _, registered := lookupEngine(name); !registered {
+			return DocReaderPayloadMaxBytes()
+		}
 		return 100 * 1024 * 1024
 	}
+}
+
+// UsesRemoteDocReader 判断一次解析是否会把文件正文发送给远端 DocReader。
+func UsesRemoteDocReader(engine, fileType string, isURL bool) bool {
+	if registration, registered := lookupEngine(engine); registered {
+		return registration.Name() == BuiltinEngineName || registration.Name() == AnydocEngineName
+	}
+	if engine == "" && !isURL && IsSimpleFormat(fileType) {
+		return false
+	}
+	return true
 }
 
 // errEngineUnavailable reports an engine that is registered but cannot run for

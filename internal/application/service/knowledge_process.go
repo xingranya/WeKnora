@@ -325,33 +325,17 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 	// 打印每个Chunk的详细信息
 	for idx, chunkData := range chunks {
-		contentPreview := chunkData.Content
-		if len(contentPreview) > 200 {
-			contentPreview = contentPreview[:200] + "..."
-		}
-		logger.Infof(ctx, "[DocReader] Chunk #%d (seq=%d): 内容长度=%d, 图片数=%d, 范围=[%d-%d]",
-			idx, chunkData.Seq, len(chunkData.Content), len(chunkData.Images), chunkData.Start, chunkData.End)
-		logger.Debugf(ctx, "[DocReader] Chunk #%d 内容预览: %s", idx, contentPreview)
+		logger.Infof(ctx, "[DocReader] Chunk #%d (seq=%d): 内容=%q 图片数=%d 范围=[%d-%d]",
+			idx, chunkData.Seq, logger.AuditText(chunkData.Content, 8192),
+			len(chunkData.Images), chunkData.Start, chunkData.End)
 
-		// 打印图片详细信息
+		// 公司审计需要保留图片来源、标注和 OCR；统一日志层只遮蔽认证凭据。
 		for imgIdx, img := range chunkData.Images {
-			logger.Infof(ctx, "[DocReader]   图片 #%d: URL=%s", imgIdx, img.URL)
-			logger.Infof(ctx, "[DocReader]   图片 #%d: OriginalURL=%s", imgIdx, img.OriginalURL)
-			if img.Caption != "" {
-				captionPreview := img.Caption
-				if len(captionPreview) > 100 {
-					captionPreview = captionPreview[:100] + "..."
-				}
-				logger.Infof(ctx, "[DocReader]   图片 #%d: Caption=%s", imgIdx, captionPreview)
-			}
-			if img.OCRText != "" {
-				ocrPreview := img.OCRText
-				if len(ocrPreview) > 100 {
-					ocrPreview = ocrPreview[:100] + "..."
-				}
-				logger.Infof(ctx, "[DocReader]   图片 #%d: OCRText=%s", imgIdx, ocrPreview)
-			}
-			logger.Infof(ctx, "[DocReader]   图片 #%d: 位置=[%d-%d]", imgIdx, img.Start, img.End)
+			logger.Infof(ctx, "[DocReader]   图片 #%d: 位置=[%d-%d] url=%q caption=%q ocr=%q",
+				imgIdx, img.Start, img.End,
+				logger.AuditText(img.OriginalURL, 4096),
+				logger.AuditText(img.Caption, 4096),
+				logger.AuditText(img.OCRText, 4096))
 		}
 	}
 	logger.Infof(ctx, "[DocReader] ========== 解析结果概览结束 ==========")
@@ -940,7 +924,7 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 		logger.GetLogger(ctx).WithField("error", err).Warnf("GetSummary returned no usable content")
 		return "", err
 	}
-	logger.GetLogger(ctx).WithField("summary", content).Infof("GetSummary success")
+	logger.GetLogger(ctx).WithField("summary", secutils.SanitizeAuditLog(content)).Infof("GetSummary success")
 	return content, nil
 }
 
@@ -3915,8 +3899,7 @@ func (s *knowledgeService) updateImageInfoLocked(
 			continue
 		}
 		if cImageInfo[0].OriginalURL != image.OriginalURL {
-			logger.Warnf(ctx, "Skipping chunk ID: %s, image URL mismatch: %s != %s",
-				child.ID, cImageInfo[0].OriginalURL, image.OriginalURL)
+			logger.Warnf(ctx, "Skipping chunk ID: %s, image URL mismatch", child.ID)
 			continue
 		}
 
@@ -3954,7 +3937,7 @@ func (s *knowledgeService) updateImageInfoLocked(
 			ImageInfo:       imageInfo,
 		}
 		addChunk = append(addChunk, captionChunk)
-		logger.Infof(ctx, "Created new caption chunk ID: %s for image URL: %s", captionChunk.ID, image.OriginalURL)
+		logger.Infof(ctx, "Created new caption chunk ID: %s", captionChunk.ID)
 	}
 
 	// Create a new OCR chunk if it doesn't exist and we have OCR data
@@ -3970,7 +3953,7 @@ func (s *knowledgeService) updateImageInfoLocked(
 			ImageInfo:       imageInfo,
 		}
 		addChunk = append(addChunk, ocrChunk)
-		logger.Infof(ctx, "Created new OCR chunk ID: %s for image URL: %s", ocrChunk.ID, image.OriginalURL)
+		logger.Infof(ctx, "Created new OCR chunk ID: %s", ocrChunk.ID)
 	}
 	logger.Infof(ctx, "Updated %d chunks out of %d total chunks", len(updateChunk), len(chunkChildren)+1)
 
@@ -4148,8 +4131,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	logger.Infof(ctx, "Processing document task: knowledge_id=%s, file_path=%s, retry=%d/%d",
-		payload.KnowledgeID, payload.FilePath, retryCount, maxRetry)
+	logger.Infof(ctx, "Processing document task: knowledge_id=%s file_path=%q file_url=%q source_url=%q retry=%d/%d",
+		payload.KnowledgeID, secutils.SanitizeAuditLog(payload.FilePath), secutils.SanitizeAuditLog(payload.FileURL),
+		secutils.SanitizeAuditLog(payload.URL), retryCount, maxRetry)
 
 	// 幂等性检查：获取knowledge记录
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
@@ -4279,7 +4263,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	if payload.FileURL != "" {
 		// file_url import: SSRF re-check (防 DNS 重绑定), download, persist, then delegate to convert()
 		if err := secutils.ValidateURLForSSRF(payload.FileURL); err != nil {
-			logger.Errorf(ctx, "File URL rejected for SSRF protection in ProcessDocument: %s, err: %v", payload.FileURL, err)
+			logger.Errorf(ctx, "File URL rejected for SSRF protection in ProcessDocument: %v", err)
 			knowledge.ParseStatus = "failed"
 			knowledge.ErrorMessage = "File URL is not allowed for security reasons"
 			knowledge.UpdatedAt = time.Now()
@@ -4291,7 +4275,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		resolvedFileType := payload.FileType
 		contentBytes, err := downloadFileFromURL(ctx, payload.FileURL, &resolvedFileName, &resolvedFileType)
 		if err != nil {
-			logger.Errorf(ctx, "Failed to download file from URL: %s, error: %v", payload.FileURL, err)
+			logger.Errorf(ctx, "Failed to download file from URL: %v", err)
 			if isLastRetry {
 				knowledge.ParseStatus = "failed"
 				knowledge.ErrorMessage = err.Error()
@@ -4357,7 +4341,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 				if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 					logger.Warnf(ctx, "Failed to update knowledge title from extracted page title: %v", err)
 				} else {
-					logger.Infof(ctx, "Updated knowledge title to extracted page title: %s", extractedTitle)
+					logger.Infof(ctx, "Updated knowledge title from extracted page title: title=%q", secutils.SanitizeAuditLog(extractedTitle))
 				}
 			}
 		}
@@ -4582,7 +4566,7 @@ func (s *knowledgeService) convert(
 
 	if isURL {
 		if err := secutils.ValidateURLForSSRF(payload.URL); err != nil {
-			logger.Errorf(ctx, "URL rejected for SSRF protection: %s, err: %v", payload.URL, err)
+			logger.Errorf(ctx, "URL rejected for SSRF protection: %v", err)
 			knowledge.ParseStatus = "failed"
 			knowledge.ErrorMessage = "URL is not allowed for security reasons"
 			knowledge.UpdatedAt = time.Now()
@@ -4600,9 +4584,15 @@ func (s *knowledgeService) convert(
 
 	logger.Infof(ctx, "[convert] kb=%s fileType=%s isURL=%v engine=%q rules=%+v",
 		kb.ID, fileType, isURL, parserEngine, eff.ChunkingConfig.ParserEngineRules)
-	leaseCtx, release, gateErr := gateParserRead(ctx, parserEngine, mergedOverrides)
+	leaseCtx, release, gateErr := gateParserReadForRoute(
+		ctx,
+		parserEngine,
+		fileType,
+		isURL,
+		mergedOverrides,
+	)
 	if gateErr != nil {
-		return nil, fmt.Errorf("acquire MinerU concurrency slot: %w", gateErr)
+		return nil, fmt.Errorf("acquire parser concurrency slot: %w", gateErr)
 	}
 	defer release()
 	ctx = leaseCtx
@@ -4642,9 +4632,13 @@ func (s *knowledgeService) convert(
 		if parserEngine == docparser.MinerUEngineName {
 			req.FileReader = fileReader
 		} else {
-			const maxBufferedParserFile = int64(100 * 1024 * 1024)
+			maxBufferedParserFile := docparser.ParserMaxFileSizeBytes(parserEngine)
 			if knowledge.FileSize > maxBufferedParserFile {
-				err := fmt.Errorf("parser %q does not support streaming files larger than 100MB", parserEngine)
+				err := fmt.Errorf(
+					"parser %q does not support files larger than %dMB",
+					parserEngine,
+					maxBufferedParserFile/(1024*1024),
+				)
 				s.failStage(ctx, knowledge.ID, types.StageDocReader,
 					werrors.ErrCodeDocReaderParseFailed, "selected parser cannot stream this large file", err)
 				return s.failKnowledge(ctx, knowledge, isLastRetry, "%v", err)
@@ -4654,6 +4648,16 @@ func (s *knowledgeService) convert(
 				s.failStage(ctx, knowledge.ID, types.StageDocReader,
 					werrors.ErrCodeDocReaderParseFailed, "failed to read file", err)
 				return s.failKnowledge(ctx, knowledge, isLastRetry, "failed to read file: %v", err)
+			}
+			if int64(len(contentBytes)) > maxBufferedParserFile {
+				err := fmt.Errorf(
+					"parser %q file content exceeds %dMB limit",
+					parserEngine,
+					maxBufferedParserFile/(1024*1024),
+				)
+				s.failStage(ctx, knowledge.ID, types.StageDocReader,
+					werrors.ErrCodeDocReaderParseFailed, "selected parser file is too large", err)
+				return s.failKnowledge(ctx, knowledge, isLastRetry, "%v", err)
 			}
 			req.FileContent = contentBytes
 		}
@@ -4721,13 +4725,12 @@ func (s *knowledgeService) callDocReaderWithTimeout(
 		// error via %w so errors.Is(callCtx.Err(), context.DeadlineExceeded)
 		// still works for upstream classification.
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			logger.Errorf(ctx, "[convert] docreader call timed out after %s (limit %s) for %q",
-				elapsed, timeout, req.FileName)
+			logger.Errorf(ctx, "[convert] docreader call timed out after %s (limit %s)", elapsed, timeout)
 			return nil, fmt.Errorf("docreader call timeout after %s: %w", timeout, err)
 		}
 		return nil, err
 	}
-	logger.Infof(ctx, "[convert] docreader call ok in %s for %q", elapsed, req.FileName)
+	logger.Infof(ctx, "[convert] docreader call ok in %s", elapsed)
 	return result, nil
 }
 
@@ -4846,9 +4849,9 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 		task := asynq.NewTask(types.TypeImageMultimodal, payloadBytes,
 			asynq.Queue(types.QueueMultimodal), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
 		if _, err := s.task.Enqueue(task); err != nil {
-			logger.Warnf(ctx, "Failed to enqueue image multimodal task for %s: %v", img.ServingURL, err)
+			logger.Warnf(ctx, "Failed to enqueue image multimodal task: knowledge=%s image_index=%d err=%v", knowledge.ID, idx, err)
 		} else {
-			logger.Infof(ctx, "Enqueued image:multimodal task for %s", img.ServingURL)
+			logger.Infof(ctx, "Enqueued image:multimodal task: knowledge=%s image_index=%d", knowledge.ID, idx)
 		}
 	}
 }

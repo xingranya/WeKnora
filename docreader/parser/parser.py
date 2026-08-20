@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from typing import Any, Optional
 
 from docreader.models.document import Document
@@ -51,6 +52,7 @@ class Parser:
         content: bytes,
         parser_engine: Optional[str] = None,
         engine_overrides: Optional[dict[str, Any]] = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> Document:
         """Parse file content to markdown."""
         engine = parser_engine or ""
@@ -72,6 +74,7 @@ class Parser:
         parser = cls(
             file_name=file_name,
             file_type=effective_file_type,
+            _is_cancelled=is_cancelled,
             **overrides,
         )
 
@@ -89,11 +92,12 @@ class Parser:
         title: str,
         parser_engine: Optional[str] = None,
         engine_overrides: Optional[dict[str, Any]] = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> Document:
         """Parse content from a URL to markdown."""
         logger.info("Parsing URL: %s, title: %s", url, title)
 
-        parser = WebParser(title=title)
+        parser = WebParser(title=title, _is_cancelled=is_cancelled)
         logger.info("Starting to parse URL content")
         result = parser.parse(url.encode())
 
