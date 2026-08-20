@@ -1,6 +1,6 @@
 # WeKnora 当前版本 Docker 部署与验收手册
 
-最后现场核验：2026-08-19 14:15（Asia/Shanghai）
+最后现场核验：2026-08-20 08:05（Asia/Shanghai）
 
 本文记录见外传媒当前 WeKnora 分支在远端生产机上的 Docker 部署方式、配置边界、验收门槛和回滚方法。所有命令均不得包含 SSH 密码、API Key、数据库密码或模型凭据。
 
@@ -13,7 +13,7 @@
 | 远端仓库 | `/home/fox/WeKnora` |
 | Git 远端 | `https://github.com/xingranya/WeKnora.git` |
 | 生产分支 | `codex/jiwai-branding` |
-| 生产功能提交 | `5b492baa5dbee50744c9532ccdc1623939287245` |
+| 生产功能提交 | `80e66d563d5e165b24677fb0d7b2364d687614e4` |
 | Compose 项目名 | `weknora` |
 | 前端地址 | `http://100.78.64.62:8081` |
 | 后端地址 | `http://100.78.64.62:8080` |
@@ -26,19 +26,19 @@
 
 | 服务 | Compose 期望标签 | 当前实际容器标签 | 状态 |
 | --- | --- | --- | --- |
-| app | `wechatopenai/weknora-app:deploy-5b492baa` | `deploy-eb02a753` | healthy，重启 0 |
-| frontend | `wechatopenai/weknora-ui:deploy-5b492baa` | `deploy-5b492baa` | running，重启 0 |
-| docreader | `wechatopenai/weknora-docreader:deploy-5b492baa` | `deploy-2be2572` | healthy，重启 0 |
+| app | `wechatopenai/weknora-app:deploy-80e66d56` | `deploy-80e66d56`，镜像 ID `sha256:d3e0f56e0331a4760c7d44b2e555f7dd2b19b57d7ec3f63c32d9959cb782af0f` | healthy，重启 0 |
+| frontend | `wechatopenai/weknora-ui:deploy-80e66d56` | `deploy-c403766b`，镜像 ID `sha256:7b8ad48a0304abd40d26d0a36d08ff11480c5d1703ce31057ab28225ea95408b` | running，重启 0 |
+| docreader | `wechatopenai/weknora-docreader:deploy-80e66d56` | `deploy-ddf88efa`，镜像 ID `sha256:b9c4636b65b5d4947d5e09cd311ba6cf37f1f2da37c51d4be2b911d432f12abe` | healthy，重启 0 |
 
-本次 `5b492baa` 发布浏览器插件 `v1.3.1`，修复巨量引擎帮助中心通过 Shadow DOM 延迟挂载飞书 iframe 时只采集外壳的问题，并改进飞书虚拟滚动、附件与图片占位处理。frontend 已切换到最终标签，镜像清单摘要为 `sha256:03c812de6fe85e412ea924b2e2942c460cf61dc2fc1a20f617c3cdf400445230`；app 与 docreader 未变化且未重启，当前健康镜像已增加 `deploy-5b492baa` 别名。
+`a9a09aab` 包含知识库目录一致性、问题生成并发与索引补偿等后端修复；`c403766b` 是其后的前端验收修复，解决上传确认层关闭顺序、并发确认请求隔离、过期标签响应、纯文本消息空图片占位和 Wiki 图片预览键盘焦点；`80e66d56` 进一步让知识库与聊天临时附件共享 `parser:mineru` 分布式并发租约。当前只重建并切换了 app，frontend/docreader 复用已验收镜像并增加 `deploy-80e66d56` 别名。
 
 ### 1.2 当前关键环境开关
 
 远端 `.env` 已现场确认以下非敏感项：
 
 ```dotenv
-WEKNORA_VERSION=deploy-5b492baa
-AUTO_MIGRATE=true
+WEKNORA_VERSION=deploy-80e66d56
+AUTO_MIGRATE=false
 STORAGE_TYPE=minio
 SSRF_WHITELIST_EXTRA=searxng,qdrant,milvus,weaviate,doris-fe,doris-be,host.docker.internal,minio,192.168.0.20
 KNOWLEDGE_UPLOAD_MAX_FILE_SIZE_MB=2048
@@ -82,11 +82,22 @@ backups/
 - 持久化知识库文件夹、可续传上传会话及迁移 `000086`。
 - 知识库、临时文档、聊天附件统一使用平台解析配置。
 - 模型设置、解析引擎设置、API、国际化和回归测试更新。
+- 问题生成单批最多 4 个模型调用并发，带 operation/revision fencing、持久补偿、Housekeeping 恢复和父子分块共享锁域。
+- 目录切换使用知识库、目录路径和请求代次三重提交保护；新建目录乐观显示，迟到响应不能覆盖当前目录。
+- 上传确认在队列启动前进入关闭状态，并用 request revision 隔离并发操作及异步标签结果；全局队列跨页面持续运行。
 - Docker 构建支持 Debian、Rust 镜像参数。
 
 关键提交：
 
 ```text
+80e66d5 fix(parser): 统一临时附件 MinerU 并发
+c403766 fix(upload): 隔离过期标签响应
+4cc6ccc fix(wiki): 保留图片预览键盘交互
+7d00046 fix(upload): 取消被替代的确认请求
+fb81d6b fix(chat): 隐藏空图片预览
+14341e7 fix(upload): 确认后立即关闭上传弹窗
+a9a09aa fix(knowledge): 修复目录切换与创建反馈
+bbafa09 fix(knowledge): 保证问题生成与索引一致性
 5b492ba fix(browser-extension)：优化巨量文档加载与飞书内容采集
 deaa8ed feat(extension): 支持文档集与长网页采集
 eb02a75 fix(extension): 改用 ZIP 解压安装
@@ -200,6 +211,20 @@ cp -a .env ".env.before-deploy-${DEPLOY_TS}"
 ```
 
 该目录约 13 GiB，包含 16 个运行镜像归档、10 个 `weknora_*` Docker 卷、PostgreSQL custom dump 与 globals、`.env`/Compose/config/frontend dist、Git bundle、MinerU systemd 配置和可恢复 Conda 环境。镜像归档为 `images/running-images-20260819-154754.tar.zst`，三个核心镜像另有不可覆盖回滚标签 `rollback-before-large-upload-20260819-154754`。回滚时先停止写入并按清单选择代码、镜像、数据库或卷恢复；不要直接覆盖运行中的数据卷，也不要把快照中的任何环境文件内容复制到命令、日志或文档中。
+
+问题生成、目录一致性、前端收尾与解析 gate 另有三级发布快照：
+
+```text
+/home/fox/WeKnora/backups/releases/20260820-053502-question-folder-fix
+/home/fox/WeKnora/backups/releases/20260820-063053-pre-ui-final
+/home/fox/WeKnora/backups/releases/20260820-075247-pre-parser-gate
+```
+
+`20260820-053502-question-folder-fix` 保存当时的 `.env`、Compose、容器配置、源码 bundle 以及 app/frontend 镜像归档；`source.bundle` SHA256 为 `618599de575c71dcda910ddb1f2289be931368e630abeddfb2d6cc48815cc4c4`，`images/app-frontend.tar.zst` SHA256 为 `520ec1cfc83728b4953d6d4a556426e9fbc354293200563459395c71125bd8fb`。
+
+`20260820-063053-pre-ui-final` 是切换 `c403766b` frontend 前的直接回滚点，约 2.2 GiB，保存 `.env`、Compose、容器配置、源码 bundle 和当时正在运行的 app/frontend/docreader 三个核心镜像。`source.bundle` SHA256 为 `b4c3e82249a40285723e0271136a01538dbf8f2f19acb943fc4ca5ba9021a3ae`，`images/core-images.tar.zst` SHA256 为 `1cf208bf9a5414eec3d8871958664ced0d6f525b555327250b06f08b8112b74b`；Git bundle 和 zstd 完整性均已验证。三个旧镜像带有 `rollback-before-ui-final-20260820-063053` 不可覆盖标签。
+
+`20260820-075247-pre-parser-gate` 是 app `80e66d56` 切换前的直接回滚点，保存 `.env`、Compose、容器配置，并给切换前的 app/frontend/docreader 镜像增加 `rollback-before-parser-gate-20260820-075247` 标签；该快照用于仅回滚 app 并保留已验收 frontend/docreader。
 
 ### 5.2 模型采用状态
 
@@ -483,12 +508,12 @@ platform_parser_engine_configs: 1 row
 环境：/home/fox/miniconda3/envs/mineru-3.4.5
 端口：0.0.0.0:8000
 模式：pipeline，CUDA_VISIBLE_DEVICES=-1
-并发：MINERU_API_MAX_CONCURRENT_REQUESTS=1
+并发：MINERU_API_MAX_CONCURRENT_REQUESTS=2
 ```
 
 2026-08-19 已从 MinerU 2.7.0 全量替换为 3.4.5。旧版只接受 PDF 和图片，虽然 WeKnora 将 `docx` 路由到 MinerU，服务仍会返回 `Unsupported file type: docx`。3.4.5 的上传白名单已包含 `docx`、`pptx` 和 `xlsx`；现场从 WeKnora app 容器调用生产 `http://host.docker.internal:8000/file_parse`，DOCX 返回 HTTP 200、`version=3.4.5`，标题、正文和表格均存在。
 
-当前并发上限为 1：一个请求执行期间，第二个并发请求会返回 HTTP 503，而不是进入应用层等待队列。服务器有 GTX 1060 6GB，但当前明确禁用 CUDA，因此不要在没有压测、内存监控和任务排队改造的情况下提高并发。
+当前 systemd 与平台解析配置的 `mineru_max_concurrency` 均为 2。WeKnora 以解析引擎为 key 使用 Redis 分布式信号量，知识库和聊天临时附件共用 `parser:mineru` 租约；超过上限的任务进入等待状态，不直接把并发压力打到 MinerU，Lite 模式使用本地信号量。服务器虽有 GTX 1060 6GB，但当前生产明确使用 CPU pipeline，不应把显卡存在本身当作提高并发的依据。继续提高并发前必须重新覆盖大文件、扫描 PDF、Office 文档、RSS、swap、p95 和 30 分钟浸泡测试。
 
 旧 `/home/fox/miniconda3/envs/mineru` 环境已按要求删除，仅保留新环境。升级前配置和依赖清单位于：
 
@@ -510,7 +535,7 @@ unsafe MinIO endpoint: SSRF validation failed
 
 ### 9.4 持久化文件夹与可续传上传
 
-本次版本由 PostgreSQL 迁移 `migrations/versioned/000086_knowledge_folders_and_upload_sessions.up.sql` 创建持久化文件夹、上传会话和上传分片表，并回填已有知识条目的文件夹祖先目录；生产发布前已只读确认远端仍为 `85|f`，所以 `000086` 尚未在生产执行，不需要兼容性 `000087`。SQLite/Lite 使用 `migrations/sqlite/000005_knowledge_folders_and_uploads` 提供同等表和字段。上传会话保存 `final_file_path` 和 `finalize_stage`，用于服务重启后继续完成或清理已经写入最终存储的对象；`knowledges.source_file_quota_bytes` 专用列记录已计入空间配额的原始文件字节数。对应 API 位于 `/api/v1/knowledge-bases/:id/knowledge/folders` 和 `/api/v1/knowledge-bases/:id/knowledge/uploads`。
+本次版本由 PostgreSQL 迁移 `migrations/versioned/000086_knowledge_folders_and_upload_sessions.up.sql` 创建持久化文件夹、上传会话和上传分片表，并回填已有知识条目的文件夹祖先目录；生产当前状态已现场确认是 `86|f`。SQLite/Lite 使用 `migrations/sqlite/000005_knowledge_folders_and_uploads` 提供同等表和字段。上传会话保存 `final_file_path` 和 `finalize_stage`，用于服务重启后继续完成或清理已经写入最终存储的对象；`knowledges.source_file_quota_bytes` 专用列记录已计入空间配额的原始文件字节数。对应 API 位于 `/api/v1/knowledge-bases/:id/knowledge/folders` 和 `/api/v1/knowledge-bases/:id/knowledge/uploads`。
 
 当前非敏感配置为：
 
@@ -524,6 +549,12 @@ KNOWLEDGE_UPLOAD_TEMP_DIR=/data/files/upload-sessions
 `KNOWLEDGE_UPLOAD_CHUNK_SIZE_MB` 只允许 1-16 的整数。当前 Compose 只持久化 `/data/files`，所以 `KNOWLEDGE_UPLOAD_TEMP_DIR` 必须位于该目录下；多 app 副本必须把同一绝对路径挂载为所有副本可读写的共享 RWX 存储。前端队列默认只运行一个活动上传任务，其他任务排队执行；当前已取消人为上传带宽限速。该单活动策略是用户界面队列的默认调度方式，不是新增的带宽限制。服务端同一用户最多保留 5 个未完成会话，同一空间最多保留 10 GiB 未完成上传暂存量；不能据此扩大并发或绕过会话过期清理。
 
 app 启动后立即扫描 `completing` 和 cleanup-pending 会话，之后每 5 分钟重试；恢复时必须加载会话所属空间的完整存储配置，不能回退到其他空间或进程默认后端。最终对象流程为“持久化物理准备路径 -> 流式写入 -> 幂等注册资源引用 -> 创建知识 -> 清理分片”，任一步骤重启后都从数据库阶段继续。
+
+### 9.5 空凭据即时通讯渠道
+
+2026-08-20 发布时发现公司空间 `10000` 有一个已启用但凭据为空的飞书 WebSocket 渠道，启动日志报 `appSecret and clientAssertionProvider cannot be nil`。现场先将渠道 ID、空间、平台、名称、启用状态、模式和更新时间保存到 `20260820-053502-question-folder-fix/im-channel-before-disable.txt`，再用“仍启用且 credentials 仍为空”作为条件只禁用这一条记录，更新 1 行。
+
+禁用后 app 启动日志为 `Loaded 0 enabled channels`，当前日志无 panic、FATAL、ERROR。恢复该渠道前必须先通过管理界面配置有效凭据并完成连接测试，再重新启用；不得把凭据写入本手册、SQL、命令行或 Git。
 
 ## 10. 验收
 
@@ -540,6 +571,8 @@ curl -fsSI http://127.0.0.1:8081/ | head
 - app、docreader 为 healthy。
 - frontend 为 running，首页 HTTP 200。
 - app、frontend、docreader 重启次数均为 0。
+
+2026-08-20 现场结果：app 为 `deploy-80e66d56` 且 healthy，frontend 为 `deploy-c403766b`，docreader 为 `deploy-ddf88efa` 且 healthy，三者重启次数均为 0；app `/health`、公网 `https://know.seeway.co/` 均返回 HTTP 200。app 容器已确认 `AUTO_MIGRATE=false`；frontend 镜像内 `Settings-*.js` 已确认包含前端提交 `c403766`。
 
 ### 10.2 静态资源
 
@@ -634,7 +667,7 @@ t
 14|8
 ```
 
-还应通过真实 API 验收一次：创建一个测试文件夹，确认目录树能看到空文件夹；初始化一个唯一命名的可续传上传，上传至少一个 4 MiB 分片，查询 `received_bytes` 和 `received_parts`，然后取消会话并确认暂存记录已清理。测试数据必须使用专用知识库并在验收后删除。
+2026-08-20 已通过真实浏览器会话调用生产 API：初始化 `acceptance-resume-c403.txt` 返回 HTTP 201 和 `chunk_size=4194304`；上传第 0 片返回 HTTP 200，查询得到 `received_bytes=4194304`、`received_parts=[0]`；取消返回 HTTP 200，后续状态为 `cancelled`。数据库复核该会话分片记录数为 0，app 容器内对应 4 MiB 临时文件不存在，说明请求内同步清理成功。只有清理失败并停留在 `*_cleanup_pending` 时，Housekeeping 才负责后续重试。
 
 ### 10.4 页面与 API
 
@@ -662,28 +695,93 @@ t
 
 当前版本已验证：知识解析完成并启用；临时附件为 23 tokens、1 chunk；测试数据全部清理。
 
+### 10.6 2026-08-20 生产真实验收记录
+
+代码与构建验收：
+
+- 远端构建容器内 `go test ./... -count=1` 全仓 Go 测试通过。
+- frontend `npm test` 最终为 432/432 通过，`npm run type-check` 通过，国际化审计 11/11 通过。
+- 本地和远端生产构建均完成 6387 个模块转换；远端 nginx frontend 镜像构建成功。
+- 多轮独立子代理审查依次发现并修复问题生成补偿、父子锁、目录迟到响应、上传确认并发、图片预览焦点、过期标签响应和聊天附件 MinerU gate；最终复审结论为 P0 无、P1 无。
+
+ego 生产浏览器验收使用专用知识库 `发布验收-b0ac7fde-20260819`：
+
+- 目录 `验收目录/子目录/终审目录-20260820` 创建后立即出现在目录树并被选中；切换目录时旧卡片立即清空，迟到响应未覆盖当前目录。
+- 上传 `issue_2634_vertical_merge.docx` 时队列立即出现，状态按 `上传中 -> 等待解析 -> 已完成` 推进；详情保留两张表格和 2 个片段，Q0101/BRCA1、Q0102/BRCA2、Q0103/MLH1、Q0104/APC、15 个工作日及纵向合并检测方法均正确。
+- 首个片段生成 3 个辅助召回问题。Trace 总耗时 10.88 秒，其中问题批次 7.50 秒、摘要 5.10 秒，两项后处理并行执行；问题生成不再表现为逐问题串行等待。
+- 启用公司预置视觉模型后上传 `test_text.png`，队列跨知识库到新对话路由持续运行并完成；摘要和片段识别出图片中的 `OCR` 文本。
+- 基础问答“遗传性乳腺癌对应的项目编号和相关基因是什么？”返回 `Q0101` 和 `BRCA1`，检索完成并显示 3 篇引用。
+- app `80e66d56` 发布后通过聊天附件上传同一 DOCX，页面显示已解析 1 个附件，附件问答再次返回 `Q0101` 和 `BRCA1`；测试会话随后删除。运行队列接口返回 `parser_limiter_available=true`。
+- 发布后再次上传 `docreader/README.md`：确认后队列立即出现，确认层完成关闭动画后不再残留，文件解析到已完成。纯文本会话中 `.t-image__error` 和空图片 trigger 均为 0。
+- 本轮新增的 MD、PNG、DOCX、临时文件夹和测试会话均已删除；清理后目录树恢复为根目录 2 个文档、`验收目录/子目录` 1 个文档。
+- 可续传上传生产 API 已完成 4 MiB 分片初始化、SHA256 校验上传、确认字节查询和取消，结果分别为 HTTP 201/200/200，取消后状态为 `cancelled`。
+
+服务与资源验收：
+
+- PostgreSQL migration 为 `86|f`；MinerU 3.4.5 systemd active、`NRestarts=0`，systemd 与平台并发均为 2。
+- Skill ZIP、`jiwai-knowledge-assistant-1.3.1.crx`、`jiwai-knowledge-assistant-1.3.1.zip` 公网下载均为 HTTP 200。
+- 最近 20 分钟 app 日志无 panic、FATAL、ERROR；公网首页为 HTTP 200。
+
 ## 11. 回滚
 
 ### 11.1 使用发布前快照回滚代码与镜像
 
-本次发布前快照为：
+本次 frontend 发布的直接回滚快照为：
 
 ```text
-/home/fox/WeKnora/backups/releases/20260819-154754
+/home/fox/WeKnora/backups/releases/20260820-063053-pre-ui-final
 ```
+
+该快照保存切换前的 app/frontend/docreader 三个核心镜像。只回滚 `c403766b` 前端时，加载 `images/core-images.tar.zst`，只把旧 frontend 重标记到回滚版本；app 和 docreader 使用当前运行镜像 ID 建立同版本标签，避免全局 `WEKNORA_VERSION` 让后续 Compose 收敛意外撤销后端修复。数据库和卷保持不动。全量灾难恢复仍使用 `/home/fox/WeKnora/backups/releases/20260819-154754`。
 
 回滚前先停止将要重建的服务，保留当前失败目录、`.env` 备份和 Docker 数据卷；不得直接覆盖生产目录，也不得删除未解释的运行数据。先只读确认快照：
 
 ```bash
-SNAPSHOT=/home/fox/WeKnora/backups/releases/20260819-154754
+SNAPSHOT=/home/fox/WeKnora/backups/releases/20260820-063053-pre-ui-final
+ARCHIVE="$SNAPSHOT/images/core-images.tar.zst"
+EXPECTED_ARCHIVE_SHA256=1cf208bf9a5414eec3d8871958664ced0d6f525b555327250b06f08b8112b74b
+ROLLBACK_VERSION=rollback-before-ui-final-20260820-063053
 test -d "$SNAPSHOT"
 find "$SNAPSHOT" -maxdepth 2 -type f -printf '%P\n' | sort
-zstd -t "$SNAPSHOT/images/running-images-20260819-154754.tar.zst"
+printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "$ARCHIVE" | sha256sum -c -
+zstd -t "$ARCHIVE"
 git bundle verify "$(find "$SNAPSHOT" -type f -name '*.bundle' -print -quit)"
-pg_restore --list "$(find "$SNAPSHOT" -type f -name '*.dump' -print -quit)" >/dev/null
+
+APP_ID_BEFORE=$(docker inspect WeKnora-app --format '{{.Image}}')
+DOCREADER_ID_BEFORE=$(docker inspect WeKnora-docreader --format '{{.Image}}')
+zstd -dc "$ARCHIVE" | docker load
+
+ROLLBACK_FRONTEND=weknora-backup-frontend:${ROLLBACK_VERSION}
+ROLLBACK_FRONTEND_ID=$(docker image inspect "$ROLLBACK_FRONTEND" --format '{{.Id}}')
+test "$ROLLBACK_FRONTEND_ID" = sha256:3acca6892a6097456715486eb5ed45ce0a69b8fb66cd3797a012e360c98cc902
+
+docker image tag "$APP_ID_BEFORE" "wechatopenai/weknora-app:${ROLLBACK_VERSION}"
+docker image tag "$ROLLBACK_FRONTEND" "wechatopenai/weknora-ui:${ROLLBACK_VERSION}"
+docker image tag "$DOCREADER_ID_BEFORE" "wechatopenai/weknora-docreader:${ROLLBACK_VERSION}"
+
+cp -a .env ".env.failed-$(date +%Y%m%d-%H%M%S)"
+ENV_TMP=$(mktemp ./.env.rollback.XXXXXX)
+awk -v version="$ROLLBACK_VERSION" '
+  /^WEKNORA_VERSION=/ { print "WEKNORA_VERSION=" version; found = 1; next }
+  { print }
+  END { if (!found) print "WEKNORA_VERSION=" version }
+' .env > "$ENV_TMP"
+chmod 600 "$ENV_TMP"
+mv "$ENV_TMP" .env
+
+docker compose -p weknora up -d --no-deps frontend
+test "$(docker inspect WeKnora-frontend --format '{{.Image}}')" = "$ROLLBACK_FRONTEND_ID"
+test "$(docker inspect WeKnora-app --format '{{.Image}}')" = "$APP_ID_BEFORE"
+test "$(docker inspect WeKnora-docreader --format '{{.Image}}')" = "$DOCREADER_ID_BEFORE"
+for i in $(seq 1 30); do
+  FRONTEND_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' https://know.seeway.co/ || true)
+  [ "$FRONTEND_HTTP" = 200 ] && break
+  sleep 1
+done
+test "$FRONTEND_HTTP" = 200
 ```
 
-确认快照清单、SHA256、镜像 archive、Git bundle 和 PostgreSQL dump 后，优先加载全量镜像归档并切换三个核心 rollback 标签。常规业务回滚不降数据库；只有确认数据或迁移损坏时，才停止全部写入并恢复 PostgreSQL dump、MinIO 及其他卷快照。恢复后仍按 `migration -> docreader -> app -> frontend` 的顺序验收。
+完成命令后还必须用真实浏览器检查登录、知识库目录切换和一条基础问答；HTTP 200 不能替代页面渲染验收。只有确认数据或迁移损坏时，才改用 `20260819-154754` 全量快照，停止全部写入并恢复 PostgreSQL dump、MinIO 及其他卷；恢复后仍按 `migration -> docreader -> app -> frontend` 的顺序验收。
 
 ### 11.2 回滚 migration 000086
 
@@ -711,21 +809,57 @@ docker compose -p weknora run --rm --no-deps \
 
 ### 11.3 回滚 app 镜像
 
+仅撤回 `80e66d56` 的 MinerU gate 时使用 `20260820-075247-pre-parser-gate` 标签，不降 migration、不切 frontend/docreader：
+
 ```bash
 cd /home/fox/WeKnora
-ROLLBACK_TAG=rollback-before-large-upload-20260819-154754
-ROLLBACK_APP_IMAGE="wechatopenai/weknora-app:${ROLLBACK_TAG}"
-ROLLBACK_APP_IMAGE_ID=$(docker image inspect "$ROLLBACK_APP_IMAGE" --format '{{.Id}}')
-test -n "$ROLLBACK_APP_IMAGE_ID"
+ROLLBACK_VERSION=rollback-before-parser-gate-20260820-075247
+ROLLBACK_APP=weknora-backup-app:${ROLLBACK_VERSION}
+ROLLBACK_FRONTEND=weknora-backup-frontend:${ROLLBACK_VERSION}
+ROLLBACK_DOCREADER=weknora-backup-docreader:${ROLLBACK_VERSION}
+ROLLBACK_APP_ID=$(docker image inspect "$ROLLBACK_APP" --format '{{.Id}}')
+test "$ROLLBACK_APP_ID" = sha256:260fc90a1575235c268d7f850009d1f02d93b437ca5f14313b56a7b518e1a111
+
+FRONTEND_ID_BEFORE=$(docker inspect WeKnora-frontend --format '{{.Image}}')
+DOCREADER_ID_BEFORE=$(docker inspect WeKnora-docreader --format '{{.Image}}')
+docker image tag "$ROLLBACK_APP" "wechatopenai/weknora-app:${ROLLBACK_VERSION}"
+docker image tag "$ROLLBACK_FRONTEND" "wechatopenai/weknora-ui:${ROLLBACK_VERSION}"
+docker image tag "$ROLLBACK_DOCREADER" "wechatopenai/weknora-docreader:${ROLLBACK_VERSION}"
+
 cp -a .env ".env.failed-$(date +%Y%m%d-%H%M%S)"
+ENV_TMP=$(mktemp ./.env.rollback.XXXXXX)
+awk -v version="$ROLLBACK_VERSION" '
+  /^WEKNORA_VERSION=/ { print "WEKNORA_VERSION=" version; versionDone = 1; next }
+  /^AUTO_MIGRATE=/ { print "AUTO_MIGRATE=false"; migrateDone = 1; next }
+  { print }
+  END {
+    if (!versionDone) print "WEKNORA_VERSION=" version
+    if (!migrateDone) print "AUTO_MIGRATE=false"
+  }
+' .env > "$ENV_TMP"
+chmod 600 "$ENV_TMP"
+mv "$ENV_TMP" .env
 
-AUTO_MIGRATE=false WEKNORA_VERSION="$ROLLBACK_TAG" \
 docker compose -p weknora up -d --no-deps app
-
-test "$(docker inspect WeKnora-app --format '{{.Image}}')" = "$ROLLBACK_APP_IMAGE_ID"
+test "$(docker inspect WeKnora-app --format '{{.Image}}')" = "$ROLLBACK_APP_ID"
+for i in $(seq 1 90); do
+  APP_HEALTH=$(docker inspect WeKnora-app --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
+  [ "$APP_HEALTH" = healthy ] && break
+  [ "$APP_HEALTH" = unhealthy ] && exit 1
+  sleep 1
+done
+test "$APP_HEALTH" = healthy
+test "$(docker inspect WeKnora-frontend --format '{{.Image}}')" = "$FRONTEND_ID_BEFORE"
+test "$(docker inspect WeKnora-docreader --format '{{.Image}}')" = "$DOCREADER_ID_BEFORE"
+for i in $(seq 1 30); do
+  PUBLIC_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' https://know.seeway.co/ || true)
+  [ "$PUBLIC_HTTP" = 200 ] && break
+  sleep 1
+done
+test "$PUBLIC_HTTP" = 200
 ```
 
-发布前 rollback 镜像不依赖 `000086`，因此 app 回滚固定使用 `AUTO_MIGRATE=false`。只有完成旧镜像与当前数据库结构的兼容性确认后，才能恢复自动迁移。
+该 app 回滚镜像正是本次发布前运行的 `a9a09aab` 功能基线，与当前 `86|f` 数据库兼容；回滚固定保留 `AUTO_MIGRATE=false`。如果上述标签已被 Docker 清理，先按 11.1 加载核心镜像归档，再使用其中相同 ID 的 app 备份标签。
 
 ### 11.4 回滚公司模型采用
 
@@ -765,6 +899,9 @@ COMMIT;
 ## 12. 已知非阻塞项
 
 - 前端依赖安装曾报告 2 个 moderate、6 个 high npm audit 告警；本次未做无关依赖升级。
+- Vite 仍提示若干产物超过 500 kB；本次不在功能修复中改动拆包策略，后续应以首屏性能数据决定动态加载边界。
+- `UploadConfirmMode` 仍保留当前没有调用方的 `'url'` 字面模式；实际网页导入统一使用 `mode: 'file' + urls[]`。未来直接启用 `'url'` 前必须补齐 Dialog 契约。
+- 上传确认和过期标签的组件测试仍以源码约束为主；Pinia Promise 已有真实测试，关键 Vue/Transition/Teleport 时序继续由 ego 生产回归覆盖。
 - frontend 未定义 Docker healthcheck，必须额外做 HTTP 200 和浏览器渲染验收。
 - 构建缓存不能放在仓库根目录 `.cache`，否则会被纳入 app build context，造成数 GB 无效上下文。
 - Docker daemon 拉基础镜像不一定继承命令行代理；已有基础镜像应保留，网络异常时先区分 daemon 拉取与容器内下载。
@@ -772,22 +909,22 @@ COMMIT;
 
 ## 13. 最终交付检查表
 
-- [ ] 本地工作树已审核并提交。
-- [ ] origin 分支与本地 HEAD 一致。
-- [ ] 远端 Git 工作树干净且 HEAD 正确。
-- [ ] `.env`、模型状态和旧镜像已备份。
-- [ ] app 镜像包含 anydoc、迁移、Skill 和当前提交号。
-- [ ] migration 已应用到 000086 且状态 clean。
-- [ ] docreader 先切换并恢复 healthy。
-- [ ] app 在 docreader healthy 后切换并恢复 healthy，使用 `AUTO_MIGRATE=false`。
-- [ ] frontend 在 app healthy 后切换并返回 HTTP 200。
-- [ ] 平台解析配置存在，知识文件夹和上传会话表存在。
-- [ ] 可续传上传配置为 2 GiB、4 MiB、24 小时；前端默认单活动上传且没有人为带宽限速。
-- [ ] 公司预置模型数量正确且普通用户脱敏。
-- [ ] Skill ZIP、Chrome CRX 可下载。
-- [ ] 知识库和临时附件端到端解析通过。
-- [ ] 持久化空文件夹创建、目录树展示和空文件夹删除通过。
-- [ ] 可续传上传初始化、分片校验、进度查询、取消和清理通过。
-- [ ] 验收数据已清理。
-- [ ] 日志无 panic、FATAL、ERROR。
-- [ ] 回滚路径和备份文件可读。
+- [x] 生产功能代码截至 `80e66d56` 已审核、提交并推送。
+- [x] 生产功能提交在本地、origin 和远端三方一致。
+- [x] 远端 Git 工作树干净且 HEAD 正确。
+- [x] `.env`、模型状态和旧镜像已备份。
+- [x] app `deploy-80e66d56` 包含 anydoc、迁移、Skill 和共享 MinerU gate，已重建并恢复 healthy。
+- [x] migration 已应用到 000086 且状态 clean。
+- [x] docreader 保持 healthy 且本次未重启。
+- [x] app 保持 healthy；生产 `.env` 已备份并收敛为 `AUTO_MIGRATE=false`。
+- [x] frontend 在 app healthy 状态下切换并返回 HTTP 200。
+- [x] 平台解析配置存在，知识文件夹和上传会话表存在。
+- [x] 可续传上传配置为 2 GiB、4 MiB、24 小时；前端默认单活动上传且没有人为带宽限速。
+- [x] 公司预置模型数量正确且普通用户脱敏。
+- [x] Skill ZIP、Chrome CRX 和 Chrome ZIP 可下载。
+- [x] 知识库和临时附件端到端解析通过。
+- [x] 持久化空文件夹创建、目录树展示和空文件夹删除通过。
+- [x] 可续传上传初始化、分片校验、进度查询、取消和清理通过。
+- [x] 2026-08-20 本轮新增验收文档、文件夹、上传会话和聊天会话已清理。
+- [x] 日志无 panic、FATAL、ERROR。
+- [x] 回滚路径和备份文件可读。
