@@ -3,4 +3,3 @@
 from docreader.log_redaction import install_log_redaction
 
 install_log_redaction()
-
