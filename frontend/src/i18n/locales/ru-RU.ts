@@ -2478,7 +2478,7 @@ export default {
         },
         enableThinking: {
           label: 'enable_thinking',
-          hint: 'Alibaba DashScope: qwen3, qwen-plus, qwen-max, qwen-turbo'
+          hint: 'Модели Qwen в Alibaba DashScope; DeepSeek V4 в SiliconFlow (при включении уровень рассуждений: high)'
         },
         chatTemplateKwargs: {
           label: 'chat_template_kwargs',

@@ -38,7 +38,7 @@ func TestEnableThinking_QwenSemantics(t *testing.T) {
 	t.Run("non-stream forces false even when requested true", func(t *testing.T) {
 		custom, raw := s.Apply(&req, &ChatOptions{Thinking: ptrBool(true)}, false)
 		require.True(t, raw)
-		qwen, ok := custom.(QwenChatCompletionRequest)
+		qwen, ok := custom.(EnableThinkingChatCompletionRequest)
 		require.True(t, ok)
 		require.NotNil(t, qwen.EnableThinking)
 		assert.False(t, *qwen.EnableThinking)
@@ -47,7 +47,7 @@ func TestEnableThinking_QwenSemantics(t *testing.T) {
 	t.Run("stream honors requested true", func(t *testing.T) {
 		custom, raw := s.Apply(&req, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.True(t, raw)
-		qwen := custom.(QwenChatCompletionRequest)
+		qwen := custom.(EnableThinkingChatCompletionRequest)
 		require.NotNil(t, qwen.EnableThinking)
 		assert.True(t, *qwen.EnableThinking)
 	})
@@ -55,7 +55,7 @@ func TestEnableThinking_QwenSemantics(t *testing.T) {
 	t.Run("stream defaults to false when unset", func(t *testing.T) {
 		custom, raw := s.Apply(&req, nil, true)
 		require.True(t, raw)
-		qwen := custom.(QwenChatCompletionRequest)
+		qwen := custom.(EnableThinkingChatCompletionRequest)
 		require.NotNil(t, qwen.EnableThinking)
 		assert.False(t, *qwen.EnableThinking)
 	})
@@ -69,7 +69,7 @@ func TestEnableThinking_ExtraConfigSemantics(t *testing.T) {
 
 	custom, raw := s.Apply(&req, &ChatOptions{Thinking: ptrBool(true)}, true)
 	require.True(t, raw)
-	qwen := custom.(QwenChatCompletionRequest)
+	qwen := custom.(EnableThinkingChatCompletionRequest)
 	require.NotNil(t, qwen.EnableThinking)
 	assert.True(t, *qwen.EnableThinking)
 
@@ -149,6 +149,23 @@ func TestParseThinkingOverride(t *testing.T) {
 	assert.Nil(t, parseThinkingOverride(nil))
 	assert.Nil(t, parseThinkingOverride(map[string]string{}))
 	assert.Nil(t, parseThinkingOverride(map[string]string{ExtraConfigThinkingControl: ""}))
+}
+
+func TestResolveThinkingOverridePreservesProviderSemantics(t *testing.T) {
+	qwen := resolveThinkingOverride(qwenThinkingProvider{}, map[string]string{
+		ExtraConfigThinkingControl: "enable_thinking",
+	})
+	assert.Nil(t, qwen)
+
+	siliconFlow := resolveThinkingOverride(siliconFlowDeepSeekV4Provider{}, map[string]string{
+		ExtraConfigThinkingControl: "enable_thinking",
+	})
+	assert.Nil(t, siliconFlow)
+
+	differentFormat := resolveThinkingOverride(siliconFlowDeepSeekV4Provider{}, map[string]string{
+		ExtraConfigThinkingControl: "thinking_type",
+	})
+	assert.IsType(t, thinkingTypeField{}, differentFormat)
 }
 
 func TestEffectiveThinkingControl(t *testing.T) {

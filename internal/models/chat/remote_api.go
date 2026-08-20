@@ -98,6 +98,7 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 		}
 	}
 
+	adapter := resolveProvider(providerName, modelName)
 	return &RemoteAPIChat{
 		modelName:        modelName,
 		client:           openai.NewClientWithConfig(config),
@@ -108,8 +109,8 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 		appID:            chatConfig.AppID,
 		appSecret:        chatConfig.AppSecret,
 		customHeaders:    chatConfig.CustomHeaders,
-		adapter:          resolveProvider(providerName, modelName),
-		thinkingOverride: parseThinkingOverride(chatConfig.ExtraConfig),
+		adapter:          adapter,
+		thinkingOverride: resolveThinkingOverride(adapter, chatConfig.ExtraConfig),
 	}, nil
 }
 

@@ -2480,7 +2480,7 @@ export default {
         },
         enableThinking: {
           label: 'enable_thinking',
-          hint: '阿里云 DashScope：qwen3、qwen-plus、qwen-max、qwen-turbo'
+          hint: '阿里云 DashScope Qwen 系列；SiliconFlow DeepSeek V4 系列（开启时推理强度为 high）'
         },
         chatTemplateKwargs: {
           label: 'chat_template_kwargs',

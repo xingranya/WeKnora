@@ -270,6 +270,23 @@ func TestConvertMessages_ReasoningContentRoundTrip(t *testing.T) {
 	})
 }
 
+func TestParseCompletionResponsePreservesReasoningContent(t *testing.T) {
+	c := newTestRemoteChat(t)
+	response, err := c.parseCompletionResponse(&openai.ChatCompletionResponse{
+		Choices: []openai.ChatCompletionChoice{{
+			Message: openai.ChatCompletionMessage{
+				Content:          "final answer",
+				ReasoningContent: "reasoning trace",
+			},
+			FinishReason: openai.FinishReasonStop,
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, "final answer", response.Content)
+	assert.Equal(t, "reasoning trace", response.ReasoningContent)
+}
+
 func TestApplyCompletionToolCallMetadata(t *testing.T) {
 	c := newTestRemoteChat(t)
 	c.adapter = geminiProvider{}

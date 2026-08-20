@@ -129,6 +129,33 @@ func (qwenThinkingProvider) Thinking() ThinkingStrategy {
 	return enableThinking{alwaysSend: true, disableOnNonStream: true}
 }
 
+// siliconFlowDeepSeekV4Provider 适配 SiliconFlow 上的 DeepSeek V4 系列。
+// 官方 Chat Completions 接口使用顶层 enable_thinking，并使用 max_tokens
+// 限制输出；WeKnora 内部统一配置的 max_completion_tokens 需要在此转换。
+type siliconFlowDeepSeekV4Provider struct{ baseProvider }
+
+func (siliconFlowDeepSeekV4Provider) Name() provider.ProviderName {
+	return provider.ProviderSiliconFlow
+}
+
+func (siliconFlowDeepSeekV4Provider) Matches(model string) bool {
+	return provider.IsSiliconFlowDeepSeekV4Model(model)
+}
+
+func (siliconFlowDeepSeekV4Provider) Thinking() ThinkingStrategy {
+	// 固定发送布尔值；启用时按官方支持值显式使用 high，避免依赖上游默认。
+	return enableThinking{alwaysSend: true, reasoningEffort: "high"}
+}
+
+func (siliconFlowDeepSeekV4Provider) ShapeRequest(
+	req *openai.ChatCompletionRequest, _ *ChatOptions, _ bool,
+) {
+	if req.MaxCompletionTokens > 0 {
+		req.MaxTokens = req.MaxCompletionTokens
+		req.MaxCompletionTokens = 0
+	}
+}
+
 // --- LKEAP: thinking via { "thinking": { "type": ... } }, only for DeepSeek V3.x ---
 // R1 series enables chain-of-thought by default and is left untouched (falls
 // back to baseProvider). See https://cloud.tencent.com/document/product/1772/115963
@@ -287,6 +314,7 @@ func shapeOpenAIReasoning(req *openai.ChatCompletionRequest) {
 var providerRegistry = []providerAdapter{
 	weKnoraCloudProvider{},
 	qwenThinkingProvider{},
+	siliconFlowDeepSeekV4Provider{},
 	lkeapProvider{},
 	deepseekProvider{},
 	genericReasoningProvider{},

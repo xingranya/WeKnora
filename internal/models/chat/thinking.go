@@ -18,10 +18,12 @@ const ExtraConfigThinkingControl = "thinking_control"
 // through a non-standard top-level field. They embed the standard OpenAI
 // request so all other fields are marshalled unchanged.
 
-// QwenChatCompletionRequest adds Aliyun Qwen's `enable_thinking` boolean.
-type QwenChatCompletionRequest struct {
+// EnableThinkingChatCompletionRequest 增加兼容接口使用的顶层思考参数。
+// ReasoningEffort 仅在供应商明确支持且思考开启时发送。
+type EnableThinkingChatCompletionRequest struct {
 	openai.ChatCompletionRequest
-	EnableThinking *bool `json:"enable_thinking,omitempty"`
+	EnableThinking  *bool  `json:"enable_thinking,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // ThinkingConfig is the `{ "type": "enabled"|"disabled" }` block used by
@@ -67,13 +69,14 @@ func (noThinking) Apply(*openai.ChatCompletionRequest, *ChatOptions, bool) (any,
 
 // enableThinking encodes thinking via Qwen's `enable_thinking` boolean.
 //
-//   - alwaysSend: pin the field even when opts.Thinking is nil (Aliyun Qwen
-//     thinking models require it on every request; default value is false).
+//   - alwaysSend: pin the field even when opts.Thinking is nil（阿里云 Qwen 与
+//     硅基流动 DeepSeek V4 均需要确定性地发送，默认值为 false）。
 //   - disableOnNonStream: force enable_thinking=false for non-stream requests
 //     (Qwen3 rejects thinking in non-stream mode).
 type enableThinking struct {
 	alwaysSend         bool
 	disableOnNonStream bool
+	reasoningEffort    string
 }
 
 func (s enableThinking) Apply(req *openai.ChatCompletionRequest, opts *ChatOptions, isStream bool) (any, bool) {
@@ -87,9 +90,12 @@ func (s enableThinking) Apply(req *openai.ChatCompletionRequest, opts *ChatOptio
 	if s.disableOnNonStream && !isStream {
 		thinking = false
 	}
-	qwenReq := QwenChatCompletionRequest{ChatCompletionRequest: *req}
-	qwenReq.EnableThinking = &thinking
-	return qwenReq, true
+	outbound := EnableThinkingChatCompletionRequest{ChatCompletionRequest: *req}
+	outbound.EnableThinking = &thinking
+	if thinking {
+		outbound.ReasoningEffort = s.reasoningEffort
+	}
+	return outbound, true
 }
 
 // thinkingTypeField encodes thinking via the `{ "thinking": { "type": ... } }`
@@ -160,6 +166,20 @@ func parseThinkingOverride(extraConfig map[string]string) ThinkingStrategy {
 		// "chat_template_kwargs" and any unknown non-empty value.
 		return chatTemplateKwargs{}
 	}
+}
+
+// resolveThinkingOverride 仅在用户选择了不同的请求格式时覆盖供应商默认策略。
+// 格式相同时保留供应商策略携带的附加约束，例如 Qwen 非流式强制关闭，或
+// SiliconFlow DeepSeek V4 开启时固定 reasoning_effort=high。
+func resolveThinkingOverride(adapter providerAdapter, extraConfig map[string]string) ThinkingStrategy {
+	override := parseThinkingOverride(extraConfig)
+	if override == nil || adapter == nil {
+		return override
+	}
+	if thinkingStrategyName(override) == thinkingStrategyName(adapter.Thinking()) {
+		return nil
+	}
+	return override
 }
 
 // EffectiveThinkingControl reports the provider field that will carry

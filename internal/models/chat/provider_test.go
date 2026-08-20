@@ -25,6 +25,10 @@ func TestResolveProvider(t *testing.T) {
 		{"lkeap v3", provider.ProviderLKEAP, "deepseek-v3.1", lkeapProvider{}},
 		{"lkeap r1 falls back", provider.ProviderLKEAP, "deepseek-r1", baseProvider{}},
 		{"qwen thinking", provider.ProviderAliyun, "qwen3-32b", qwenThinkingProvider{}},
+		{"SiliconFlow DeepSeek V4 thinking", provider.ProviderSiliconFlow, "deepseek-ai/DeepSeek-V4-Flash", siliconFlowDeepSeekV4Provider{}},
+		{"SiliconFlow DeepSeek V4 Pro thinking", provider.ProviderSiliconFlow, "deepseek-ai/DeepSeek-V4-Pro", siliconFlowDeepSeekV4Provider{}},
+		{"SiliconFlow Pro DeepSeek V4 thinking", provider.ProviderSiliconFlow, "Pro/deepseek-ai/DeepSeek-V4", siliconFlowDeepSeekV4Provider{}},
+		{"SiliconFlow similar model falls back", provider.ProviderSiliconFlow, "vendor/deepseek-v4-copy", baseProvider{}},
 		{"generic", provider.ProviderGeneric, "anything", genericProvider{}},
 		{"generic Sub2API reasoning", provider.ProviderGeneric, "gpt-5.6-terra", genericReasoningProvider{}},
 		{"gemini", provider.ProviderGemini, "gemini-3-flash-preview", geminiProvider{}},
@@ -119,11 +123,75 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
 	})
 
+	t.Run("saved qwen default keeps provider non-stream protection", func(t *testing.T) {
+		c := newOutboundChat(t, string(provider.ProviderAliyun), "qwen3-32b",
+			map[string]string{ExtraConfigThinkingControl: "enable_thinking"})
+		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
+	})
+
 	t.Run("qwen stream honors requested true", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderAliyun), "qwen3-32b", nil)
 		body, _, _, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.NoError(t, err)
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":true`)
+	})
+
+	t.Run("SiliconFlow DeepSeek V4 uses official thinking field", func(t *testing.T) {
+		c := newOutboundChat(t, string(provider.ProviderSiliconFlow), "deepseek-ai/DeepSeek-V4-Flash",
+			map[string]string{ExtraConfigThinkingControl: "enable_thinking"})
+		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{
+			MaxCompletionTokens: 150,
+			Thinking:            ptrBool(false),
+		}, false)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		js := mustJSON(t, body)
+		assert.Contains(t, js, `"enable_thinking":false`)
+		assert.NotContains(t, js, "reasoning_effort")
+		assert.Contains(t, js, `"max_tokens":150`)
+		assert.NotContains(t, js, "max_completion_tokens")
+
+		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		js = mustJSON(t, body)
+		assert.Contains(t, js, `"enable_thinking":true`)
+		assert.Contains(t, js, `"reasoning_effort":"high"`)
+
+		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		js = mustJSON(t, body)
+		assert.Contains(t, js, `"enable_thinking":true`)
+		assert.Contains(t, js, `"reasoning_effort":"high"`)
+
+		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		js = mustJSON(t, body)
+		assert.Contains(t, js, `"enable_thinking":false`)
+		assert.NotContains(t, js, "reasoning_effort")
+
+		body, _, useRaw, err = c.buildOutbound(msgs, nil, true)
+		require.NoError(t, err)
+		require.True(t, useRaw)
+		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
+	})
+
+	t.Run("SiliconFlow non V4 request stays unchanged", func(t *testing.T) {
+		c := newOutboundChat(t, string(provider.ProviderSiliconFlow), "Qwen/Qwen3.5-397B-A17B", nil)
+		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{
+			MaxCompletionTokens: 150,
+			Thinking:            ptrBool(false),
+		}, false)
+		require.NoError(t, err)
+		assert.False(t, useRaw)
+		js := mustJSON(t, body)
+		assert.NotContains(t, js, "enable_thinking")
+		assert.Contains(t, js, `"max_completion_tokens":150`)
 	})
 
 	t.Run("volcengine thinking enabled", func(t *testing.T) {

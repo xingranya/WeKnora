@@ -407,8 +407,10 @@ import {
 import { useI18n } from 'vue-i18n'
 import { useUIStore } from '@/stores/ui'
 import {
+  buildThinkingControlExtraConfig,
   defaultThinkingControl,
   resolveThinkingControl,
+  shouldAutoUpdateThinkingControl,
   type ThinkingControlValue,
 } from '@/utils/thinkingControl'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
@@ -440,7 +442,7 @@ interface ModelFormData {
   /** 后台任务对该模型的并发上限；0/undefined 表示沿用全局默认。仅 chat/embedding/vllm 生效。 */
   maxConcurrency?: number
   /** extra_config.thinking_control — how agent thinking on/off maps to API fields. */
-  thinkingControl?: string
+  thinkingControl?: ThinkingControlValue
   // 自定义 HTTP 请求头（类似 OpenAI Python SDK 的 extra_headers）
   customHeaders?: CustomHeaderItem[]
   /** LKEAP Rerank：腾讯云 SecretKey（创建时写入 app_secret） */
@@ -1171,7 +1173,7 @@ const handleProviderChange = (value: string) => {
 watch(
   () => [formData.value.source, formData.value.provider, formData.value.modelName] as const,
   ([source, provider, modelName], [prevSource, prevProvider, prevModelName]) => {
-    if (hydratingForm.value || isEdit.value) return
+    if (hydratingForm.value) return
     if (activeModelType.value !== 'chat' || source !== 'remote') return
     if (source === prevSource && provider === prevProvider && modelName === prevModelName) return
 
@@ -1179,15 +1181,8 @@ watch(
 
     if (providerChanged) {
       thinkingControlManual.value = false
-      syncThinkingControlToForm(true)
-      return
     }
-    if (!thinkingControlManual.value) {
-      syncThinkingControlToForm(true)
-      return
-    }
-    const prevDefault = defaultThinkingControl(prevProvider || '', prevModelName || '')
-    if (formData.value.thinkingControl === prevDefault) {
+    if (shouldAutoUpdateThinkingControl(thinkingControlManual.value, providerChanged)) {
       syncThinkingControlToForm(true)
     }
   },
@@ -1365,6 +1360,9 @@ const checkRemoteAPI = async () => {
     const headerPayload = Object.keys(customHeaders).length > 0
       ? { customHeaders }
       : {}
+    const thinkingPayload = activeModelType.value === 'chat'
+      ? buildThinkingControlExtraConfig(formData.value.thinkingControl)
+      : {}
 
     // 根据模型类型调用不同的校验接口
     // 编辑模式下 apiKey 由 <CredentialResource> 独立管理、不在 formData 里。
@@ -1384,6 +1382,7 @@ const checkRemoteAPI = async () => {
           provider: formData.value.provider,
           ...idPayload,
           ...headerPayload,
+          ...thinkingPayload,
         })
         break
 

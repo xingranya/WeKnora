@@ -14,6 +14,14 @@ export function isLkeapDeepSeekR1Model(modelName: string): boolean {
   return modelName.toLowerCase().includes('deepseek-r1')
 }
 
+/** 与后端 provider.IsSiliconFlowDeepSeekV4Model 保持一致。 */
+export function isSiliconFlowDeepSeekV4Model(modelName: string): boolean {
+  const normalized = modelName.trim().toLowerCase().replace(/^pro\//, '')
+  return normalized === 'deepseek-ai/deepseek-v4'
+    || normalized === 'deepseek-ai/deepseek-v4-flash'
+    || normalized === 'deepseek-ai/deepseek-v4-pro'
+}
+
 /** 与后端 internal/models/provider.IsOpenAIReasoningOrGPT5Model 保持一致。 */
 export function isOpenAIReasoningOrGPT5Model(modelName: string): boolean {
   const lower = modelName.trim().toLowerCase()
@@ -28,6 +36,19 @@ export type ThinkingControlValue =
   | 'enable_thinking'
   | 'thinking_type'
   | 'reasoning_effort'
+
+export function shouldAutoUpdateThinkingControl(
+  hasManualValue: boolean,
+  providerChanged: boolean,
+): boolean {
+  return providerChanged || !hasManualValue
+}
+
+export function buildThinkingControlExtraConfig(control?: ThinkingControlValue): {
+  extraConfig?: { thinking_control: ThinkingControlValue }
+} {
+  return control ? { extraConfig: { thinking_control: control } } : {}
+}
 
 const THINKING_CONTROL_VALUES: ThinkingControlValue[] = [
   'none',
@@ -55,6 +76,8 @@ export function defaultThinkingControl(
       // R1 系列后端不发 thinking 参数；其余（含未填模型名）按 LKEAP 的 thinking.type 格式预选
       if (model && isLkeapDeepSeekR1Model(model)) return 'none'
       return 'thinking_type'
+    case 'siliconflow':
+      return isSiliconFlowDeepSeekV4Model(model) ? 'enable_thinking' : 'none'
     case 'generic':
       return isOpenAIReasoningOrGPT5Model(model)
         ? 'reasoning_effort'
@@ -64,7 +87,7 @@ export function defaultThinkingControl(
     case 'volcengine':
       return 'thinking_type'
     default:
-      // openai, azure_openai, anthropic, zhipu, deepseek, gemini, siliconflow,
+      // openai, azure_openai, anthropic, zhipu, deepseek, gemini,
       // hunyuan, moonshot, openrouter, weknoracloud, … → baseProvider / noThinking
       return 'none'
   }

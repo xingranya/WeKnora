@@ -3972,7 +3972,7 @@ export default {
         },
         enableThinking: {
           label: 'enable_thinking',
-          hint: 'Alibaba DashScope: qwen3, qwen-plus, qwen-max, qwen-turbo'
+          hint: 'Alibaba DashScope Qwen models; SiliconFlow DeepSeek V4 models (reasoning effort: high when enabled)'
         },
         thinkingType: {
           label: 'thinking.type',

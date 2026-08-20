@@ -2478,7 +2478,7 @@ export default {
         },
         enableThinking: {
           label: 'enable_thinking',
-          hint: 'Alibaba DashScope: qwen3, qwen-plus, qwen-max, qwen-turbo'
+          hint: 'Alibaba DashScope Qwen 모델; SiliconFlow DeepSeek V4 모델(활성화 시 추론 강도: high)'
         },
         chatTemplateKwargs: {
           label: 'chat_template_kwargs',

@@ -28,9 +28,10 @@ func (c *RemoteAPIChat) parseCompletionResponse(resp *openai.ChatCompletionRespo
 
 	usage := tokenUsageFromOpenAI(resp.Usage, c.provider)
 	response := &types.ChatResponse{
-		Content:      content,
-		FinishReason: string(choice.FinishReason),
-		Usage:        usage,
+		Content:          content,
+		ReasoningContent: choice.Message.ReasoningContent,
+		FinishReason:     string(choice.FinishReason),
+		Usage:            usage,
 	}
 
 	if len(choice.Message.ToolCalls) > 0 {
