@@ -111,3 +111,42 @@ test('Vue 组件卸载使延迟 hydration 失效', async () => {
 
     assert.equal(settings.conversationModels.selectedChatModelId, 'global-model')
 })
+
+test('用户先发送后释放旧恢复，迟到状态不能覆盖新请求模型', async () => {
+    const resources = deferred()
+    const settings: SessionHydrationSettings = {
+      selectedAgentSourceTenantId: null,
+      conversationModels: { selectedChatModelId: 'initial-model' },
+    }
+    const guard = createSessionGenerationGuard()
+    const sentQueries: string[] = []
+
+    const Harness = defineComponent({
+      setup() {
+        const token = guard.begin('session-a')
+        onMounted(() => settleRestoredSessionIdentity({
+          token,
+          isCurrent: guard.isCurrent,
+          state: { model_id: 'stale-restored-model' },
+          settings,
+          ensureAgentResources: () => resources.promise,
+          flushWatchers: async () => undefined,
+        }))
+        const send = (query: string) => {
+          guard.begin('session-a')
+          settings.conversationModels.selectedChatModelId = 'user-selected-model'
+          sentQueries.push(query)
+        }
+        return () => h('button', { onClick: () => send('new question') }, 'send')
+      },
+    })
+
+    const wrapper = mount(Harness)
+    await wrapper.get('button').trigger('click')
+    resources.resolve()
+    await flushPromises()
+
+    assert.deepEqual(sentQueries, ['new question'])
+    assert.equal(settings.conversationModels.selectedChatModelId, 'user-selected-model')
+    wrapper.unmount()
+})

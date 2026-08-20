@@ -301,6 +301,11 @@ async function settlePendingSessionHydration() {
     await pending.promise;
     if (pendingSessionHydration === pending) pendingSessionHydration = null;
 }
+
+const supersedePendingSessionHydration = () => {
+    activeSessionToken = sessionGenerationGuard.begin(String(session_id.value || ''));
+    pendingSessionHydration = null;
+};
 const inputFieldRef = ref();
 const created_at = ref('');
 const limit = ref(20);
@@ -763,6 +768,9 @@ const handleStopGeneration = () => {
 };
 
 const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = [], attachmentFiles = []) => {
+    // 任何真实发送都优先于可选的会话恢复。使旧 generation 失效后，迟到的
+    // getSession/agent watcher 不能覆盖当前模型或中断刚开始的流。
+    supersedePendingSessionHydration();
     stopStream();
     prepareForNewOutgoingMessage();
     isReplying.value = true;
@@ -1076,32 +1084,46 @@ onMounted(async () => {
     // 初始化状态：加载历史消息时不应显示loading
     loading.value = false;
     isReplying.value = false;
-    await initialSessionHydrationPromise;
-    await settlePendingSessionHydration();
 
-    if (firstQuery.value) {
+    // 创建会话页传来的首问必须在任何可选 hydration 之前同步消费。先清空
+    // Pinia 队列可防止路由/挂载重入重复提交；sendMsg 会让旧 hydration 失效。
+    const queuedFirstQuery = firstQuery.value;
+    const queuedFirstModelId = firstModelId.value || '';
+    const queuedMentionedItems = firstMentionedItems.value || [];
+    const queuedImageFiles = firstImageFiles.value || [];
+    const queuedAttachmentFiles = firstAttachmentFiles.value || [];
+    if (queuedFirstQuery) {
+        usemenuStore.changeFirstQuery('', [], '', [], []);
         scrollLock.value = true;
         historyLoading.value = false;
-        if (firstModelId.value) {
+        if (queuedFirstModelId) {
             useSettingsStoreInstance.updateConversationModels({
-                summaryModelId: firstModelId.value,
-                selectedChatModelId: firstModelId.value,
+                summaryModelId: queuedFirstModelId,
+                selectedChatModelId: queuedFirstModelId,
                 rerankModelId: '',
             });
         }
-        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], firstImageFiles.value || [], firstAttachmentFiles.value || []);
-        usemenuStore.changeFirstQuery('', [], '', [], []);
-    } else {
-        scrollLock.value = false;
-        hasMoreHistory.value = true;
-        historyLoadingMore.value = false;
-        let data = {
-            session_id: session_id.value,
-            created_at: '',
-            limit: limit.value
-        }
-        getmsgList(data)
+        void sendMsg(
+            queuedFirstQuery,
+            queuedFirstModelId,
+            queuedMentionedItems,
+            queuedImageFiles,
+            queuedAttachmentFiles,
+        );
+        return;
     }
+
+    await initialSessionHydrationPromise;
+    await settlePendingSessionHydration();
+    scrollLock.value = false;
+    hasMoreHistory.value = true;
+    historyLoadingMore.value = false;
+    let data = {
+        session_id: session_id.value,
+        created_at: '',
+        limit: limit.value
+    }
+    getmsgList(data)
 })
 const clearData = () => {
     sessionGenerationGuard.invalidate();
