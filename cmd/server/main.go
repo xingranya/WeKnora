@@ -34,18 +34,28 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/container"
+	"github.com/Tencent/WeKnora/internal/handler"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/runtime"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
 func main() {
-	// Set Gin mode
-	if os.Getenv("GIN_MODE") == "release" {
-		gin.SetMode(gin.ReleaseMode)
-	} else {
-		gin.SetMode(gin.DebugMode)
+	ginMode, err := config.ValidateProductionStartupConfig(
+		handler.Edition,
+		os.Getenv("GIN_MODE"),
+		os.Getenv("SYSTEM_AES_KEY"),
+		os.Getenv("JWT_SECRET"),
+		os.Getenv("AUTO_MIGRATE"),
+		os.Getenv("AUTO_RECOVER_DIRTY"),
+	)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "startup configuration error:", err)
+		os.Exit(1)
 	}
+
+	// Set Gin mode
+	gin.SetMode(ginMode)
 	// Mute Gin's per-route registration spam (one line per route × ~150
 	// routes) — replaced by a single summary printed after router build.
 	runtime.SilenceGinRouteSpam()
@@ -62,7 +72,7 @@ func main() {
 	runStartupBootstrap(c)
 
 	// Run application
-	err := c.Invoke(func(
+	err = c.Invoke(func(
 		cfg *config.Config,
 		router *gin.Engine,
 		resourceCleaner interfaces.ResourceCleaner,

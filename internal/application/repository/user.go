@@ -2,7 +2,11 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -280,29 +284,133 @@ func (r *userRepository) SearchUsers(ctx context.Context, query string, limit in
 
 // authTokenRepository implements auth token repository interface
 type authTokenRepository struct {
-	db *gorm.DB
+	db                        *gorm.DB
+	hasTokenFingerprintColumn bool
 }
 
 // NewAuthTokenRepository creates a new auth token repository
 func NewAuthTokenRepository(db *gorm.DB) interfaces.AuthTokenRepository {
-	return &authTokenRepository{db: db}
+	return &authTokenRepository{
+		db:                        db,
+		hasTokenFingerprintColumn: db.Migrator().HasColumn(&types.AuthToken{}, "token_fingerprint"),
+	}
 }
 
 // CreateToken creates an auth token
 func (r *authTokenRepository) CreateToken(ctx context.Context, token *types.AuthToken) error {
-	return r.db.WithContext(ctx).Create(token).Error
+	if token == nil {
+		return errors.New("auth token is required")
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return r.createTokenWithDB(tx, token)
+	})
 }
 
-// GetTokenByValue gets a token by its value
+func (r *authTokenRepository) createTokenWithDB(tx *gorm.DB, token *types.AuthToken) error {
+	if token == nil {
+		return errors.New("auth token is required")
+	}
+	if err := tx.Create(token).Error; err != nil {
+		return err
+	}
+	if !r.hasTokenFingerprintColumn {
+		return nil
+	}
+	return tx.Model(&types.AuthToken{}).
+		Where("id = ?", token.ID).
+		UpdateColumn("token_fingerprint", authTokenFingerprint(token.Token)).Error
+}
+
+// CreateTokenPair 在同一事务写入 access/refresh 两行，避免半会话。
+func (r *authTokenRepository) CreateTokenPair(
+	ctx context.Context, accessToken, refreshToken *types.AuthToken,
+) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := r.createTokenWithDB(tx, accessToken); err != nil {
+			return err
+		}
+		return r.createTokenWithDB(tx, refreshToken)
+	})
+}
+
+// RotateRefreshToken 通过单条条件 UPDATE 消费所有同值活跃 refresh 行。
+// 这同时收敛旧镜像在同一秒签发出的重复 JWT；并发刷新只有一个事务能命中。
+func (r *authTokenRepository) RotateRefreshToken(
+	ctx context.Context,
+	oldTokenValue, expectedUserID string,
+	accessToken, refreshToken *types.AuthToken,
+) error {
+	if strings.TrimSpace(oldTokenValue) == "" || expectedUserID == "" {
+		return ErrTokenNotFound
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&types.AuthToken{}).
+			Where("user_id = ? AND token_type = ? AND is_revoked = ? AND expires_at > ?",
+				expectedUserID, "refresh_token", false, time.Now().UTC())
+		if r.hasTokenFingerprintColumn {
+			query = query.Where(
+				"(token = ? OR token_fingerprint = ?)",
+				oldTokenValue, authTokenFingerprint(oldTokenValue),
+			)
+		} else {
+			query = query.Where("token = ?", oldTokenValue)
+		}
+		result := query.Updates(map[string]any{
+			"is_revoked": true,
+			"updated_at": time.Now().UTC(),
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrTokenNotFound
+		}
+		if err := r.createTokenWithDB(tx, accessToken); err != nil {
+			return err
+		}
+		return r.createTokenWithDB(tx, refreshToken)
+	})
+}
+
+// GetTokenByValue 优先使用原始令牌的 SHA-256 指纹查询。
+// 回滚窗口内保留明文查询作为兼容路径；命中后只补写指纹，绝不覆盖 token。
 func (r *authTokenRepository) GetTokenByValue(ctx context.Context, tokenValue string) (*types.AuthToken, error) {
+	fingerprint := authTokenFingerprint(tokenValue)
 	var token types.AuthToken
-	if err := r.db.WithContext(ctx).Where("token = ?", tokenValue).First(&token).Error; err != nil {
+	if r.hasTokenFingerprintColumn {
+		if err := r.db.WithContext(ctx).
+			Where("token_fingerprint = ? AND is_revoked = ?", fingerprint, false).
+			Order("created_at DESC").
+			First(&token).Error; err == nil {
+			return &token, nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+
+	if err := r.db.WithContext(ctx).
+		Where("token = ? AND is_revoked = ?", tokenValue, false).
+		Order("created_at DESC").
+		First(&token).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTokenNotFound
 		}
 		return nil, err
 	}
+	if r.hasTokenFingerprintColumn {
+		if err := r.db.WithContext(ctx).Model(&types.AuthToken{}).
+			Where("id = ? AND token = ?", token.ID, tokenValue).
+			Where("token_fingerprint IS NULL OR token_fingerprint <> ?", fingerprint).
+			UpdateColumn("token_fingerprint", fingerprint).Error; err != nil {
+			return nil, err
+		}
+	}
 	return &token, nil
+}
+
+func authTokenFingerprint(tokenValue string) string {
+	sum := sha256.Sum256([]byte(tokenValue))
+	return hex.EncodeToString(sum[:])
 }
 
 // GetTokensByUserID gets all tokens for a user

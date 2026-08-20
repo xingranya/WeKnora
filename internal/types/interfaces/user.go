@@ -125,6 +125,14 @@ type UserRepository interface {
 type AuthTokenRepository interface {
 	// CreateToken creates an auth token
 	CreateToken(ctx context.Context, token *types.AuthToken) error
+	// CreateTokenPair 原子写入同一会话的 access/refresh token。
+	CreateTokenPair(ctx context.Context, accessToken, refreshToken *types.AuthToken) error
+	// RotateRefreshToken 原子消费旧 refresh token 并写入新 token 对。
+	RotateRefreshToken(
+		ctx context.Context,
+		oldTokenValue, expectedUserID string,
+		accessToken, refreshToken *types.AuthToken,
+	) error
 	// GetTokenByValue gets a token by its value
 	GetTokenByValue(ctx context.Context, tokenValue string) (*types.AuthToken, error)
 	// GetTokensByUserID gets all tokens for a user

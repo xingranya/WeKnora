@@ -311,6 +311,14 @@ type cleanupTokenRepo struct {
 }
 
 func (r *cleanupTokenRepo) CreateToken(context.Context, *types.AuthToken) error { return nil }
+func (r *cleanupTokenRepo) CreateTokenPair(context.Context, *types.AuthToken, *types.AuthToken) error {
+	return nil
+}
+func (r *cleanupTokenRepo) RotateRefreshToken(
+	context.Context, string, string, *types.AuthToken, *types.AuthToken,
+) error {
+	return nil
+}
 func (r *cleanupTokenRepo) GetTokenByValue(context.Context, string) (*types.AuthToken, error) {
 	return nil, errors.New("not found")
 }

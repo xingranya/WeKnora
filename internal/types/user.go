@@ -117,8 +117,9 @@ type AuthToken struct {
 	ID string `json:"id"         gorm:"type:varchar(36);primaryKey"`
 	// User ID that owns this token
 	UserID string `json:"user_id"    gorm:"type:varchar(36);index;not null"`
-	// Token value (JWT or other format)
-	Token string `json:"token"      gorm:"type:text;not null"`
+	// Token 在滚动回滚兼容窗口内保存原始令牌，禁止通过 JSON 响应序列化；
+	// SHA-256 指纹存放在独立数据库列中。
+	Token string `json:"-"          gorm:"type:text;not null;index"`
 	// Token type (access_token, refresh_token)
 	TokenType string `json:"token_type" gorm:"type:varchar(50);not null"`
 	// Token expiration time

@@ -23,6 +23,19 @@ type stubAuthTokenRepo struct {
 }
 
 func (s *stubAuthTokenRepo) CreateToken(context.Context, *types.AuthToken) error { return nil }
+func (s *stubAuthTokenRepo) CreateTokenPair(context.Context, *types.AuthToken, *types.AuthToken) error {
+	return nil
+}
+func (s *stubAuthTokenRepo) RotateRefreshToken(
+	_ context.Context, oldTokenValue, expectedUserID string, _, _ *types.AuthToken,
+) error {
+	token, ok := s.tokens[oldTokenValue]
+	if !ok || token.IsRevoked || token.UserID != expectedUserID || token.TokenType != "refresh_token" {
+		return errors.New("token not found")
+	}
+	token.IsRevoked = true
+	return nil
+}
 func (s *stubAuthTokenRepo) GetTokenByValue(_ context.Context, tokenValue string) (*types.AuthToken, error) {
 	token, ok := s.tokens[tokenValue]
 	if !ok {
@@ -160,6 +173,24 @@ func TestRefreshTokenRejectsAccessTokenRecord(t *testing.T) {
 	_, _, err := svc.RefreshToken(ctx, refreshJWT)
 	if err == nil || err.Error() != "not a refresh token" {
 		t.Fatalf("RefreshToken(access token record) err = %v, want not a refresh token", err)
+	}
+}
+
+func TestBuildAuthTokenPairAddsUniqueJTI(t *testing.T) {
+	user := &types.User{ID: "user-1", Email: "user@example.com"}
+	first, err := buildAuthTokenPair(user, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildAuthTokenPair(user, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.accessToken == second.accessToken || first.refreshToken == second.refreshToken {
+		t.Fatal("同一秒签发的 token 必须由随机 jti 保证唯一")
+	}
+	if first.accessRecord.ID == first.refreshRecord.ID || first.accessRecord.ID == second.accessRecord.ID {
+		t.Fatal("token 记录 ID 必须与每个 JWT 的唯一 jti 一一对应")
 	}
 }
 

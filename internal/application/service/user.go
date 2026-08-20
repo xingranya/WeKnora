@@ -924,70 +924,90 @@ func (s *userService) clearLastActiveTenantPreference(ctx context.Context, user 
 	}
 }
 
-// generateTokensForTenant is the shared implementation behind
-// GenerateTokens and SwitchTenant. It encodes activeTenantID into the
-// access token's tenant_id claim so the auth middleware scopes future
-// requests there.
+type generatedAuthTokenPair struct {
+	accessToken   string
+	refreshToken  string
+	accessRecord  *types.AuthToken
+	refreshRecord *types.AuthToken
+}
+
+func buildAuthTokenPair(user *types.User, activeTenantID uint64) (*generatedAuthTokenPair, error) {
+	if user == nil {
+		return nil, errors.New("user is required")
+	}
+	now := time.Now().UTC()
+	accessJTI := uuid.New().String()
+	refreshJTI := uuid.New().String()
+	accessClaims := jwt.MapClaims{
+		"user_id":   user.ID,
+		"email":     user.Email,
+		"tenant_id": activeTenantID,
+		"exp":       now.Add(24 * time.Hour).Unix(),
+		"iat":       now.Unix(),
+		"type":      "access",
+		"jti":       accessJTI,
+	}
+
+	accessTokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
+	accessToken, err := accessTokenObj.SignedString([]byte(getJwtSecret()))
+	if err != nil {
+		return nil, err
+	}
+
+	refreshClaims := jwt.MapClaims{
+		"user_id": user.ID,
+		"exp":     now.Add(7 * 24 * time.Hour).Unix(),
+		"iat":     now.Unix(),
+		"type":    "refresh",
+		"jti":     refreshJTI,
+	}
+
+	refreshTokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
+	refreshToken, err := refreshTokenObj.SignedString([]byte(getJwtSecret()))
+	if err != nil {
+		return nil, err
+	}
+
+	accessTokenRecord := &types.AuthToken{
+		ID:        accessJTI,
+		UserID:    user.ID,
+		Token:     accessToken,
+		TokenType: "access_token",
+		ExpiresAt: now.Add(24 * time.Hour),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	refreshTokenRecord := &types.AuthToken{
+		ID:        refreshJTI,
+		UserID:    user.ID,
+		Token:     refreshToken,
+		TokenType: "refresh_token",
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	return &generatedAuthTokenPair{
+		accessToken: accessToken, refreshToken: refreshToken,
+		accessRecord: accessTokenRecord, refreshRecord: refreshTokenRecord,
+	}, nil
+}
+
+// generateTokensForTenant 原子写入新会话的 access/refresh token 对。
 func (s *userService) generateTokensForTenant(
 	ctx context.Context,
 	user *types.User,
 	activeTenantID uint64,
 ) (accessToken, refreshToken string, err error) {
-	// Generate access token (expires in 24 hours)
-	accessClaims := jwt.MapClaims{
-		"user_id":   user.ID,
-		"email":     user.Email,
-		"tenant_id": activeTenantID,
-		"exp":       time.Now().Add(24 * time.Hour).Unix(),
-		"iat":       time.Now().Unix(),
-		"type":      "access",
-	}
-
-	accessTokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
-	accessToken, err = accessTokenObj.SignedString([]byte(getJwtSecret()))
+	pair, err := buildAuthTokenPair(user, activeTenantID)
 	if err != nil {
 		return "", "", err
 	}
-
-	// Generate refresh token (expires in 7 days)
-	refreshClaims := jwt.MapClaims{
-		"user_id": user.ID,
-		"exp":     time.Now().Add(7 * 24 * time.Hour).Unix(),
-		"iat":     time.Now().Unix(),
-		"type":    "refresh",
+	if err := s.tokenRepo.CreateTokenPair(ctx, pair.accessRecord, pair.refreshRecord); err != nil {
+		return "", "", fmt.Errorf("store token pair: %w", err)
 	}
-
-	refreshTokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
-	refreshToken, err = refreshTokenObj.SignedString([]byte(getJwtSecret()))
-	if err != nil {
-		return "", "", err
-	}
-
-	// Store tokens in database
-	accessTokenRecord := &types.AuthToken{
-		ID:        uuid.New().String(),
-		UserID:    user.ID,
-		Token:     accessToken,
-		TokenType: "access_token",
-		ExpiresAt: time.Now().Add(24 * time.Hour),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	refreshTokenRecord := &types.AuthToken{
-		ID:        uuid.New().String(),
-		UserID:    user.ID,
-		Token:     refreshToken,
-		TokenType: "refresh_token",
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	_ = s.tokenRepo.CreateToken(ctx, accessTokenRecord)
-	_ = s.tokenRepo.CreateToken(ctx, refreshTokenRecord)
-
-	return accessToken, refreshToken, nil
+	return pair.accessToken, pair.refreshToken, nil
 }
 
 // SwitchTenant verifies that user has an active membership in
@@ -1032,18 +1052,18 @@ func (s *userService) SwitchTenant(
 		return nil, fmt.Errorf("load target workspace: %w", err)
 	}
 
-	accessToken, refreshToken, err := s.generateTokensForTenant(ctx, user, targetTenantID)
+	pair, err := buildAuthTokenPair(user, targetTenantID)
 	if err != nil {
 		return nil, fmt.Errorf("generate tokens: %w", err)
 	}
-
-	// Best-effort revoke of the previous refresh token. Failure is
-	// logged but not fatal — the new tokens are already issued and the
-	// old refresh token will expire naturally.
 	if strings.TrimSpace(currentRefreshToken) != "" {
-		if err := s.RevokeToken(ctx, currentRefreshToken); err != nil {
-			logger.Warnf(ctx, "Failed to revoke previous refresh token during tenant switch: %v", err)
+		if err := s.tokenRepo.RotateRefreshToken(
+			ctx, currentRefreshToken, user.ID, pair.accessRecord, pair.refreshRecord,
+		); err != nil {
+			return nil, fmt.Errorf("rotate workspace session: %w", err)
 		}
+	} else if err := s.tokenRepo.CreateTokenPair(ctx, pair.accessRecord, pair.refreshRecord); err != nil {
+		return nil, fmt.Errorf("store workspace session: %w", err)
 	}
 
 	memberships := s.buildMembershipsForUser(ctx, user, tenant)
@@ -1054,8 +1074,8 @@ func (s *userService) SwitchTenant(
 		User:         user,
 		ActiveTenant: tenant,
 		Memberships:  memberships,
-		Token:        accessToken,
-		RefreshToken: refreshToken,
+		Token:        pair.accessToken,
+		RefreshToken: pair.refreshToken,
 	}, nil
 }
 
@@ -1209,6 +1229,9 @@ func (s *userService) RefreshToken(
 	if tokenRecord.TokenType != "refresh_token" {
 		return "", "", errors.New("not a refresh token")
 	}
+	if tokenRecord.UserID != userID {
+		return "", "", errors.New("refresh token subject mismatch")
+	}
 
 	// Get user
 	user, err := s.userRepo.GetUserByID(ctx, userID)
@@ -1216,12 +1239,16 @@ func (s *userService) RefreshToken(
 		return "", "", err
 	}
 
-	// Revoke old refresh token
-	tokenRecord.IsRevoked = true
-	_ = s.tokenRepo.UpdateToken(ctx, tokenRecord)
-
-	// Generate new tokens
-	return s.GenerateTokens(ctx, user)
+	pair, err := buildAuthTokenPair(user, s.resolveLoginTenantID(ctx, user))
+	if err != nil {
+		return "", "", err
+	}
+	if err := s.tokenRepo.RotateRefreshToken(
+		ctx, refreshTokenString, userID, pair.accessRecord, pair.refreshRecord,
+	); err != nil {
+		return "", "", errors.New("refresh token is revoked")
+	}
+	return pair.accessToken, pair.refreshToken, nil
 }
 
 // Logout invalidates every outstanding session for the user identified by

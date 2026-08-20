@@ -728,7 +728,10 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		// Run base migrations (all versioned migrations including embeddings)
 		// The embeddings migration will be conditionally executed based on skip_embedding parameter in DSN
 		if err := database.RunMigrationsWithOptions(migrateDSN, migrationOpts); err != nil {
-			// Log warning but don't fail startup - migrations might be handled externally
+			if config.IsStandardProduction(handler.Edition, os.Getenv("GIN_MODE")) {
+				return nil, fmt.Errorf("production database migration failed: %w", err)
+			}
+			// 非生产环境保留历史兼容：允许开发者手工修复迁移后继续调试。
 			logger.Warnf(context.Background(), "Database migration failed: %v", err)
 			logger.Warnf(
 				context.Background(),
@@ -748,6 +751,27 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		}
 	} else {
 		logger.Infof(context.Background(), "Auto-migration is disabled (AUTO_MIGRATE=false)")
+	}
+
+	if config.IsStandardProduction(handler.Edition, os.Getenv("GIN_MODE")) && db.Dialector.Name() == "postgres" {
+		var state struct {
+			Version uint
+			Dirty   bool
+		}
+		result := db.Raw("SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&state)
+		if result.Error != nil {
+			return nil, fmt.Errorf("query production database migration state: %w", result.Error)
+		}
+		if err := config.ValidateProductionMigrationState(
+			handler.Edition,
+			os.Getenv("GIN_MODE"),
+			os.Getenv("DB_DRIVER"),
+			state.Version,
+			state.Dirty,
+			result.RowsAffected > 0,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	// Get underlying SQL DB object
