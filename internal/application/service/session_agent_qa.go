@@ -246,18 +246,9 @@ func (s *sessionService) AgentQA(
 	logger.Info(ctx, "Executing agent with streaming")
 	if _, err := engine.Execute(ctx, sessionID, req.AssistantMessageID, agentQuery, llmContext, agentImageURLs); err != nil {
 		logger.Errorf(ctx, "Agent execution failed: %v", err)
-		// Emit error event to the EventBus used by this agent
-		eventBus.Emit(ctx, event.Event{
-			Type:      event.EventError,
-			SessionID: sessionID,
-			Data: event.ErrorData{
-				Error:     err.Error(),
-				Stage:     "agent_execution",
-				SessionID: sessionID,
-			},
-		})
+		return err
 	}
-	// Return empty - events will be handled by Handler via EventBus subscription
+	// 事件已经同步写入请求专属 EventBus；返回值仍必须反映真实执行结果。
 	return nil
 }
 

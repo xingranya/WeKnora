@@ -33,10 +33,28 @@ import { getKnowledgeBaseById } from '@/api/knowledge-base/index'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { collectDroppedFiles } from './collectDroppedFiles'
+import { useUIStore } from '@/stores/ui'
 
 const route = useRoute();
 const router = useRouter();
 const commandPaletteStore = useCommandPaletteStore();
+const uiStore = useUIStore();
+let narrowSidebarMedia: MediaQueryList | null = null;
+let sidebarCollapsedBeforeNarrow: boolean | null = null;
+
+const syncResponsiveSidebar = (event: MediaQueryListEvent | MediaQueryList) => {
+    if (event.matches) {
+        if (sidebarCollapsedBeforeNarrow === null) {
+            sidebarCollapsedBeforeNarrow = uiStore.sidebarCollapsed;
+        }
+        uiStore.sidebarCollapsed = true;
+        return;
+    }
+    if (sidebarCollapsedBeforeNarrow !== null) {
+        uiStore.sidebarCollapsed = sidebarCollapsedBeforeNarrow;
+        sidebarCollapsedBeforeNarrow = null;
+    }
+}
 let ismask = ref(false)
 const { t } = useI18n();
 
@@ -179,6 +197,9 @@ const handleGlobalDrop = async (event: DragEvent) => {
 
 // 组件挂载时添加全局事件监听器
 onMounted(() => {
+    narrowSidebarMedia = window.matchMedia('(max-width: 768px)');
+    syncResponsiveSidebar(narrowSidebarMedia);
+    narrowSidebarMedia.addEventListener('change', syncResponsiveSidebar);
     document.addEventListener('dragenter', handleGlobalDragEnter, true);
     document.addEventListener('dragover', handleGlobalDragOver, true);
     document.addEventListener('dragleave', handleGlobalDragLeave, true);
@@ -214,6 +235,12 @@ function maybeOpenCmdkFromRoute() {
 
 // 组件卸载时移除全局事件监听器
 onUnmounted(() => {
+    narrowSidebarMedia?.removeEventListener('change', syncResponsiveSidebar);
+    narrowSidebarMedia = null;
+    if (sidebarCollapsedBeforeNarrow !== null) {
+        uiStore.sidebarCollapsed = sidebarCollapsedBeforeNarrow;
+        sidebarCollapsedBeforeNarrow = null;
+    }
     document.removeEventListener('dragenter', handleGlobalDragEnter, true);
     document.removeEventListener('dragover', handleGlobalDragOver, true);
     document.removeEventListener('dragleave', handleGlobalDragLeave, true);
@@ -235,7 +262,7 @@ onUnmounted(() => {
     align-items: stretch;
     width: 100%;
     height: 100%;
-    min-width: 600px;
+    min-width: 0;
     min-height: 0;
     /* 统一整页背景，让左侧菜单与右侧内容区视觉连贯 */
     background: var(--td-bg-color-container);

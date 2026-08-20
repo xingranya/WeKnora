@@ -66,8 +66,9 @@ type qaRequestContext struct {
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
 	// what the user had selected on the UI (not server-side resolutions).
-	reqAgentEnabled bool
-	reqAgentID      string
+	reqAgentEnabled        bool
+	reqAgentID             string
+	reqAgentSourceTenantID uint64
 }
 
 // buildQARequest converts the qaRequestContext into a types.QARequest for service invocation.
@@ -142,11 +143,12 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		request.Images[i].Caption = ""
 	}
 
-	// Log request details
-	if requestJSON, err := json.Marshal(request); err == nil {
-		logger.Infof(ctx, "[%s] Request: session_id=%s, request=%s",
-			logPrefix, sessionID, secutils.SanitizeForLog(secutils.CompactImageDataURLForLog(string(requestJSON))))
-	}
+	logger.Infof(ctx,
+		"[%s] Request accepted: actor_user_id=%s tenant_id=%d session_id=%s query=%q knowledge_bases=%d knowledge_ids=%d images=%d attachments=%d",
+		logPrefix, secutils.SanitizeForLog(c.GetString(types.UserIDContextKey.String())),
+		c.GetUint64(types.TenantIDContextKey.String()), sessionID, secutils.SanitizeAuditLog(request.Query), len(request.KnowledgeBaseIDs),
+		len(request.KnowledgeIds), len(request.Images), len(request.AttachmentUploads)+len(request.AttachmentIDs),
+	)
 
 	// Get session. QA writes new messages into the session, so use the strict
 	// owner scope: a tenant admin may read an API-key session but must not be
@@ -367,26 +369,27 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			ModelID:          modelID,
 			ExecutionContext: executionContext,
 		},
-		knowledgeBaseIDs:      secutils.SanitizeForLogArray(kbIDs),
-		knowledgeIDs:          secutils.SanitizeForLogArray(knowledgeIDs),
-		tagScopes:             tagScopes,
-		tagIDs:                secutils.SanitizeForLogArray(tagIDs),
-		mcpServiceIDs:         secutils.SanitizeForLogArray(mcpServiceIDs),
-		skillNames:            secutils.SanitizeForLogArray(skillNames),
-		summaryModelID:        secutils.SanitizeForLog(request.SummaryModelID),
-		webSearchEnabled:      request.WebSearchEnabled,
-		mentionedItems:        convertMentionedItems(request.MentionedItems),
-		effectiveTenantID:     effectiveTenantID,
-		sharedAgentReadOnly:   sharedAgentReadOnly,
-		images:                request.Images,
-		channel:               request.Channel,
-		attachments:           processedAttachments,
-		attachmentIDs:         attachmentIDs,
-		attachmentMetas:       attachmentMetas,
-		suggestionAttribution: request.SuggestionAttribution,
-		reqAgentEnabled:       request.AgentEnabled,
-		reqAgentID:            request.AgentID,
-		resourceRewriter:      resourceRewriter,
+		knowledgeBaseIDs:       secutils.SanitizeForLogArray(kbIDs),
+		knowledgeIDs:           secutils.SanitizeForLogArray(knowledgeIDs),
+		tagScopes:              tagScopes,
+		tagIDs:                 secutils.SanitizeForLogArray(tagIDs),
+		mcpServiceIDs:          secutils.SanitizeForLogArray(mcpServiceIDs),
+		skillNames:             secutils.SanitizeForLogArray(skillNames),
+		summaryModelID:         secutils.SanitizeForLog(request.SummaryModelID),
+		webSearchEnabled:       request.WebSearchEnabled,
+		mentionedItems:         convertMentionedItems(request.MentionedItems),
+		effectiveTenantID:      effectiveTenantID,
+		sharedAgentReadOnly:    sharedAgentReadOnly,
+		images:                 request.Images,
+		channel:                request.Channel,
+		attachments:            processedAttachments,
+		attachmentIDs:          attachmentIDs,
+		attachmentMetas:        attachmentMetas,
+		suggestionAttribution:  request.SuggestionAttribution,
+		reqAgentEnabled:        request.AgentEnabled,
+		reqAgentID:             request.AgentID,
+		reqAgentSourceTenantID: request.AgentSourceTenantID,
+		resourceRewriter:       resourceRewriter,
 	}
 
 	return reqCtx, &request, nil
@@ -608,10 +611,27 @@ type sseStreamContext struct {
 	asyncCtx         context.Context
 	cancel           context.CancelFunc
 	assistantMessage *types.Message
+	streamHandler    *AgentStreamHandler
+	terminal         *qaTerminalCoordinator
+}
+
+type qaTerminalCoordinator struct {
+	mu      sync.Mutex
+	outcome string
+}
+
+func (t *qaTerminalCoordinator) claim(outcome string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != "" {
+		return false
+	}
+	t.outcome = outcome
+	return true
 }
 
 // setupSSEStream sets up the SSE streaming context
-func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *sseStreamContext {
+func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, mode qaMode) *sseStreamContext {
 	// Set SSE headers
 	setSSEHeaders(reqCtx.c)
 
@@ -646,15 +666,17 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	eventBus := event.NewEventBus()
 	asyncCtx, cancel := context.WithCancel(logger.CloneContext(baseCtx))
 
+	terminal := &qaTerminalCoordinator{}
 	streamCtx := &sseStreamContext{
 		eventBus:         eventBus,
 		asyncCtx:         asyncCtx,
 		cancel:           cancel,
 		assistantMessage: reqCtx.assistantMessage,
+		terminal:         terminal,
 	}
 
 	// Setup stop event handler
-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel)
+	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel, terminal)
 
 	// Watch for stop events independently of the client SSE connection so a
 	// user-requested stop reliably cancels generation even when the client
@@ -668,8 +690,9 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	h.startStopWatcher(logger.CloneContext(baseCtx), reqCtx.sessionID, reqCtx.assistantMessage.ID, eventBus)
 
 	// Setup stream handler
-	h.setupStreamHandler(asyncCtx, reqCtx.sessionID, reqCtx.assistantMessage.ID,
-		reqCtx.requestID, reqCtx.session.TenantID, reqCtx.receivedAt, reqCtx.assistantMessage, eventBus)
+	streamCtx.streamHandler = h.setupStreamHandler(asyncCtx, reqCtx.sessionID, reqCtx.assistantMessage.ID,
+		reqCtx.requestID, reqCtx.session.TenantID, reqCtx.receivedAt, reqCtx.assistantMessage, eventBus,
+		mode == qaModeAgent)
 
 	// Generate title if needed
 	if generateTitle && reqCtx.session.Title == "" {
@@ -936,87 +959,33 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	}
 
 	// Setup SSE stream
-	streamCtx := h.setupSSEStream(reqCtx, generateTitle)
+	streamCtx := h.setupSSEStream(reqCtx, generateTitle, mode)
 
 	// Normal mode: register completion handler on EventAgentFinalAnswer
 	// (Agent mode handles completion in the defer block instead)
 	if mode == qaModeNormal {
-		var completionHandled bool
-
-		// Persist the pipeline's retrieval/attachment stages so a reloaded
-		// conversation redraws the timeline it showed while streaming, including
-		// turns that searched and cited nothing.
-		registerQuickAnswerTimelineRecorder(streamCtx.eventBus, streamCtx.assistantMessage)
-
-		// Persist reasoning_content into agent_steps so historical reload can
-		// reconstruct the thinking card (same shape as Agent-mode steps).
-		// Accumulate on assistantMessage directly so user-initiated stop also
-		// keeps whatever reasoning had streamed before the cancel.
-		streamCtx.eventBus.On(event.EventAgentThought, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentThoughtData)
-			if !ok || data.Content == "" {
-				return nil
-			}
-			appendQuickAnswerReasoning(streamCtx.assistantMessage, data.Content)
-			return nil
-		})
-
-		streamCtx.eventBus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
-			data, ok := evt.Data.(event.AgentFinalAnswerData)
-			if !ok {
-				return nil
-			}
-			streamCtx.assistantMessage.Content += data.Content
-			if data.IsFallback {
-				streamCtx.assistantMessage.IsFallback = true
-			}
-			if data.Done {
-				if completionHandled {
-					return nil
-				}
-				completionHandled = true
-
-				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
-				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
-				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID)
-				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
-					Type:      event.EventAgentComplete,
-					SessionID: sessionID,
-					Data:      event.AgentCompleteData{FinalAnswer: streamCtx.assistantMessage.Content},
-				})
-			}
-			return nil
-		})
+		h.registerQuickAnswerTerminalHandlers(streamCtx, reqCtx)
+	} else {
+		h.registerAgentTerminalHandlers(streamCtx, reqCtx)
 	}
 
 	// Execute QA asynchronously
 	go func() {
+		var serviceErr error
+		panicked := false
 		defer func() {
 			if r := recover(); r != nil {
+				panicked = true
 				buf := make([]byte, 10240)
-				runtime.Stack(buf, true)
+				stackSize := runtime.Stack(buf, true)
 				stageName := "Knowledge QA"
 				if mode == qaModeAgent {
 					stageName = "Agent QA"
 				}
-				logger.ErrorWithFields(streamCtx.asyncCtx,
-					errors.NewInternalServerError(fmt.Sprintf("%s service panicked: %v\n%s", stageName, r, string(buf))),
-					map[string]interface{}{"session_id": sessionID})
+				h.handleQAServicePanic(streamCtx, reqCtx, stageName, r, buf[:stackSize])
 			}
-			// Agent mode: complete the assistant message in defer (normal mode does it via event handler)
-			if mode == qaModeAgent {
-				// Use WithoutCancel so a user-triggered stop (which cancels
-				// asyncCtx) doesn't also cancel the GORM UPDATE that persists
-				// AgentSteps/Content. Without this, cancelled-ctx makes
-				// GORM skip the write and the agent's intermediate steps
-				// (thinking / tool_call history) are lost on page refresh.
-				updateCtx := context.WithValue(
-					context.WithoutCancel(streamCtx.asyncCtx),
-					types.TenantIDContextKey, reqCtx.session.TenantID,
-				)
-				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID)
-				logger.Infof(streamCtx.asyncCtx, "Agent QA service completed for session: %s", sessionID)
-			}
+
+			_ = panicked
 		}()
 
 		// Resolve pre-uploaded attachments (may still be parsing): waits with a
@@ -1029,7 +998,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		// Build QA request and invoke the appropriate service
 		qaReq := reqCtx.buildQARequest()
 
-		var serviceErr error
 		var stageName string
 		if mode == qaModeNormal {
 			stageName = "knowledge_qa_execution"
@@ -1039,32 +1007,62 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			serviceErr = h.sessionService.AgentQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 		}
 
-		if serviceErr != nil {
-			// A user-requested stop cancels asyncCtx, which surfaces here as a
-			// context cancellation. That is an expected outcome, not a failure:
-			// the stop event already notifies the client, so don't emit a
-			// spurious error event (which would otherwise show an error toast).
-			if streamCtx.asyncCtx.Err() != nil {
-				logger.Infof(streamCtx.asyncCtx, "QA cancelled by user stop for session: %s", sessionID)
-			} else {
-				logger.ErrorWithFields(streamCtx.asyncCtx, serviceErr, nil)
-				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
-					Type:      event.EventError,
-					SessionID: sessionID,
-					Data: event.ErrorData{
-						Error:     serviceErr.Error(),
-						Stage:     stageName,
-						SessionID: sessionID,
-					},
-				})
-			}
+		if serviceErr == nil {
+			return
 		}
+
+		// A user-requested stop cancels asyncCtx. The stop handler has already
+		// emitted the terminal frame and persisted the partial assistant message.
+		if streamCtx.asyncCtx.Err() != nil {
+			logger.Infof(streamCtx.asyncCtx, "QA cancelled by user stop for session: %s", sessionID)
+			return
+		}
+
+		logger.ErrorWithFields(streamCtx.asyncCtx, serviceErr, nil)
+		_ = streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+			Type:      event.EventError,
+			SessionID: sessionID,
+			Data: event.ErrorData{
+				Error:     serviceErr.Error(),
+				Stage:     stageName,
+				SessionID: sessionID,
+			},
+		})
+
 	}()
 
 	// Handle SSE events (blocking)
 	shouldWaitForTitle := generateTitle && reqCtx.session.Title == ""
 	h.handleAgentEventsForSSE(ctx, reqCtx.c, sessionID, reqCtx.assistantMessage.ID,
 		reqCtx.requestID, streamCtx.eventBus, shouldWaitForTitle, reqCtx.resourceRewriter)
+}
+
+const qaUnexpectedFailureMessage = publicSessionFailureMessage
+
+// handleQAServicePanic 将后台 panic 转为可回放的错误终态，并确保助手消息结束。
+// 详细 panic 与堆栈只进入内部日志，客户端和消息表仅保留稳定文案。
+func (h *Handler) handleQAServicePanic(
+	streamCtx *sseStreamContext,
+	reqCtx *qaRequestContext,
+	stageName string,
+	panicValue any,
+	stack []byte,
+) {
+	logger.ErrorWithFields(streamCtx.asyncCtx,
+		errors.NewInternalServerError(fmt.Sprintf("%s service panicked: %v\n%s", stageName, panicValue, string(stack))),
+		map[string]interface{}{"session_id": reqCtx.sessionID})
+
+	terminalCtx := context.WithoutCancel(streamCtx.asyncCtx)
+	_ = streamCtx.eventBus.Emit(terminalCtx, event.Event{
+		Type:      event.EventError,
+		SessionID: reqCtx.sessionID,
+		Data: event.ErrorData{
+			Error:     qaUnexpectedFailureMessage,
+			Stage:     strings.ToLower(strings.ReplaceAll(stageName, " ", "_")),
+			SessionID: reqCtx.sessionID,
+		},
+	})
+
 }
 
 // runVLMAnalysisIfNeeded runs VLM image analysis within the async goroutine,
@@ -1391,21 +1389,144 @@ func (h *Handler) persistLastRequestState(parentCtx context.Context, reqCtx *qaR
 	}
 
 	state := &types.SessionLastRequestState{
-		AgentID:          reqCtx.reqAgentID,
-		AgentEnabled:     agentEnabled,
-		ModelID:          reqCtx.summaryModelID,
-		KnowledgeBaseIDs: reqCtx.knowledgeBaseIDs,
-		KnowledgeIDs:     reqCtx.knowledgeIDs,
-		TagIDs:           reqCtx.tagIDs,
-		MCPServiceIDs:    reqCtx.mcpServiceIDs,
-		SkillNames:       reqCtx.skillNames,
-		MentionedItems:   reqCtx.mentionedItems,
-		WebSearchEnabled: reqCtx.webSearchEnabled,
+		AgentID:             reqCtx.reqAgentID,
+		AgentSourceTenantID: reqCtx.reqAgentSourceTenantID,
+		AgentEnabled:        agentEnabled,
+		ModelID:             reqCtx.summaryModelID,
+		KnowledgeBaseIDs:    reqCtx.knowledgeBaseIDs,
+		KnowledgeIDs:        reqCtx.knowledgeIDs,
+		TagIDs:              reqCtx.tagIDs,
+		MCPServiceIDs:       reqCtx.mcpServiceIDs,
+		SkillNames:          reqCtx.skillNames,
+		MentionedItems:      reqCtx.mentionedItems,
+		WebSearchEnabled:    reqCtx.webSearchEnabled,
 	}
 
 	if err := h.sessionService.UpdateSessionLastRequestState(ctx, reqCtx.sessionID, state); err != nil {
 		logger.Warnf(ctx, "persist last_request_state failed for session %s: %v", reqCtx.sessionID, err)
 	}
+}
+
+// registerQuickAnswerTerminalHandlers 统一处理快速回答的成功与错误终态。
+// SSE 处理器在此函数调用前已经订阅，因此错误会先写入流，再持久化助手消息。
+func (h *Handler) registerQuickAnswerTerminalHandlers(streamCtx *sseStreamContext, reqCtx *qaRequestContext) {
+	registerQuickAnswerTimelineRecorder(streamCtx.eventBus, streamCtx.assistantMessage)
+
+	streamCtx.eventBus.On(event.EventAgentThought, func(ctx context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentThoughtData)
+		if !ok || data.Content == "" {
+			return nil
+		}
+		appendQuickAnswerReasoning(streamCtx.assistantMessage, data.Content)
+		return nil
+	})
+
+	streamCtx.eventBus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentFinalAnswerData)
+		if !ok {
+			return nil
+		}
+
+		streamCtx.terminal.mu.Lock()
+		if streamCtx.terminal.outcome != "" {
+			streamCtx.terminal.mu.Unlock()
+			return nil
+		}
+		streamCtx.assistantMessage.Content += data.Content
+		if data.IsFallback {
+			streamCtx.assistantMessage.IsFallback = true
+		}
+		if !data.Done {
+			streamCtx.terminal.mu.Unlock()
+			return nil
+		}
+		streamCtx.terminal.outcome = "success"
+		streamCtx.terminal.mu.Unlock()
+
+		logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", reqCtx.sessionID)
+		updateCtx := context.WithValue(
+			context.WithoutCancel(streamCtx.asyncCtx),
+			types.TenantIDContextKey,
+			reqCtx.session.TenantID,
+		)
+		if err := h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID); err != nil {
+			_ = streamCtx.eventBus.Emit(updateCtx, event.Event{
+				Type: event.EventError, SessionID: reqCtx.sessionID,
+				Data: event.ErrorData{Error: err.Error(), Stage: "assistant_persistence", SessionID: reqCtx.sessionID},
+			})
+			return nil
+		}
+		streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+			Type:      event.EventAgentComplete,
+			SessionID: reqCtx.sessionID,
+			Data: event.AgentCompleteData{
+				FinalAnswer: streamCtx.assistantMessage.Content,
+				Outcome:     event.AgentOutcomeSuccess,
+			},
+		})
+		return nil
+	})
+
+	streamCtx.eventBus.On(event.EventError, func(ctx context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.ErrorData)
+		if !ok {
+			return nil
+		}
+
+		streamCtx.terminal.mu.Lock()
+		if streamCtx.terminal.outcome != "" {
+			streamCtx.terminal.mu.Unlock()
+			return nil
+		}
+		streamCtx.terminal.outcome = "failed"
+		streamCtx.assistantMessage.Content = publicSessionFailureMessage
+		streamCtx.terminal.mu.Unlock()
+
+		updateCtx := context.WithValue(
+			context.WithoutCancel(streamCtx.asyncCtx),
+			types.TenantIDContextKey,
+			reqCtx.session.TenantID,
+		)
+		h.failAssistantMessage(updateCtx, streamCtx.assistantMessage, data.Error)
+		return nil
+	})
+}
+
+// registerAgentTerminalHandlers 在快照处理器之后订阅，确保核心消息先落库，
+// 再向客户端发布 complete；失败和停止不会触发成功副作用。
+func (h *Handler) registerAgentTerminalHandlers(streamCtx *sseStreamContext, reqCtx *qaRequestContext) {
+	streamCtx.eventBus.On(event.EventAgentComplete, func(ctx context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentCompleteData)
+		if !ok || data.Outcome != event.AgentOutcomeSuccess || !streamCtx.terminal.claim("success") {
+			return nil
+		}
+		updateCtx := context.WithValue(
+			context.WithoutCancel(ctx), types.TenantIDContextKey, reqCtx.session.TenantID,
+		)
+		if err := h.completeAssistantMessage(
+			updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID,
+		); err != nil {
+			_ = streamCtx.eventBus.Emit(updateCtx, event.Event{
+				Type: event.EventError, SessionID: reqCtx.sessionID,
+				Data: event.ErrorData{Error: err.Error(), Stage: "assistant_persistence", SessionID: reqCtx.sessionID},
+			})
+			return nil
+		}
+		logger.Infof(updateCtx, "Agent QA service completed for session: %s", reqCtx.sessionID)
+		return streamCtx.streamHandler.AppendCompleteEvent(evt, data)
+	})
+
+	streamCtx.eventBus.On(event.EventError, func(ctx context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.ErrorData)
+		if !ok || !streamCtx.terminal.claim("failed") {
+			return nil
+		}
+		updateCtx := context.WithValue(
+			context.WithoutCancel(ctx), types.TenantIDContextKey, reqCtx.session.TenantID,
+		)
+		h.failAssistantMessage(updateCtx, streamCtx.assistantMessage, data.Error)
+		return nil
+	})
 }
 
 // appendQuickAnswerReasoning accumulates streamed reasoning_content from
@@ -1417,19 +1538,35 @@ func appendQuickAnswerReasoning(msg *types.Message, content string) {
 	ensureQuickAnswerStep(msg).ReasoningContent += content
 }
 
+// failAssistantMessage 只持久化稳定公开文案；内部错误正文经脱敏后保留在审计日志。
+func (h *Handler) failAssistantMessage(ctx context.Context, assistantMessage *types.Message, errorMessage string) {
+	logPrivateSessionError(ctx, "assistant_message", errorMessage)
+	assistantMessage.Content = publicSessionFailureMessage
+	assistantMessage.UpdatedAt = time.Now()
+	assistantMessage.IsCompleted = true
+	if err := h.messageService.UpdateMessage(ctx, assistantMessage); err != nil {
+		logger.Warnf(ctx, "persist failed assistant message %s: %v", assistantMessage.ID, err)
+	}
+}
+
 // completeAssistantMessage marks an assistant message as complete, updates it,
 // and asynchronously indexes the Q&A pair into the chat history knowledge base.
 func (h *Handler) completeAssistantMessage(
 	ctx context.Context, assistantMessage *types.Message, userQuery, userMessageID string,
-) {
+) error {
 	assistantMessage.UpdatedAt = time.Now()
 	assistantMessage.IsCompleted = true
-	_ = h.messageService.UpdateMessage(ctx, assistantMessage)
+	if err := h.messageService.UpdateMessage(ctx, assistantMessage); err != nil {
+		assistantMessage.IsCompleted = false
+		return fmt.Errorf("persist completed assistant message: %w", err)
+	}
 
 	// Asynchronously index the Q&A pair into the chat history knowledge base for vector search.
 	// Use WithoutCancel so the goroutine survives after the HTTP request context is done.
 	bgCtx := context.WithoutCancel(ctx)
-	go h.messageService.IndexMessageToKB(bgCtx, userQuery, assistantMessage.Content, assistantMessage.ID, assistantMessage.SessionID)
+	if strings.TrimSpace(userQuery) != "" && strings.TrimSpace(assistantMessage.Content) != "" {
+		go h.messageService.IndexMessageToKB(bgCtx, userQuery, assistantMessage.Content, assistantMessage.ID, assistantMessage.SessionID)
+	}
 	if userQuery != "" && h.suggestionService != nil {
 		go func() {
 			if _, err := h.suggestionService.EnsureFollowUps(
@@ -1442,6 +1579,7 @@ func (h *Handler) completeAssistantMessage(
 	if userQuery != "" {
 		go h.recordTurnMemory(bgCtx, assistantMessage, userQuery, userMessageID)
 	}
+	return nil
 }
 
 // recordTurnMemory runs the long-term memory write path for a finished turn.

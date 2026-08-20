@@ -180,6 +180,7 @@ func (e *AgentEngine) handleMaxIterations(
 // emitCompletionEvent emits the EventAgentComplete event with execution summary.
 func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
+	outcome event.AgentOutcome,
 ) {
 	// Convert knowledge refs to interface{} slice for event data
 	knowledgeRefsInterface := make([]interface{}, 0, len(state.KnowledgeRefs))
@@ -198,6 +199,7 @@ func (e *AgentEngine) emitCompletionEvent(
 			TotalSteps:      len(state.RoundSteps),
 			TotalDurationMs: time.Since(startTime).Milliseconds(),
 			MessageID:       messageID, // Include message ID for proper message update
+			Outcome:         outcome,
 		},
 	})
 

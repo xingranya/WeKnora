@@ -30,6 +30,7 @@ type AgentStreamHandler struct {
 	ttfbLogged         bool      // Guards one-shot TTFB log on first answer chunk
 	assistantMessage   *types.Message
 	streamManager      interfaces.StreamManager
+	deferComplete      bool
 
 	eventBus *event.EventBus
 
@@ -90,6 +91,7 @@ func NewAgentStreamHandler(
 	streamManager interfaces.StreamManager,
 	eventBus *event.EventBus,
 	artifactCollector *service.ArtifactCollector,
+	deferComplete bool,
 ) *AgentStreamHandler {
 	return &AgentStreamHandler{
 		ctx:                ctx,
@@ -100,6 +102,7 @@ func NewAgentStreamHandler(
 		receivedAt:         receivedAt,
 		assistantMessage:   assistantMessage,
 		streamManager:      streamManager,
+		deferComplete:      deferComplete,
 		eventBus:           eventBus,
 		artifactCollector:  artifactCollector,
 		knowledgeRefs:      make([]*types.SearchResult, 0),
@@ -561,17 +564,17 @@ func (h *AgentStreamHandler) handleError(ctx context.Context, evt event.Event) e
 		return nil
 	}
 
-	// Build error metadata
-	metadata := map[string]interface{}{
+	logPrivateSessionError(h.ctx, data.Stage, data.Error)
+	metadata := publicSessionErrorData(map[string]interface{}{
 		"stage": data.Stage,
 		"error": data.Error,
-	}
+	})
 
 	// Append error event to stream
 	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
 		ID:        evt.ID,
 		Type:      types.ResponseTypeError,
-		Content:   data.Error,
+		Content:   publicSessionFailureMessage,
 		Done:      true,
 		Timestamp: time.Now(),
 		Data:      metadata,
@@ -623,7 +626,6 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 	// Update assistant message with final data
 	if data.MessageID == h.assistantMessageID {
 		// h.assistantMessage.Content = data.FinalAnswer
-		h.assistantMessage.IsCompleted = true
 		h.assistantMessage.AgentDurationMs = data.TotalDurationMs
 
 		// Update knowledge references if provided
@@ -675,6 +677,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		}
 	}
 
+	// EventAgentComplete 也会在失败和停止时携带最终快照；这些结果不能
+	// 伪装成成功的 SSE complete。失败由 EventError 终结，停止由 stop 终结。
+	if data.Outcome != "" && data.Outcome != event.AgentOutcomeSuccess {
+		return nil
+	}
+
 	// Fallback: if no answer events were streamed but we have a final answer,
 	// emit it as answer events so the frontend can render it properly.
 	// This guards against edge cases where the LLM stops without calling final_answer.
@@ -715,7 +723,21 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		}
 	}
 
-	// Send completion event to stream manager so SSE can detect completion
+	if h.deferComplete {
+		return nil
+	}
+	return h.appendCompleteEventLocked(evt, data)
+}
+
+// AppendCompleteEvent 在核心消息成功落库后发布 SSE complete。
+func (h *AgentStreamHandler) AppendCompleteEvent(evt event.Event, data event.AgentCompleteData) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.appendCompleteEventLocked(evt, data)
+}
+
+// appendCompleteEventLocked 要求调用者持有 h.mu。
+func (h *AgentStreamHandler) appendCompleteEventLocked(evt event.Event, data event.AgentCompleteData) error {
 	completeData := map[string]interface{}{
 		"total_steps":       data.TotalSteps,
 		"total_duration_ms": data.TotalDurationMs,
@@ -737,8 +759,8 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		Data:      completeData,
 	}); err != nil {
 		logger.GetLogger(h.ctx).Errorf("Append complete event to stream failed: %v", err)
+		return err
 	}
-
 	return nil
 }
 

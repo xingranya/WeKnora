@@ -149,3 +149,41 @@ func TestParseOutput_ValidJSONStillAppliesRewrite(t *testing.T) {
 		t.Errorf("Intent = %q, want summarize", cm.Intent)
 	}
 }
+
+func TestParseOutput_NormalizesUnsafeIntentToKBSearch(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "缺失 intent", raw: `{"rewrite_query":"rewritten query"}`},
+		{name: "空 intent", raw: `{"rewrite_query":"rewritten query","intent":"   "}`},
+		{name: "未知 intent", raw: `{"rewrite_query":"rewritten query","intent":"direct_answer"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &PluginQueryUnderstand{}
+			cm := &types.ChatManage{
+				PipelineState: types.PipelineState{
+					RewriteQuery: "original user query",
+					Intent:       types.IntentChitchat,
+				},
+			}
+
+			p.parseOutput(cm, tt.raw)
+
+			if cm.Intent != types.IntentKBSearch {
+				t.Fatalf("Intent = %q, want kb_search", cm.Intent)
+			}
+			if !cm.NeedsRetrieval() {
+				t.Fatal("规范化后的 intent 必须执行检索")
+			}
+		})
+	}
+}
+
+func TestUnknownQueryIntentAlwaysNeedsRetrieval(t *testing.T) {
+	if !types.QueryIntent("future_intent").NeedsKBRetrieval() {
+		t.Fatal("未知 intent 必须安全回退到知识库检索")
+	}
+}

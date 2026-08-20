@@ -11,6 +11,7 @@
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
     "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --experimental-test-module-mocks --import tsx --test",
+    "test:mount": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test src/views/chat/sessionHydration.mount.test.ts",
     "check-i18n": "tsx --test src/i18n/localeKeyAudit.test.ts",
     "scan-i18n-gaps": "tsx src/i18n/localeGapScan.ts",
     "regenerate-i18n-locales": "tsx src/i18n/regeneratePrunedLocales.ts"
@@ -49,7 +50,9 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-vue": "6.0.6",
     "@vitejs/plugin-vue-jsx": "5.1.5",
+    "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.1",
+    "happy-dom": "^20.11.6",
     "less": "^4.6.4",
     "less-loader": "^12.3.2",
     "npm-run-all2": "^8.0.4",

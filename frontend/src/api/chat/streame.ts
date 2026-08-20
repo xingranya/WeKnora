@@ -8,36 +8,136 @@ import {
   type StreamRequestMeta,
 } from '@/utils/chatRequestDebug';
 
+const MAX_ERROR_BODY_BYTES = 16 * 1024;
+const MAX_ERROR_MESSAGE_CHARS = 2048;
 
+type FetchEventSource = typeof fetchEventSource;
 
-interface StreamOptions {
-  // 请求方法 (默认POST)
-  method?: 'GET' | 'POST'
-  // 请求头
-  headers?: Record<string, string>
-  // 请求体自动序列化
-  body?: Record<string, any>
-  // 流式渲染间隔 (ms)
-  chunkInterval?: number
+interface UseStreamDependencies {
+  fetchEventSource?: FetchEventSource;
 }
 
-export function useStream() {
+interface StreamEventPayload {
+  response_type?: unknown;
+  type?: unknown;
+  done?: unknown;
+}
+
+const isAbortError = (error: unknown): boolean =>
+  error instanceof Error && error.name === 'AbortError';
+
+const normalizeErrorMessage = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= MAX_ERROR_MESSAGE_CHARS) return normalized;
+  return `${normalized.slice(0, MAX_ERROR_MESSAGE_CHARS)}...`;
+};
+
+const extractJSONErrorMessage = (value: unknown): string => {
+  if (typeof value === 'string') return normalizeErrorMessage(value);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+
+  const record = value as Record<string, unknown>;
+  for (const key of ['message', 'detail', 'error', 'content']) {
+    const nested = record[key];
+    const message = typeof nested === 'object'
+      ? extractJSONErrorMessage(nested)
+      : normalizeErrorMessage(nested);
+    if (message) return message;
+  }
+  return '';
+};
+
+export async function readBoundedResponseText(
+  response: Response,
+  maxBytes = MAX_ERROR_BODY_BYTES,
+): Promise<string> {
+  if (!response.body || maxBytes <= 0) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = '';
+  let reachedLimit = false;
+
+  try {
+    while (bytesRead < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const remaining = maxBytes - bytesRead;
+      const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      bytesRead += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: true });
+      if (value.byteLength > remaining || bytesRead >= maxBytes) {
+        reachedLimit = true;
+        break;
+      }
+    }
+    text += decoder.decode();
+  } finally {
+    if (reachedLimit) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+
+  return text;
+}
+
+export async function buildStreamHTTPErrorMessage(response: Response): Promise<string> {
+  const rawBody = await readBoundedResponseText(response);
+  let detail = '';
+
+  if (rawBody.trim()) {
+    try {
+      detail = extractJSONErrorMessage(JSON.parse(rawBody));
+    } catch {
+      detail = normalizeErrorMessage(rawBody);
+    }
+  }
+
+  const status = `HTTP ${response.status}`;
+  const fallback = normalizeErrorMessage(response.statusText);
+  return detail ? `${status}: ${detail}` : fallback ? `${status}: ${fallback}` : status;
+}
+
+export function isTerminalStreamEvent(data: unknown): boolean {
+  if (typeof data === 'string' && data.trim() === '[DONE]') return true;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+
+  const payload = data as StreamEventPayload;
+  const responseType = payload.response_type ?? payload.type;
+  return responseType === 'complete'
+    || ((responseType === 'error' || responseType === 'stop') && payload.done === true);
+}
+
+export function useStream(dependencies: UseStreamDependencies = {}) {
+  const requestEventSource = dependencies.fetchEventSource ?? fetchEventSource;
   // 响应式状态
   const output = ref('')              // 显示内容
   const isStreaming = ref(false)      // 流状态
   const isLoading = ref(false)        // 初始加载
   const error = ref<string | null>(null)// 错误信息
   const lastStreamRequest = ref<StreamRequestMeta | null>(null)
-  let controller = new AbortController()
+  let activeController: AbortController | null = null
   let streamGeneration = 0
 
-  // 流式渲染缓冲
-  let buffer: string[] = []
-  let renderTimer: number | null = null
+  const finishGeneration = (generation: number, abort: boolean) => {
+    if (generation !== streamGeneration) return
+    const controller = activeController
+    activeController = null
+    if (abort && controller && !controller.signal.aborted) controller.abort()
+    isStreaming.value = false
+    isLoading.value = false
+  }
 
   // 启动流式请求
   const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; agent_enabled?: boolean; agent_id?: string; agent_source_tenant_id?: string | number; web_search_enabled?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; skill_names?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; images?: Array<{data: string}>; attachment_uploads?: Array<{data: string; file_name: string; file_size: number}>; attachment_ids?: string[]; suggestion_attribution?: { suggestion_set_id: string; question_id: string }; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
     const myGeneration = ++streamGeneration
+    activeController?.abort()
+    const requestController = new AbortController()
+    activeController = requestController
     // 重置状态
     output.value = '';
     error.value = null;
@@ -51,7 +151,7 @@ export function useStream() {
     const token = embedToken || localStorage.getItem('weknora_token');
     if (!token) {
       error.value = i18n.global.t('error.tokenNotFound');
-      stopStream();
+      finishGeneration(myGeneration, true);
       return;
     }
 
@@ -73,9 +173,10 @@ export function useStream() {
     const sentAt = performance.now();
     const requestID = generateRandomString(12);
     let firstAnswerLogged = false;
+    let terminalReceived = false;
 
     try {
-      let url =
+      const url =
         params.method == "POST"
           ? `${apiUrl}${params.url}/${params.session_id}`
           : `${apiUrl}${params.url}/${params.session_id}?message_id=${params.query}`;
@@ -148,7 +249,7 @@ export function useStream() {
         sentAt: Date.now(),
       };
       
-      await fetchEventSource(url, {
+      await requestEventSource(url, {
         method: params.method,
         headers: {
           "Content-Type": "application/json",
@@ -163,18 +264,29 @@ export function useStream() {
           params.method == "POST"
             ? JSON.stringify(postBody)
             : null,
-        signal: controller.signal,
+        signal: requestController.signal,
         openWhenHidden: true,
 
         onopen: async (res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (myGeneration !== streamGeneration || requestController.signal.aborted) return;
+          if (!res.ok) throw new Error(await buildStreamHTTPErrorMessage(res));
           console.log(`[TTFB] response:headers request_id=${requestID} elapsed_ms=${(performance.now() - sentAt).toFixed(1)}`);
           isLoading.value = false;
         },
 
         onmessage: (ev) => {
-          if (myGeneration !== streamGeneration) return
-          const parsed = JSON.parse(ev.data);
+          if (myGeneration !== streamGeneration || requestController.signal.aborted) return
+          if (isTerminalStreamEvent(ev.data)) {
+            terminalReceived = true;
+            return;
+          }
+
+          let parsed: any;
+          try {
+            parsed = JSON.parse(ev.data);
+          } catch {
+            throw new Error(i18n.global.t('error.streamFailed'));
+          }
           // Log first answer chunk for end-to-end TTFB measurement.
           // Filter by event type so non-answer events (references, tool
           // calls, etc.) don't count as the "first token" arrival.
@@ -182,24 +294,41 @@ export function useStream() {
             firstAnswerLogged = true;
             console.log(`[TTFB] response:first_answer request_id=${requestID} elapsed_ms=${(performance.now() - sentAt).toFixed(1)}`);
           }
-          buffer.push(parsed); // 数据存入缓冲
           // 执行自定义处理
           if (chunkHandler) {
             chunkHandler(parsed);
           }
+          if (isTerminalStreamEvent(parsed)) {
+            terminalReceived = true;
+          }
         },
 
         onerror: (err) => {
-          throw new Error(`${i18n.global.t('error.streamFailed')}: ${err}`);
+          if (myGeneration !== streamGeneration || requestController.signal.aborted) return;
+          throw err instanceof Error ? err : new Error(String(err));
         },
 
         onclose: () => {
-          stopStream();
+          if (myGeneration !== streamGeneration || requestController.signal.aborted) return;
+          if (!terminalReceived) throw new Error(i18n.global.t('error.streamFailed'));
+          finishGeneration(myGeneration, false);
         },
       });
+
+      if (myGeneration === streamGeneration && !requestController.signal.aborted) {
+        if (!terminalReceived) throw new Error(i18n.global.t('error.streamFailed'));
+        finishGeneration(myGeneration, false);
+      }
     } catch (err) {
+      if (
+        myGeneration !== streamGeneration
+        || requestController.signal.aborted
+        || isAbortError(err)
+      ) {
+        return
+      }
       error.value = err instanceof Error ? err.message : String(err)
-      stopStream()
+      finishGeneration(myGeneration, true)
     }
   }
 
@@ -213,8 +342,9 @@ export function useStream() {
   // 停止流
   const stopStream = () => {
     streamGeneration++
-    controller.abort();
-    controller = new AbortController(); // 重置控制器（如需重新发起）
+    const controller = activeController
+    activeController = null
+    if (controller && !controller.signal.aborted) controller.abort()
     isStreaming.value = false;
     isLoading.value = false;
   }

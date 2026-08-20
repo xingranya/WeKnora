@@ -195,6 +195,10 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 		Done:         evt.Done,
 		Data:         evt.Data,
 	}
+	if evt.Type == types.ResponseTypeError {
+		response.Content = publicSessionFailureMessage
+		response.Data = publicSessionErrorData(evt.Data)
+	}
 
 	// Extract session_id and assistant_message_id for agent_query events
 	if evt.Type == types.ResponseTypeAgentQuery {
@@ -229,6 +233,12 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 	}
 
 	return response
+}
+
+// isTerminalStreamEvent 判断流是否已经进入不可恢复的终态。
+func isTerminalStreamEvent(evt interfaces.StreamEvent) bool {
+	return evt.Type == types.ResponseTypeComplete ||
+		((evt.Type == types.ResponseTypeError || evt.Type == types.ResponseType(event.EventStop)) && evt.Done)
 }
 
 // sendCompletionEvent sends a final completion event to the client
@@ -289,10 +299,11 @@ func (h *Handler) setupStreamHandler(
 	receivedAt time.Time,
 	assistantMessage *types.Message,
 	eventBus *event.EventBus,
+	deferComplete bool,
 ) *AgentStreamHandler {
 	streamHandler := NewAgentStreamHandler(
 		ctx, sessionID, assistantMessageID, requestID, tenantID, receivedAt,
-		assistantMessage, h.streamManager, eventBus, h.artifactCollector,
+		assistantMessage, h.streamManager, eventBus, h.artifactCollector, deferComplete,
 	)
 	streamHandler.Subscribe()
 	return streamHandler
@@ -305,6 +316,7 @@ func (h *Handler) setupStopEventHandler(
 	sessionTenantID uint64,
 	assistantMessage *types.Message,
 	cancel context.CancelFunc,
+	terminal *qaTerminalCoordinator,
 ) {
 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
@@ -316,7 +328,11 @@ func (h *Handler) setupStopEventHandler(
 			context.WithoutCancel(ctx),
 			types.TenantIDContextKey, sessionTenantID,
 		)
-		h.completeAssistantMessage(updateCtx, assistantMessage, "", "") // empty query: stopped conversations are not indexed
+		if terminal.claim("stopped") {
+			if err := h.completeAssistantMessage(updateCtx, assistantMessage, "", ""); err != nil {
+				logger.Warnf(updateCtx, "persist stopped assistant message %s: %v", assistantMessage.ID, err)
+			}
+		}
 		return nil
 	})
 }
@@ -388,7 +404,7 @@ func (h *Handler) startStopWatcher(
 					case evt.Type == types.ResponseTypeComplete:
 						// Generation finished normally; nothing left to stop.
 						return
-					case evt.Type == types.ResponseTypeError && evt.Done:
+					case isTerminalStreamEvent(evt):
 						// Stream-level (terminal) error; generation has ended.
 						return
 					}

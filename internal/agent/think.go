@@ -12,7 +12,16 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
+
+func agentAuditPreview(content string, maxRunes int) string {
+	runes := []rune(content)
+	if len(runes) > maxRunes {
+		content = string(runes[:maxRunes]) + "..."
+	}
+	return secutils.SanitizeAuditLog(content)
+}
 
 // streamLLMResult holds accumulated output from a streaming LLM call.
 type streamLLMResult struct {
@@ -148,9 +157,9 @@ func (e *AgentEngine) streamLLMToEventBus(
 		chunkCount, len(result.Content), len(result.ToolCalls),
 		streamDuration.Milliseconds(), responseTypeCounts)
 
-	// If the stream produced an error and no usable content/tool calls,
-	// surface it as a Go error so the caller can retry or degrade gracefully.
-	if result.StreamError != "" && result.Content == "" && len(result.ToolCalls) == 0 {
+	// 部分正文或工具参数不能把传输错误降格成成功；调用方可以保留部分输出，
+	// 但业务 outcome 必须失败，禁止执行不完整工具或持久化截断答案。
+	if result.StreamError != "" {
 		return result, fmt.Errorf("LLM stream error: %s", result.StreamError)
 	}
 
@@ -347,11 +356,10 @@ func (e *AgentEngine) streamThinkingToEventBus(
 
 	fullContent := agenttools.StripThinkBlocks(llmResult.Content)
 
-	// Use actual finish_reason from LLM stream instead of hardcoding "stop".
-	// Fallback to "stop" when the stream did not report a finish_reason
-	// (e.g., certain Ollama models or providers that omit the field).
 	finishReason := llmResult.FinishReason
 	if finishReason == "" {
+		// 非 OpenAI 适配器可能只以 Done 结束；OpenAI 兼容链路会在缺少
+		// finish_reason/[DONE] 时先产生 StreamError，因此不会走到这里。
 		finishReason = "stop"
 	}
 
@@ -393,22 +401,19 @@ func (e *AgentEngine) callLLMWithRetry(
 	}
 	for i := startIdx; i < len(messages); i++ {
 		msg := messages[i]
+		preview := agentAuditPreview(msg.Content, 1000)
 		if msg.Role == "tool" {
-			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=tool, name=%s, len=%d",
-				round, i, msg.Name, len(msg.Content))
+			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=tool, name=%s, len=%d, content=%q",
+				round, i, msg.Name, len(msg.Content), preview)
 		} else if len(msg.ToolCalls) > 0 {
 			tcNames := make([]string, len(msg.ToolCalls))
 			for j, tc := range msg.ToolCalls {
 				tcNames[j] = tc.Function.Name
 			}
-			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=%s, len=%d, tool_calls=%v",
-				round, i, msg.Role, len(msg.Content), tcNames)
+			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=%s, len=%d, tool_calls=%v, content=%q",
+				round, i, msg.Role, len(msg.Content), tcNames, preview)
 		} else {
-			preview := msg.Content
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
-			}
-			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=%s, len=%d, content=%s",
+			logger.Debugf(ctx, "[Agent][Round-%d] msg[%d]: role=%s, len=%d, content=%q",
 				round, i, msg.Role, len(msg.Content), preview)
 		}
 	}
@@ -489,13 +494,6 @@ func (e *AgentEngine) callLLMWithRetry(
 				round, response.FinishReason, len(response.Content))
 		}
 	}
-	if response.Content != "" {
-		preview := response.Content
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
-		}
-		logger.Debugf(ctx, "[Agent][Round-%d] LLM content preview:\n%s", round, preview)
-	}
-
+	logger.Debugf(ctx, "[Agent][Round-%d] LLM content preview=%q", round, agentAuditPreview(response.Content, 2000))
 	return response, nil
 }

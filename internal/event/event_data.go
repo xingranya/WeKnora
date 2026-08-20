@@ -132,6 +132,15 @@ type AgentQueryData struct {
 	Extra     map[string]interface{} `json:"extra,omitempty"`
 }
 
+// AgentOutcome 区分执行结果，避免把状态快照、SSE 完成和持久化成功混为一谈。
+type AgentOutcome string
+
+const (
+	AgentOutcomeSuccess AgentOutcome = "success"
+	AgentOutcomeFailed  AgentOutcome = "failed"
+	AgentOutcomeStopped AgentOutcome = "stopped"
+)
+
 // AgentCompleteData represents agent completion event data
 type AgentCompleteData struct {
 	SessionID       string                 `json:"session_id"`
@@ -141,6 +150,7 @@ type AgentCompleteData struct {
 	AgentSteps      interface{}            `json:"agent_steps,omitempty"`    // []types.AgentStep - detailed execution steps
 	TotalDurationMs int64                  `json:"total_duration_ms"`
 	MessageID       string                 `json:"message_id,omitempty"` // Assistant message ID
+	Outcome         AgentOutcome           `json:"outcome,omitempty"`
 	RequestID       string                 `json:"request_id,omitempty"`
 	Extra           map[string]interface{} `json:"extra,omitempty"`
 }

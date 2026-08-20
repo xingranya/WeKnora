@@ -86,6 +86,17 @@ func TestStreamLLMResourceAliasesRoundTrip(t *testing.T) {
 	require.Equal(t, "source=res://0001", model.calls[0][0].Content)
 }
 
+func TestStreamLLMPartialContentDoesNotHideTerminalError(t *testing.T) {
+	model := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{
+		{ResponseType: types.ResponseTypeAnswer, Content: "partial answer"},
+		{ResponseType: types.ResponseTypeError, Content: "stable failure", Done: true},
+	}}}}
+	engine := newTestEngine(t, model)
+	result, err := engine.streamLLMToEventBus(context.Background(), nil, nil, nil)
+	require.ErrorContains(t, err, "LLM stream error")
+	require.Equal(t, "partial answer", result.Content)
+}
+
 // TestStreamLLMSummarySlugSurvivesDocumentCompaction is the regression guard for
 // the mangled `summary/<uuid>` → `summary/d1` bug. A wiki summary-page slug
 // embeds a document's UUID. The unified model-context registry owns the

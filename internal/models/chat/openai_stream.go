@@ -120,6 +120,10 @@ func (c *RemoteAPIChat) processStream(
 		response, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
+				if state.lastFinishReason == "" {
+					streamChan <- publicModelStreamFailure(ctx, "openai_sdk_unexpected_eof", io.ErrUnexpectedEOF)
+					return
+				}
 				logUsage(ctx, c.modelName, state.usage)
 				toolCalls := state.buildOrderedToolCalls()
 				streamChan <- types.StreamResponse{
@@ -131,11 +135,7 @@ func (c *RemoteAPIChat) processStream(
 					FinishReason: state.lastFinishReason,
 				}
 			} else {
-				streamChan <- types.StreamResponse{
-					ResponseType: types.ResponseTypeError,
-					Content:      err.Error(),
-					Done:         true,
-				}
+				streamChan <- publicModelStreamFailure(ctx, "openai_sdk_recv", err)
 			}
 			return
 		}
@@ -172,6 +172,10 @@ func (c *RemoteAPIChat) processRawHTTPStream(
 		event, err := reader.ReadEvent()
 		if err != nil {
 			if err == io.EOF {
+				if state.lastFinishReason == "" {
+					streamChan <- publicModelStreamFailure(ctx, "openai_raw_sse_unexpected_eof", io.ErrUnexpectedEOF)
+					return
+				}
 				logUsage(ctx, c.modelName, state.usage)
 				toolCalls := state.buildOrderedToolCalls()
 				streamChan <- types.StreamResponse{
@@ -180,14 +184,10 @@ func (c *RemoteAPIChat) processRawHTTPStream(
 					Done:         true,
 					ToolCalls:    toolCalls,
 					Usage:        state.usage,
+					FinishReason: state.lastFinishReason,
 				}
 			} else {
-				logger.Errorf(ctx, "Stream read error: %v", err)
-				streamChan <- types.StreamResponse{
-					ResponseType: types.ResponseTypeError,
-					Content:      err.Error(),
-					Done:         true,
-				}
+				streamChan <- publicModelStreamFailure(ctx, "openai_raw_sse_read", err)
 			}
 			return
 		}

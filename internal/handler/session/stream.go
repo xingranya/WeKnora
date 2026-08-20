@@ -140,7 +140,7 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 	// Check if stream is already completed
 	streamCompleted := false
 	for _, evt := range events {
-		if evt.Type == "complete" {
+		if isTerminalStreamEvent(evt) {
 			streamCompleted = true
 			break
 		}
@@ -182,8 +182,8 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 			// Send new events
 			streamCompletedNow := false
 			for _, evt := range newEvents {
-				// Check for completion event
-				if evt.Type == "complete" {
+				// 正常完成或终态错误都会结束恢复轮询。
+				if isTerminalStreamEvent(evt) {
 					streamCompletedNow = true
 				}
 
@@ -364,6 +364,7 @@ func (h *Handler) handleAgentEventsForSSE(
 
 			// Send any new events
 			streamCompleted := false
+			streamFailed := false
 			titleReceived := false
 			for _, evt := range events {
 				// Check for stop event
@@ -400,9 +401,10 @@ func (h *Handler) handleAgentEventsForSSE(
 					return
 				}
 
-				// Check for completion event
-				if evt.Type == "complete" {
+				// 正常完成或终态错误都会结束实时 SSE。
+				if isTerminalStreamEvent(evt) {
 					streamCompleted = true
+					streamFailed = evt.Type == types.ResponseTypeError
 				}
 
 				// Check for title event
@@ -427,7 +429,7 @@ func (h *Handler) handleAgentEventsForSSE(
 
 			// Check if stream is completed - wait for title event only if needed and not already received
 			if streamCompleted {
-				if waitForTitle && !titleReceived {
+				if waitForTitle && !titleReceived && !streamFailed {
 					log.Infof("Stream completed for session=%s, message=%s, waiting for title event", sessionID, assistantMessageID)
 					// Wait up to 3 seconds for title event after completion
 					titleTimeout := time.After(3 * time.Second)

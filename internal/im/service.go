@@ -699,7 +699,9 @@ func applyIMCompleteDataToMessage(msg *types.Message, data event.AgentCompleteDa
 	if data.MessageID != "" && data.MessageID != msg.ID {
 		return
 	}
-	msg.IsCompleted = true
+	if data.Outcome == "" || data.Outcome == event.AgentOutcomeSuccess {
+		msg.IsCompleted = true
+	}
 	msg.AgentDurationMs = data.TotalDurationMs
 	if len(data.KnowledgeRefs) > 0 {
 		refs := make([]*types.SearchResult, 0, len(data.KnowledgeRefs))
@@ -2464,12 +2466,17 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			return nil
 		}
 		bufMu.Lock()
-		agentDone = true
+		succeeded := data.Outcome == "" || data.Outcome == event.AgentOutcomeSuccess
+		agentDone = succeeded
 		agentCompleteFinalAnswer = data.FinalAnswer
 		applyIMCompleteDataToMessage(assistantMsg, data)
-		mergeIMAgentAnswerBuffers(&answerBuilder, &answerOuter, &agentLiveAnswer, data.FinalAnswer)
+		if succeeded {
+			mergeIMAgentAnswerBuffers(&answerBuilder, &answerOuter, &agentLiveAnswer, data.FinalAnswer)
+		}
 		bufMu.Unlock()
-		closeComplete()
+		if succeeded {
+			closeComplete()
+		}
 		return nil
 	})
 
@@ -2843,11 +2850,14 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		}
 		answerMu.Lock()
 		applyIMCompleteDataToMessage(assistantMsg, data)
-		if answerBuilder.Len() == 0 && strings.TrimSpace(data.FinalAnswer) != "" {
+		succeeded := data.Outcome == "" || data.Outcome == event.AgentOutcomeSuccess
+		if succeeded && answerBuilder.Len() == 0 && strings.TrimSpace(data.FinalAnswer) != "" {
 			answerBuilder.WriteString(data.FinalAnswer)
 		}
 		answerMu.Unlock()
-		closeComplete()
+		if succeeded {
+			closeComplete()
+		}
 		return nil
 	})
 

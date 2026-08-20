@@ -430,9 +430,7 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	}
 
 	intentStr := strings.TrimSpace(firstStringField(obj, "intent"))
-	if intentStr != "" {
-		out.Intent = types.QueryIntent(intentStr)
-	}
+	out.Intent = normalizeQueryIntent(types.QueryIntent(intentStr))
 
 	desc := strings.TrimSpace(firstStringField(obj,
 		"image_description", "image_desc", "image_text", "image_ocr_text", "description"))
@@ -444,6 +442,24 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	}
 
 	return out, true
+}
+
+// normalizeQueryIntent 只接受后端已知的意图，避免模型输出新值或漏字段时跳过知识库检索。
+func normalizeQueryIntent(intent types.QueryIntent) types.QueryIntent {
+	switch intent {
+	case types.IntentKBSearch,
+		types.IntentWebSearch,
+		types.IntentGreeting,
+		types.IntentChitchat,
+		types.IntentFollowUp,
+		types.IntentImageOnly,
+		types.IntentDocOnly,
+		types.IntentSummarize,
+		types.IntentClarification:
+		return intent
+	default:
+		return types.IntentKBSearch
+	}
 }
 
 func firstStringField(obj map[string]json.RawMessage, keys ...string) string {

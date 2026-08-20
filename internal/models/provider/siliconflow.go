@@ -7,14 +7,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// IsSiliconFlowDeepSeekV4Model 判断是否为硅基流动官方支持思考开关的
-// DeepSeek V4 系列。模型 ID 以官方 API 文档列出的名称为准，同时兼容 Pro/ 前缀。
+// IsSiliconFlowDeepSeekV4Model 判断是否为硅基流动官方文档明确支持
+// enable_thinking/reasoning_effort 的 DeepSeek-V4-Flash。
 func IsSiliconFlowDeepSeekV4Model(modelName string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	normalized = strings.TrimPrefix(normalized, "pro/")
-	return normalized == "deepseek-ai/deepseek-v4" ||
-		normalized == "deepseek-ai/deepseek-v4-flash" ||
-		normalized == "deepseek-ai/deepseek-v4-pro"
+	return normalized == "deepseek-ai/deepseek-v4-flash"
 }
 
 const (

@@ -16,10 +16,7 @@ export function isLkeapDeepSeekR1Model(modelName: string): boolean {
 
 /** 与后端 provider.IsSiliconFlowDeepSeekV4Model 保持一致。 */
 export function isSiliconFlowDeepSeekV4Model(modelName: string): boolean {
-  const normalized = modelName.trim().toLowerCase().replace(/^pro\//, '')
-  return normalized === 'deepseek-ai/deepseek-v4'
-    || normalized === 'deepseek-ai/deepseek-v4-flash'
-    || normalized === 'deepseek-ai/deepseek-v4-pro'
+  return modelName.trim().toLowerCase() === 'deepseek-ai/deepseek-v4-flash'
 }
 
 /** 与后端 internal/models/provider.IsOpenAIReasoningOrGPT5Model 保持一致。 */

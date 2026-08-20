@@ -31,8 +31,9 @@ test('defaultThinkingControl matches backend provider adapters', () => {
     ['gemini', 'gemini-2.0', 'none'],
     ['siliconflow', 'qwen3-8b', 'none'],
     ['siliconflow', 'deepseek-ai/DeepSeek-V4-Flash', 'enable_thinking'],
-    ['siliconflow', 'deepseek-ai/DeepSeek-V4-Pro', 'enable_thinking'],
-    ['siliconflow', 'Pro/deepseek-ai/DeepSeek-V4', 'enable_thinking'],
+    ['siliconflow', 'deepseek-ai/DeepSeek-V4-Pro', 'none'],
+    ['siliconflow', 'deepseek-ai/DeepSeek-V4', 'none'],
+    ['siliconflow', 'Pro/deepseek-ai/DeepSeek-V4-Flash', 'none'],
     ['siliconflow', 'vendor/deepseek-v4-flash-copy', 'none'],
     ['hunyuan', 'hunyuan-turbo', 'none'],
     ['moonshot', 'moonshot-v1-8k', 'none'],
@@ -49,7 +50,7 @@ test('defaultThinkingControl matches backend provider adapters', () => {
 
 test('resolveThinkingControl preserves valid saved values and repairs missing values', () => {
   assert.equal(resolveThinkingControl('thinking_type', 'siliconflow', 'deepseek-ai/DeepSeek-V4-Flash'), 'thinking_type')
-  assert.equal(resolveThinkingControl(undefined, 'siliconflow', 'deepseek-ai/DeepSeek-V4-Pro'), 'enable_thinking')
+  assert.equal(resolveThinkingControl(undefined, 'siliconflow', 'deepseek-ai/DeepSeek-V4-Pro'), 'none')
   assert.equal(resolveThinkingControl('invalid', 'siliconflow', 'Qwen/Qwen3.5'), 'none')
 })
 

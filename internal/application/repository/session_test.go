@@ -113,6 +113,25 @@ func TestSessionRepositoryUpdateHonorsUserScope(t *testing.T) {
 	require.Equal(t, "alice updated session", changed.Title)
 }
 
+func TestSessionRepositoryUpdateLastRequestStateKeepsAgentSourceTenantID(t *testing.T) {
+	repo, db := newSessionRepositoryForTest(t)
+	ctx := context.Background()
+	session := createSessionForTest(t, db, 1, "alice")
+
+	rows, err := repo.UpdateLastRequestState(ctx, 1, "alice", session.ID, &types.SessionLastRequestState{
+		AgentID:             "agent-1",
+		AgentSourceTenantID: 42,
+		AgentEnabled:        true,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rows)
+
+	got, err := repo.Get(ctx, 1, "alice", session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastRequestState)
+	require.Equal(t, uint64(42), got.LastRequestState.AgentSourceTenantID)
+}
+
 func TestSessionRepositoryDeleteHonorsUserScope(t *testing.T) {
 	repo, db := newSessionRepositoryForTest(t)
 	ctx := context.Background()

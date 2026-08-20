@@ -1709,6 +1709,21 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
 
 }
 
+@media (max-width: 768px) {
+    .aside_box:not(.aside_box--collapsed) {
+        position: absolute;
+        z-index: 200;
+        inset: 0 auto 0 0;
+        width: min(280px, calc(100vw - 32px));
+        min-width: min(280px, calc(100vw - 32px));
+        box-shadow: 8px 0 24px rgba(0, 0, 0, 0.16);
+    }
+
+    .aside_box--collapsed .sidebar-toggle-item {
+        display: flex;
+    }
+}
+
 .batch-inline-footer {
     flex-shrink: 0;
     display: flex;

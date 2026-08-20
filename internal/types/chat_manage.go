@@ -96,15 +96,16 @@ const (
 )
 
 // NeedsKBRetrieval returns true when the intent requires knowledge base search.
-// The zero value (empty string) is treated as needing retrieval for safety.
+// The zero value and unknown future values are treated as needing retrieval for safety.
 // Note: IntentWebSearch is NOT included — use ChatManage.NeedsRetrieval()
 // which also considers the WebSearchEnabled flag.
 func (i QueryIntent) NeedsKBRetrieval() bool {
 	switch i {
-	case IntentKBSearch, IntentClarification, IntentSummarize, "":
-		return true
-	default:
+	case IntentWebSearch, IntentGreeting, IntentChitchat, IntentFollowUp, IntentImageOnly, IntentDocOnly:
 		return false
+	default:
+		// 未知值与空值必须安全回退到知识库检索，不能因模型输出漂移静默跳过召回。
+		return true
 	}
 }
 

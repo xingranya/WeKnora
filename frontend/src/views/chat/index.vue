@@ -24,8 +24,23 @@
                             :row-col="[{ width: '70%', height: '16px' }, { width: '90%', height: '16px' }]" />
                     </div>
                 </div>
+                <div v-else-if="historyLoadError && messagesList.length === 0" class="history-load-error" role="alert">
+                    <t-icon name="error-circle" size="24px" />
+                    <p>{{ historyLoadError }}</p>
+                    <t-button variant="outline" size="small" @click="retryHistoryLoad">
+                        <template #icon><t-icon name="refresh" /></template>
+                        {{ t('chat.retryHistoryLoad') }}
+                    </t-button>
+                </div>
+                <div v-if="historyLoadMoreError && messagesList.length > 0" class="history-load-more-error" role="alert">
+                    <span>{{ historyLoadMoreError }}</span>
+                    <t-button variant="text" size="small" @click="retryHistoryLoadMore">
+                        <template #icon><t-icon name="refresh" /></template>
+                        {{ t('chat.retryHistoryLoadMore') }}
+                    </t-button>
+                </div>
                 <!-- 推荐问题卡片 - 仅在新会话（无消息）时展示 -->
-                <div v-if="!embeddedMode && messagesList.length === 0 && !loading" class="suggested-questions-container"
+                <div v-if="!embeddedMode && messagesList.length === 0 && !loading && !historyLoading && !historyLoadError" class="suggested-questions-container"
                     :class="{ 'has-questions': suggestedQuestions.length > 0 || suggestedQuestionsLoading }">
                     <!-- 骨架屏占位 -->
                     <div v-if="suggestedQuestionsLoading && suggestedQuestions.length === 0"
@@ -136,6 +151,7 @@ import { deleteTemporaryAttachment, uploadTemporaryAttachment } from '@/api/chat
 import { useStream } from '../../api/chat/streame'
 import { useMenuStore } from '@/stores/menu';
 import { useSettingsStore } from '@/stores/settings';
+import { useChatResourcesStore } from '@/stores/chatResources';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/ui';
@@ -159,6 +175,11 @@ import {
 } from '@/api/message-suggestion';
 import { provideChatReferencesDrawer } from '@/composables/useChatReferencesDrawer';
 import { provideChatAttachmentPreviewDrawer } from '@/composables/useChatAttachmentPreviewDrawer';
+import {
+    applyRestoredSessionIdentity,
+    createSessionGenerationGuard,
+    settleRestoredSessionIdentity,
+} from './sessionHydration';
 
 const referencesDrawer = provideChatReferencesDrawer();
 provideChatAttachmentPreviewDrawer();
@@ -173,6 +194,7 @@ const props = defineProps({
 
 const usemenuStore = useMenuStore();
 const useSettingsStoreInstance = useSettingsStore();
+const chatResources = useChatResourcesStore();
 
 // Whether the active chat session is using the Agent pipeline (not quick-answer).
 const isAgentStreamSession = () => {
@@ -215,15 +237,25 @@ const attachStreamDebugToMessage = (message) => {
 const route = useRoute();
 const session_id = ref(props.session_id || route.params.chatid);
 const currentSession = ref(null);
+const sessionGenerationGuard = createSessionGenerationGuard();
+let activeSessionToken = sessionGenerationGuard.begin(String(session_id.value || ''));
+let pendingSessionHydration = null;
+let initialSessionHydrationPromise = Promise.resolve();
+
+const beginSessionGeneration = (sessionId) => {
+    activeSessionToken = sessionGenerationGuard.begin(String(sessionId || ''));
+    pendingSessionHydration = null;
+    return activeSessionToken;
+};
 
 // 拉 session 详情，并按其 last_request_state 把输入栏状态恢复到当时的发起态。
 // 嵌入式（embeddedMode）由宿主页面注入 agent/KB，所以跳过整套恢复逻辑，
 // 避免污染宿主的 settings store。
-const loadSessionAndHydrate = async (sid) => {
+const loadSessionAndHydrate = async (sid, token = activeSessionToken) => {
     if (!sid || props.embeddedMode) return;
     try {
         const sessionRes = await getSession(sid);
-        if (sessionRes?.data && sid === session_id.value) {
+        if (sessionRes?.data && sessionGenerationGuard.isCurrent(token)) {
             currentSession.value = sessionRes.data;
             const lastState = sessionRes.data.last_request_state;
             if (lastState) {
@@ -231,12 +263,44 @@ const loadSessionAndHydrate = async (sid) => {
                 // 离开会话时会从快照还原，避免本会话的状态污染新建对话。
                 useSettingsStoreInstance.snapshotAsDefaultsIfNeeded();
                 useSettingsStoreInstance.applyLastRequestState(lastState);
+                applyRestoredSessionIdentity(useSettingsStoreInstance.settings, lastState);
+                pendingSessionHydration = { token, state: lastState, promise: null };
             }
         }
     } catch (error) {
-        console.error('Failed to load session data:', error);
+        if (sessionGenerationGuard.isCurrent(token)) {
+            console.error('Failed to load session data:', error);
+        }
     }
 };
+
+async function settlePendingSessionHydration() {
+    const pending = pendingSessionHydration;
+    if (!pending || !sessionGenerationGuard.isCurrent(pending.token)) return;
+
+    if (!pending.promise) {
+        pending.promise = settleRestoredSessionIdentity({
+            token: pending.token,
+            isCurrent: sessionGenerationGuard.isCurrent,
+            state: pending.state,
+            settings: useSettingsStoreInstance.settings,
+            ensureAgentResources: async () => {
+                try {
+                    await chatResources.ensureAgents();
+                } catch (error) {
+                    console.error('Failed to settle session agent resources:', error);
+                }
+            },
+            // 子组件加载 agent 后，先让其 watcher 完成本轮 flush，再重放会话模型。
+            flushWatchers: async () => {
+                await nextTick();
+                await nextTick();
+            },
+        });
+    }
+    await pending.promise;
+    if (pendingSessionHydration === pending) pendingSessionHydration = null;
+}
 const inputFieldRef = ref();
 const created_at = ref('');
 const limit = ref(20);
@@ -259,6 +323,8 @@ const loading = ref(false);
 const historyLoading = ref(true);
 const historyLoadingMore = ref(false);
 const hasMoreHistory = ref(true);
+const historyLoadError = ref('');
+const historyLoadMoreError = ref('');
 let fullContent = ref('')
 const scrollContainer = ref(null)
 const userHasScrolledUp = ref(false)
@@ -434,14 +500,16 @@ const getUserQuery = (index) => {
     return '';
 };
 
-watch([() => route.params], async (newvalue) => {
+watch(() => route.params.chatid, async (chatid) => {
     isFirstEnter.value = true;
-    if (newvalue[0].chatid) {
+    if (chatid) {
+        const nextSessionId = String(chatid);
+        const nextSessionToken = beginSessionGeneration(nextSessionId);
         if (!firstQuery.value) {
             scrollLock.value = false;
         }
         messagesList.splice(0);
-        session_id.value = newvalue[0].chatid;
+        session_id.value = nextSessionId;
         currentSession.value = null;
         clearCitationChunkCache();
 
@@ -449,6 +517,8 @@ watch([() => route.params], async (newvalue) => {
         historyLoading.value = true;
         historyLoadingMore.value = false;
         hasMoreHistory.value = true;
+        historyLoadError.value = '';
+        historyLoadMoreError.value = '';
         created_at.value = '';
         loading.value = false;
         isReplying.value = false;
@@ -459,9 +529,11 @@ watch([() => route.params], async (newvalue) => {
         // 并应用自己的 last_request_state（在 loadSessionAndHydrate 内部完成）。
         useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
 
-        await loadSessionAndHydrate(session_id.value);
+        await loadSessionAndHydrate(nextSessionId, nextSessionToken);
+        await settlePendingSessionHydration();
+        if (!sessionGenerationGuard.isCurrent(nextSessionToken)) return;
         let data = {
-            session_id: session_id.value,
+            session_id: nextSessionId,
             created_at: '',
             limit: limit.value
         }
@@ -494,7 +566,7 @@ const debounce = (fn, delay) => {
     }
 }
 const onChatScrollTop = () => {
-    if (scrollLock.value || historyLoadingMore.value || !hasMoreHistory.value) return;
+    if (scrollLock.value || historyLoadingMore.value || historyLoadMoreError.value || !hasMoreHistory.value) return;
     if (!scrollContainer.value) return;
     const { scrollTop, scrollHeight } = scrollContainer.value;
     isFirstEnter.value = false
@@ -607,11 +679,20 @@ const showGlobalTypingIndicator = computed(() =>
 );
 
 const getmsgList = (data, isScrollType = false, scrollHeight) => {
+    const requestToken = activeSessionToken;
+    const requestSessionId = String(data.session_id || '');
+    const isCurrentRequest = () =>
+        requestSessionId === String(session_id.value || '')
+        && sessionGenerationGuard.isCurrent(requestToken);
+
     if (isScrollType) {
         if (historyLoadingMore.value || !hasMoreHistory.value) return;
         historyLoadingMore.value = true;
+        historyLoadMoreError.value = '';
     }
     fetchMessageList(data).then(async (res) => {
+        if (!isCurrentRequest()) return;
+        if (!isScrollType) historyLoadError.value = '';
         const batch = res?.data;
         if (!batch?.length) {
             if (isScrollType) {
@@ -633,18 +714,41 @@ const getmsgList = (data, isScrollType = false, scrollHeight) => {
         created_at.value = nextCursor;
         await handleMsgList(batch, isScrollType, scrollHeight);
     }).catch((err) => {
+        if (!isCurrentRequest()) return;
         console.error('Failed to load messages:', err);
         if (isScrollType) {
-            hasMoreHistory.value = false;
+            historyLoadMoreError.value = err?.message || t('chat.historyLoadMoreFailed');
+        } else {
+            historyLoadError.value = err?.message || t('chat.historyLoadFailed');
         }
     }).finally(() => {
+        if (!isCurrentRequest()) return;
         historyLoading.value = false;
         historyLoadingMore.value = false;
-        if (!isScrollType && messagesList.length === 0) {
+        if (!isScrollType && messagesList.length === 0 && !historyLoadError.value) {
             fetchSuggestedQuestionsIfNeeded();
         }
     })
 }
+
+const retryHistoryLoad = () => {
+    const sid = String(session_id.value || '');
+    if (!sid || historyLoading.value) return;
+    historyLoadError.value = '';
+    historyLoadMoreError.value = '';
+    historyLoading.value = true;
+    hasMoreHistory.value = true;
+    created_at.value = '';
+    getmsgList({ session_id: sid, created_at: '', limit: limit.value });
+};
+
+const retryHistoryLoadMore = () => {
+    const sid = String(session_id.value || '');
+    if (!sid || historyLoadingMore.value || !hasMoreHistory.value) return;
+    historyLoadMoreError.value = '';
+    getmsgList({ session_id: sid, created_at: created_at.value, limit: limit.value }, true,
+        scrollContainer.value?.scrollHeight || 0);
+};
 
 // 发送消息
 // 处理停止生成事件 - 立即清除 loading 状态
@@ -941,11 +1045,12 @@ const handleSessionMutation = (event) => {
         created_at.value = '';
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;
+        historyLoadMoreError.value = '';
         fetchSuggestedQuestionsIfNeeded();
     }
 };
 
-onBeforeMount(async () => {
+onBeforeMount(() => {
     // 若从智能体列表点击共享智能体进入，URL 带 agent_id 与 source_tenant_id，同步到 store
     const agentIdFromQuery = props.agentId || (route.query.agent_id && String(route.query.agent_id));
     const sourceTenantIdFromQuery = route.query.source_tenant_id && String(route.query.source_tenant_id);
@@ -959,8 +1064,9 @@ onBeforeMount(async () => {
         useSettingsStoreInstance.selectKnowledgeBases(props.kbIds);
     }
 
-    // 必须在 Input-field onMounted 之前完成：按 session.last_request_state 恢复输入栏
-    await loadSessionAndHydrate(session_id.value);
+    // 先发起请求；父组件 mounted 时等待同一个 Promise，再在所有子组件 mounted 后
+    // settle agent watcher，避免异步 beforeMount 无法阻塞挂载造成模型回放丢失。
+    initialSessionHydrationPromise = loadSessionAndHydrate(session_id.value);
 });
 
 onMounted(async () => {
@@ -970,6 +1076,8 @@ onMounted(async () => {
     // 初始化状态：加载历史消息时不应显示loading
     loading.value = false;
     isReplying.value = false;
+    await initialSessionHydrationPromise;
+    await settlePendingSessionHydration();
 
     if (firstQuery.value) {
         scrollLock.value = true;
@@ -996,6 +1104,9 @@ onMounted(async () => {
     }
 })
 const clearData = () => {
+    sessionGenerationGuard.invalidate();
+    pendingSessionHydration = null;
+    historyLoadMoreError.value = '';
     stopStream();
     referencesDrawer.close();
     isReplying.value = false;
@@ -1005,6 +1116,8 @@ const clearData = () => {
     isImRecovering.value = false;
 }
 onUnmounted(() => {
+    sessionGenerationGuard.invalidate();
+    pendingSessionHydration = null;
     window.removeEventListener(SESSION_MUTATION_EVENT, handleSessionMutation);
     if (recoverPollTimer) { clearTimeout(recoverPollTimer); recoverPollTimer = null; }
 });
@@ -1015,9 +1128,11 @@ onBeforeRouteLeave((to, from, next) => {
     next()
 })
 onBeforeRouteUpdate((to, from, next) => {
-    clearData()
-    // 仅"会话 → 会话"会落到这里；跨会话覆盖的还原放到 route.params 的 watch 里，
-    // 因为新会话的 getSession 也在那边触发，便于保证 restore→snapshot→apply 顺序。
+    if (String(to.params.chatid || '') !== String(from.params.chatid || '')) {
+        clearData()
+    }
+    // 跨会话覆盖的还原放到 route.params 的 watch 里，因为新会话的 getSession
+    // 也在那边触发，便于保证 restore→snapshot→apply 顺序。
     next()
 })
 </script>
@@ -1049,6 +1164,15 @@ onBeforeRouteUpdate((to, from, next) => {
         min-width: 100%;
         padding: 0;
         overflow-x: hidden;
+    }
+
+    @media (max-width: 768px) {
+        &:not(.is-embedded) {
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            padding-left: 8px;
+        }
     }
 
     &:not(.is-embedded) {
@@ -1190,6 +1314,37 @@ onBeforeRouteUpdate((to, from, next) => {
     max-width: 960px;
     padding: 16px 0;
     animation: contentFadeIn 0.3s ease-out;
+}
+
+.history-load-error {
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--td-text-color-secondary);
+    text-align: center;
+
+    p {
+        max-width: 520px;
+        margin: 0;
+        line-height: 1.5;
+    }
+}
+
+.history-load-more-error {
+    width: min(100%, 960px);
+    min-height: 36px;
+    margin: 4px auto 12px;
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-sizing: border-box;
+    color: var(--td-text-color-secondary);
+    font-size: 13px;
 }
 
 .msg-skeleton-user {
