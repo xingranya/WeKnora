@@ -1,5 +1,5 @@
 <template>
-  <div v-if="authStore.isLoggedIn && (tasks.length || queue.visible)" class="upload-queue-host">
+  <div v-if="authStore.isLoggedIn && isKnowledgeBaseUploadRoute(route.name) && (tasks.length || queue.visible)" class="upload-queue-host">
     <t-tooltip :content="t('knowledgeBase.uploadQueue.title')" placement="left">
       <button type="button" class="upload-queue-trigger"
         :aria-label="t('knowledgeBase.uploadQueue.title')" aria-controls="upload-queue-panel"
@@ -90,15 +90,22 @@
 
 <script setup lang="ts">
 import { computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useUploadQueueStore, type UploadQueueStatus } from '@/stores/uploadQueue'
-import { uploadTaskCanCancel, uploadTaskCanRemove, uploadTaskCanRetry } from './uploadQueuePresentation'
+import {
+  isKnowledgeBaseUploadRoute,
+  uploadTaskCanCancel,
+  uploadTaskCanRemove,
+  uploadTaskCanRetry,
+} from './uploadQueuePresentation'
 
 const { t } = useI18n()
 const authStore = useAuthStore()
+const route = useRoute()
 const queue = useUploadQueueStore()
 const { tasks, activeCount, unfinishedCount } = storeToRefs(queue)
 const orderedTasks = computed(() => [...tasks.value].sort((a, b) => b.createdAt - a.createdAt))
