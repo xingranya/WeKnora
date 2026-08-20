@@ -1,6 +1,6 @@
 # WeKnora 当前版本 Docker 部署与验收手册
 
-最后现场核验：2026-08-20 08:35（Asia/Shanghai）
+最后现场核验：2026-08-20 11:26（Asia/Shanghai）
 
 本文记录见外传媒当前 WeKnora 分支在远端生产机上的 Docker 部署方式、配置边界、验收门槛和回滚方法。所有命令均不得包含 SSH 密码、API Key、数据库密码或模型凭据。
 
@@ -14,6 +14,7 @@
 | Git 远端 | `https://github.com/xingranya/WeKnora.git` |
 | 生产分支 | `codex/jiwai-branding` |
 | 生产功能提交 | `80e66d563d5e165b24677fb0d7b2364d687614e4` |
+| 最新前端修复提交 | `acb62eb66b0057432a7d5142ca3ee9310521dca2` |
 | MCP 测试门禁提交 | `2c7616c38b3e20a63bbb289048e53fd79ce0bbbc` |
 | Compose 项目名 | `weknora` |
 | 前端地址 | `http://100.78.64.62:8081` |
@@ -27,18 +28,18 @@
 
 | 服务 | Compose 期望标签 | 当前实际容器标签 | 状态 |
 | --- | --- | --- | --- |
-| app | `wechatopenai/weknora-app:deploy-80e66d56` | `deploy-80e66d56`，镜像 ID `sha256:d3e0f56e0331a4760c7d44b2e555f7dd2b19b57d7ec3f63c32d9959cb782af0f` | healthy，重启 0 |
-| frontend | `wechatopenai/weknora-ui:deploy-80e66d56` | `deploy-c403766b`，镜像 ID `sha256:7b8ad48a0304abd40d26d0a36d08ff11480c5d1703ce31057ab28225ea95408b` | running，重启 0 |
-| docreader | `wechatopenai/weknora-docreader:deploy-80e66d56` | `deploy-ddf88efa`，镜像 ID `sha256:b9c4636b65b5d4947d5e09cd311ba6cf37f1f2da37c51d4be2b911d432f12abe` | healthy，重启 0 |
+| app | `wechatopenai/weknora-app:deploy-acb62eb6` | `deploy-80e66d56`，镜像 ID `sha256:d3e0f56e0331a4760c7d44b2e555f7dd2b19b57d7ec3f63c32d9959cb782af0f` | healthy，重启 0；仅建立新版本别名，未重启 |
+| frontend | `wechatopenai/weknora-ui:deploy-acb62eb6` | `deploy-acb62eb6`，镜像 ID `sha256:a9563ac54c6a36af4414e83676dcd8eaf0dea02b668ef8aeeb86eb9184f96f07` | running，重启 0 |
+| docreader | `wechatopenai/weknora-docreader:deploy-acb62eb6` | `deploy-ddf88efa`，镜像 ID `sha256:b9c4636b65b5d4947d5e09cd311ba6cf37f1f2da37c51d4be2b911d432f12abe` | healthy，重启 0；仅建立新版本别名，未重启 |
 
-`a9a09aab` 包含知识库目录一致性、问题生成并发与索引补偿等后端修复；`c403766b` 是其后的前端验收修复，解决上传确认层关闭顺序、并发确认请求隔离、过期标签响应、纯文本消息空图片占位和 Wiki 图片预览键盘焦点；`80e66d56` 进一步让知识库与聊天临时附件共享 `parser:mineru` 分布式并发租约。当前只重建并切换了 app，frontend/docreader 复用已验收镜像并增加 `deploy-80e66d56` 别名。
+`a9a09aab` 包含知识库目录一致性、问题生成并发与索引补偿等后端修复；`c403766b` 是其后的前端验收修复，解决上传确认层关闭顺序、并发确认请求隔离、过期标签响应、纯文本消息空图片占位和 Wiki 图片预览键盘焦点；`80e66d56` 进一步让知识库与聊天临时附件共享 `parser:mineru` 分布式并发租约；`acb62eb6` 将上传队列入口限制到知识库文档详情页。当前仅重建并切换 frontend，app/docreader 继续复用健康镜像并增加 `deploy-acb62eb6` 别名。
 
 ### 1.2 当前关键环境开关
 
 远端 `.env` 已现场确认以下非敏感项：
 
 ```dotenv
-WEKNORA_VERSION=deploy-80e66d56
+WEKNORA_VERSION=deploy-acb62eb6
 AUTO_MIGRATE=false
 STORAGE_TYPE=minio
 SSRF_WHITELIST_EXTRA=searxng,qdrant,milvus,weaviate,doris-fe,doris-be,host.docker.internal,minio,192.168.0.20
@@ -701,7 +702,7 @@ t
 代码与构建验收：
 
 - 远端构建容器内 `go test ./... -count=1` 全仓 Go 测试通过。
-- frontend `npm test` 最终为 432/432 通过，`npm run type-check` 通过，国际化审计 11/11 通过。
+- frontend `npm test` 最终为 433/433 通过，`npm run type-check` 通过，国际化审计 11/11 通过。
 - 本地和远端生产构建均完成 6387 个模块转换；远端 nginx frontend 镜像构建成功。
 - DocReader 按 CI 锁定 Python 3.10.18 完成源码编译检查，143 项 Python 测试通过；其中 12 项因仓库未提供对应大型 PDF、PPTX、XLSX 夹具按测试条件跳过。远端 Go 1.26 容器中的 gRPC client/proto 测试通过。
 - MCP Server 在 Python 3.10、3.11、3.12、3.13 下分别完成 23 项 unittest 和 6 项 pytest，四个版本均为 29/29 通过；sdist、wheel 构建成功，wheel 已确认包含 `upload_paths.py`。提交 `2c7616c3` 已把原先未被 `unittest discover` 收集的 `tests/` pytest 用例加入 CI 发布门槛。
@@ -709,6 +710,7 @@ t
 - CLI 在远端 Linux/Go 1.26 容器中完成 `go build ./...`、`go test -race -coverprofile`、`go vet ./...`、Skill wire 词汇检查和文档凭据检查，全部通过；语句覆盖率为 69.4%。
 - 多轮独立子代理审查依次发现并修复问题生成补偿、父子锁、目录迟到响应、上传确认并发、图片预览焦点、过期标签响应和聊天附件 MinerU gate；最终复审结论为 P0 无、P1 无。
 - MCP CI 补测修改另经独立子代理审查，结论为 P0/P1/P2/P3 均无；每个 Python 版本的两套测试无重复收集，build/publish 依赖关系不变。
+- `acb62eb6` 上传队列入口修复经独立子代理审查，结论为 P0/P1 均无；队列 store、分片上传和解析轮询仍跨路由运行，只有入口按路由隐藏。
 
 ego 生产浏览器验收使用专用知识库 `发布验收-b0ac7fde-20260819`：
 
@@ -728,6 +730,14 @@ ego 生产浏览器验收使用专用知识库 `发布验收-b0ac7fde-20260819`�
 - Skill ZIP、`jiwai-knowledge-assistant-1.3.1.crx`、`jiwai-knowledge-assistant-1.3.1.zip` 公网下载均为 HTTP 200。
 - 最近 20 分钟 app 日志无 panic、FATAL、ERROR；公网首页为 HTTP 200。
 
+### 10.7 2026-08-20 11:26 上传队列入口修复验收
+
+- 远端 Git、origin 和本地提交均为 `acb62eb6`；frontend 切换为 `sha256:a9563ac54c6a36af4414e83676dcd8eaf0dea02b668ef8aeeb86eb9184f96f07`，app/docreader 镜像 ID 保持不变。
+- 进入知识库详情页 `ego验收-云端向量-20260820030141` 时，`button[aria-label="上传队列"]` 数量为 1；进入全局新对话页时数量为 0；返回知识库详情页恢复为 1。说明入口不再污染聊天页，同时队列状态仍由全局 store 保持。
+- 新建知识库时明确选择公司预置 `qwen3向量化模型`（`Qwen/Qwen3-VL-Embedding-8B`），没有使用 `BGE-M3 本地向量模型`。上传 `docreader/README.md` 后 `parse_status=completed`、文档已启用，远程向量模型初始化和 4096 维向量检索均成功。
+- 本次问答尝试未计为通过：SiliconFlow 的 `deepseek-ai/DeepSeek-V4-Flash` 查询理解请求记录 `context deadline exceeded`，约 60 秒后 SSE 断开，浏览器停留在“正在理解问题…”。该失败发生在远程模型提供方，不是上传队列路由修复引入；测试会话随后已删除。
+- frontend-only 回滚资产为 `/home/fox/WeKnora/backups/releases/20260820-111816-upload-queue-visibility`，`frontend-image.tar.zst` SHA256 为 `929f6499b6bee88770a47b47e339b826597ed8bb72ead2d8de6f27009f721fb9`。
+
 ## 11. 回滚
 
 ### 11.1 使用发布前快照回滚代码与镜像
@@ -735,10 +745,10 @@ ego 生产浏览器验收使用专用知识库 `发布验收-b0ac7fde-20260819`�
 本次 frontend 发布的直接回滚快照为：
 
 ```text
-/home/fox/WeKnora/backups/releases/20260820-063053-pre-ui-final
+/home/fox/WeKnora/backups/releases/20260820-111816-upload-queue-visibility
 ```
 
-该快照保存切换前的 app/frontend/docreader 三个核心镜像。只回滚 `c403766b` 前端时，加载 `images/core-images.tar.zst`，只把旧 frontend 重标记到回滚版本；app 和 docreader 使用当前运行镜像 ID 建立同版本标签，避免全局 `WEKNORA_VERSION` 让后续 Compose 收敛意外撤销后端修复。数据库和卷保持不动。全量灾难恢复仍使用 `/home/fox/WeKnora/backups/releases/20260819-154754`。
+该快照保存切换前的 frontend 镜像、容器配置和 `.env`，`frontend-image.tar.zst` 已完成 SHA256 校验。只回滚 `acb62eb6` 前端时，加载该归档并把旧 frontend 重标记到回滚版本；app 和 docreader 使用当前运行镜像 ID 建立同版本标签，避免全局 `WEKNORA_VERSION` 让后续 Compose 收敛意外撤销后端修复。数据库和卷保持不动。上一个完整 frontend 快照仍保留在 `/home/fox/WeKnora/backups/releases/20260820-063053-pre-ui-final`，全量灾难恢复仍使用 `/home/fox/WeKnora/backups/releases/20260819-154754`。
 
 回滚前先停止将要重建的服务，保留当前失败目录、`.env` 备份和 Docker 数据卷；不得直接覆盖生产目录，也不得删除未解释的运行数据。先只读确认快照：
 
@@ -906,6 +916,7 @@ COMMIT;
 
 - 前端依赖安装曾报告 2 个 moderate、6 个 high npm audit 告警；本次未做无关依赖升级。
 - Vite 仍提示若干产物超过 500 kB；本次不在功能修复中改动拆包策略，后续应以首屏性能数据决定动态加载边界。
+- 2026-08-20 新建云端向量验收库的问答受到 SiliconFlow `deepseek-ai/DeepSeek-V4-Flash` 查询理解请求超时影响；日志记录 `context deadline exceeded`，约 60 秒后 SSE 断开，前端未收到终态。向量模型初始化、文档解析和向量检索已通过；在模型服务恢复后必须补做一次该库的问答验收，不能以本次结果替代。
 - DocReader 的完整 Python 测试中有 12 项依赖仓库未提供的大型文档夹具而跳过；当前内置夹具、生产 DOCX、图片 OCR 和聊天附件均已通过，但新增这些夹具后仍应在 CI 补跑对应 PDF、PPTX、XLSX 回归。
 - RustSec 当前仅报告 `ttf-parser 0.25.1` 的 `RUSTSEC-2026-0192` 停止维护警告，没有安全漏洞；该警告按现有 CI 策略允许通过，后续随 anydoc 上游依赖升级处理。
 - MCP wheel 构建仍报告 setuptools 许可证元数据弃用和 `install_requires` 被 `pyproject.toml` 覆盖的警告；当前产物和内容校验通过，但应在 2027-02-18 前统一为 SPDX `license`/`license-files` 并消除 setup.py 重复依赖声明。
@@ -918,7 +929,7 @@ COMMIT;
 
 ## 13. 最终交付检查表
 
-- [x] 生产功能代码截至 `80e66d56` 已审核、提交并推送。
+- [x] 后端生产功能代码截至 `80e66d56`、前端入口修复截至 `acb62eb6` 已审核、提交并推送。
 - [x] 生产功能提交在本地、origin 和远端三方一致。
 - [x] 远端 Git 工作树干净且 HEAD 正确。
 - [x] `.env`、模型状态和旧镜像已备份。
@@ -927,6 +938,7 @@ COMMIT;
 - [x] docreader 保持 healthy 且本次未重启。
 - [x] app 保持 healthy；生产 `.env` 已备份并收敛为 `AUTO_MIGRATE=false`。
 - [x] frontend 在 app healthy 状态下切换并返回 HTTP 200。
+- [x] 上传队列入口仅在知识库文档详情页显示，聊天页实机验证为 0 个入口。
 - [x] 平台解析配置存在，知识文件夹和上传会话表存在。
 - [x] 可续传上传配置为 2 GiB、4 MiB、24 小时；前端默认单活动上传且没有人为带宽限速。
 - [x] 公司预置模型数量正确且普通用户脱敏。
@@ -935,6 +947,7 @@ COMMIT;
 - [x] 持久化空文件夹创建、目录树展示和空文件夹删除通过。
 - [x] 可续传上传初始化、分片校验、进度查询、取消和清理通过。
 - [x] 2026-08-20 本轮新增验收文档、文件夹、上传会话和聊天会话已清理。
+- [ ] 新建 `qwen3向量化模型` 云端向量库的问答需在 SiliconFlow 恢复后补验；本轮仅完成解析、嵌入初始化和向量检索验证。
 - [x] DocReader Python/Go、MCP 四版本、anydoc Rust/Go 和 CLI race 门槛已补跑并记录。
 - [x] MCP `tests/` 下 pytest 用例已纳入 CI，独立子代理复审无 P0/P1。
 - [x] 日志无 panic、FATAL、ERROR。
