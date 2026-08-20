@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,11 +20,19 @@ type quickAnswerTerminalMessageStub struct {
 	streamErrorSent  bool
 	streamSentAtSave bool
 	updatedMessage   *types.Message
+	updateErrors     []error
 }
 
 func (s *quickAnswerTerminalMessageStub) UpdateMessage(_ context.Context, message *types.Message) error {
 	s.updateCalls++
 	s.streamSentAtSave = s.streamErrorSent
+	if len(s.updateErrors) > 0 {
+		err := s.updateErrors[0]
+		s.updateErrors = s.updateErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
 	copy := *message
 	s.updatedMessage = &copy
 	return nil
@@ -111,7 +120,7 @@ func TestStoppedPartialAnswerPersistsWithoutIndexing(t *testing.T) {
 		Role:      "assistant",
 		Content:   "partial answer",
 	}
-	h.setupStopEventHandler(eventBus, "session-1", 42, message, cancel, &qaTerminalCoordinator{})
+	h.setupStopEventHandler(eventBus, "session-1", 42, message, cancel, &qaTerminalCoordinator{}, false)
 
 	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
 		Type:      event.EventStop,
@@ -124,6 +133,41 @@ func TestStoppedPartialAnswerPersistsWithoutIndexing(t *testing.T) {
 	require.True(t, message.IsCompleted)
 	require.Equal(t, "partial answer", message.Content)
 	require.Zero(t, messageService.indexCalls)
+}
+
+func TestQuickAnswerPersistenceFailureTransitionsToStableFailure(t *testing.T) {
+	messageService := &quickAnswerTerminalMessageStub{
+		updateErrors: []error{errors.New("database unavailable"), nil},
+	}
+	h := &Handler{messageService: messageService}
+	eventBus := event.NewEventBus()
+	eventBus.On(event.EventError, func(context.Context, event.Event) error {
+		messageService.streamErrorSent = true
+		return nil
+	})
+	message := &types.Message{ID: "assistant-1", SessionID: "session-1", Role: "assistant"}
+	streamCtx := &sseStreamContext{
+		eventBus: eventBus, asyncCtx: context.Background(),
+		assistantMessage: message, terminal: &qaTerminalCoordinator{},
+	}
+	reqCtx := &qaRequestContext{
+		sessionID: "session-1", query: "question", userMessageID: "user-1",
+		session: &types.Session{TenantID: 42},
+	}
+	h.registerQuickAnswerTerminalHandlers(streamCtx, reqCtx)
+
+	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
+		Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: "answer", Done: true},
+	}))
+
+	require.Equal(t, 2, messageService.updateCalls)
+	require.Zero(t, messageService.indexCalls)
+	require.True(t, messageService.streamErrorSent)
+	require.NotNil(t, messageService.updatedMessage)
+	require.True(t, messageService.updatedMessage.IsCompleted)
+	require.Equal(t, publicSessionFailureMessage, messageService.updatedMessage.Content)
+	require.Equal(t, qaTerminalFailed, streamCtx.terminal.outcome)
 }
 
 func TestQuickAnswerPanicEmitsStableTerminalAndPersistsFailure(t *testing.T) {
@@ -236,6 +280,72 @@ func TestAgentFailureSnapshotDoesNotEmitCompleteOrSuccessSideEffects(t *testing.
 	for _, streamEvent := range events {
 		require.NotEqual(t, types.ResponseTypeComplete, streamEvent.Type)
 	}
+}
+
+func TestAgentPersistenceFailureDoesNotEmitComplete(t *testing.T) {
+	_, messageService, streamCtx, _, eventBus, manager := newAgentTerminalTestContext(t)
+	messageService.updateErrors = []error{errors.New("database unavailable"), nil}
+	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
+		ID:   "agent-complete",
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID: streamCtx.assistantMessage.ID,
+			FinalAnswer: "answer",
+			Outcome: event.AgentOutcomeSuccess,
+		},
+	}))
+
+	require.Equal(t, 2, messageService.updateCalls)
+	require.Zero(t, messageService.indexCalls)
+	require.Equal(t, publicSessionFailureMessage, messageService.updatedMessage.Content)
+	require.Equal(t, qaTerminalFailed, streamCtx.terminal.outcome)
+	events, _, err := manager.GetEvents(context.Background(), "session-agent", "assistant-agent", 0)
+	require.NoError(t, err)
+	for _, streamEvent := range events {
+		require.NotEqual(t, types.ResponseTypeComplete, streamEvent.Type)
+	}
+}
+
+func TestAgentStopWaitsForSnapshotBeforePersisting(t *testing.T) {
+	h, messageService, streamCtx, _, eventBus, _ := newAgentTerminalTestContext(t)
+	asyncCtx, cancel := context.WithCancel(context.Background())
+	h.setupStopEventHandler(
+		eventBus, streamCtx.assistantMessage.SessionID, 42,
+		streamCtx.assistantMessage, cancel, streamCtx.terminal, true,
+	)
+
+	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
+		Type: event.EventStop,
+		Data: event.StopData{
+			SessionID: streamCtx.assistantMessage.SessionID,
+			MessageID: streamCtx.assistantMessage.ID,
+			Reason: "user_requested",
+		},
+	}))
+	require.ErrorIs(t, asyncCtx.Err(), context.Canceled)
+	require.Zero(t, messageService.updateCalls)
+	require.Equal(t, qaTerminalStopping, streamCtx.terminal.outcome)
+
+	steps := []types.AgentStep{{Iteration: 1, Thought: "partial reasoning"}}
+	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID: streamCtx.assistantMessage.ID,
+			FinalAnswer: "partial answer",
+			AgentSteps: steps,
+			Outcome: event.AgentOutcomeStopped,
+			TotalDurationMs: 321,
+		},
+	}))
+
+	require.Equal(t, 1, messageService.updateCalls)
+	require.True(t, messageService.updatedMessage.IsCompleted)
+	require.Equal(t, "partial answer", messageService.updatedMessage.Content)
+	require.Equal(t, int64(321), messageService.updatedMessage.AgentDurationMs)
+	require.Len(t, messageService.updatedMessage.AgentSteps, 1)
+	require.Equal(t, 1, messageService.updatedMessage.AgentSteps[0].Iteration)
+	require.Zero(t, messageService.indexCalls)
+	require.Equal(t, qaTerminalStopped, streamCtx.terminal.outcome)
 }
 
 func TestIsTerminalStreamEvent(t *testing.T) {

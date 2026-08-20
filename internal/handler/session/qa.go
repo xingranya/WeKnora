@@ -620,6 +620,15 @@ type qaTerminalCoordinator struct {
 	outcome string
 }
 
+const (
+	qaTerminalCommittingSuccess = "committing_success"
+	qaTerminalSuccess           = "success"
+	qaTerminalFailed            = "failed"
+	qaTerminalStopping          = "stopping"
+	qaTerminalCommittingStopped = "committing_stopped"
+	qaTerminalStopped           = "stopped"
+)
+
 func (t *qaTerminalCoordinator) claim(outcome string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -627,6 +636,74 @@ func (t *qaTerminalCoordinator) claim(outcome string) bool {
 		return false
 	}
 	t.outcome = outcome
+	return true
+}
+
+func (t *qaTerminalCoordinator) beginSuccess() bool {
+	return t.claim(qaTerminalCommittingSuccess)
+}
+
+func (t *qaTerminalCoordinator) commitSuccess() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != qaTerminalCommittingSuccess {
+		return false
+	}
+	t.outcome = qaTerminalSuccess
+	return true
+}
+
+func (t *qaTerminalCoordinator) claimFailure() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != "" && t.outcome != qaTerminalCommittingSuccess {
+		return false
+	}
+	t.outcome = qaTerminalFailed
+	return true
+}
+
+func (t *qaTerminalCoordinator) requestStop(deferSnapshot bool) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != "" {
+		return false
+	}
+	if deferSnapshot {
+		t.outcome = qaTerminalStopping
+	} else {
+		t.outcome = qaTerminalCommittingStopped
+	}
+	return true
+}
+
+func (t *qaTerminalCoordinator) beginStoppedSnapshot() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != "" && t.outcome != qaTerminalStopping {
+		return false
+	}
+	t.outcome = qaTerminalCommittingStopped
+	return true
+}
+
+func (t *qaTerminalCoordinator) commitStopped() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != qaTerminalCommittingStopped {
+		return false
+	}
+	t.outcome = qaTerminalStopped
+	return true
+}
+
+func (t *qaTerminalCoordinator) failStoppedCommit() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != qaTerminalCommittingStopped {
+		return false
+	}
+	t.outcome = qaTerminalFailed
 	return true
 }
 
@@ -676,7 +753,10 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, m
 	}
 
 	// Setup stop event handler
-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel, terminal)
+	h.setupStopEventHandler(
+		eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage,
+		cancel, terminal, mode == qaModeAgent,
+	)
 
 	// Watch for stop events independently of the client SSE connection so a
 	// user-requested stop reliably cancels generation even when the client
@@ -1440,7 +1520,7 @@ func (h *Handler) registerQuickAnswerTerminalHandlers(streamCtx *sseStreamContex
 			streamCtx.terminal.mu.Unlock()
 			return nil
 		}
-		streamCtx.terminal.outcome = "success"
+		streamCtx.terminal.outcome = qaTerminalCommittingSuccess
 		streamCtx.terminal.mu.Unlock()
 
 		logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", reqCtx.sessionID)
@@ -1449,13 +1529,19 @@ func (h *Handler) registerQuickAnswerTerminalHandlers(streamCtx *sseStreamContex
 			types.TenantIDContextKey,
 			reqCtx.session.TenantID,
 		)
-		if err := h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID); err != nil {
+		if err := h.persistCompletedAssistantMessage(updateCtx, streamCtx.assistantMessage); err != nil {
 			_ = streamCtx.eventBus.Emit(updateCtx, event.Event{
 				Type: event.EventError, SessionID: reqCtx.sessionID,
 				Data: event.ErrorData{Error: err.Error(), Stage: "assistant_persistence", SessionID: reqCtx.sessionID},
 			})
 			return nil
 		}
+		if !streamCtx.terminal.commitSuccess() {
+			return nil
+		}
+		h.runAssistantSuccessSideEffects(
+			updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID,
+		)
 		streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
 			Type:      event.EventAgentComplete,
 			SessionID: reqCtx.sessionID,
@@ -1469,16 +1555,11 @@ func (h *Handler) registerQuickAnswerTerminalHandlers(streamCtx *sseStreamContex
 
 	streamCtx.eventBus.On(event.EventError, func(ctx context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.ErrorData)
-		if !ok {
+		if !ok || !streamCtx.terminal.claimFailure() {
 			return nil
 		}
 
 		streamCtx.terminal.mu.Lock()
-		if streamCtx.terminal.outcome != "" {
-			streamCtx.terminal.mu.Unlock()
-			return nil
-		}
-		streamCtx.terminal.outcome = "failed"
 		streamCtx.assistantMessage.Content = publicSessionFailureMessage
 		streamCtx.terminal.mu.Unlock()
 
@@ -1497,28 +1578,55 @@ func (h *Handler) registerQuickAnswerTerminalHandlers(streamCtx *sseStreamContex
 func (h *Handler) registerAgentTerminalHandlers(streamCtx *sseStreamContext, reqCtx *qaRequestContext) {
 	streamCtx.eventBus.On(event.EventAgentComplete, func(ctx context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.AgentCompleteData)
-		if !ok || data.Outcome != event.AgentOutcomeSuccess || !streamCtx.terminal.claim("success") {
+		if !ok {
 			return nil
 		}
 		updateCtx := context.WithValue(
 			context.WithoutCancel(ctx), types.TenantIDContextKey, reqCtx.session.TenantID,
 		)
-		if err := h.completeAssistantMessage(
-			updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID,
-		); err != nil {
+
+		switch data.Outcome {
+		case event.AgentOutcomeStopped:
+			if !streamCtx.terminal.beginStoppedSnapshot() {
+				return nil
+			}
+			if err := h.persistCompletedAssistantMessage(updateCtx, streamCtx.assistantMessage); err != nil {
+				if streamCtx.terminal.failStoppedCommit() {
+					h.failAssistantMessage(updateCtx, streamCtx.assistantMessage, err.Error())
+				}
+				return nil
+			}
+			streamCtx.terminal.commitStopped()
+			return nil
+		case event.AgentOutcomeSuccess, "":
+			if !streamCtx.terminal.beginSuccess() {
+				return nil
+			}
+		default:
+			// 失败快照先由 AgentStreamHandler 应用；随后 EventError 负责稳定失败落库。
+			return nil
+		}
+
+		if err := h.persistCompletedAssistantMessage(updateCtx, streamCtx.assistantMessage); err != nil {
 			_ = streamCtx.eventBus.Emit(updateCtx, event.Event{
 				Type: event.EventError, SessionID: reqCtx.sessionID,
 				Data: event.ErrorData{Error: err.Error(), Stage: "assistant_persistence", SessionID: reqCtx.sessionID},
 			})
 			return nil
 		}
+		if !streamCtx.terminal.commitSuccess() {
+			return nil
+		}
+		h.runAssistantSuccessSideEffects(
+			updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx.userMessageID,
+		)
 		logger.Infof(updateCtx, "Agent QA service completed for session: %s", reqCtx.sessionID)
 		return streamCtx.streamHandler.AppendCompleteEvent(evt, data)
 	})
 
 	streamCtx.eventBus.On(event.EventError, func(ctx context.Context, evt event.Event) error {
 		data, ok := evt.Data.(event.ErrorData)
-		if !ok || !streamCtx.terminal.claim("failed") {
+		if !ok || !streamCtx.terminal.claimFailure() {
 			return nil
 		}
 		updateCtx := context.WithValue(
@@ -1554,6 +1662,16 @@ func (h *Handler) failAssistantMessage(ctx context.Context, assistantMessage *ty
 func (h *Handler) completeAssistantMessage(
 	ctx context.Context, assistantMessage *types.Message, userQuery, userMessageID string,
 ) error {
+	if err := h.persistCompletedAssistantMessage(ctx, assistantMessage); err != nil {
+		return err
+	}
+	h.runAssistantSuccessSideEffects(ctx, assistantMessage, userQuery, userMessageID)
+	return nil
+}
+
+func (h *Handler) persistCompletedAssistantMessage(
+	ctx context.Context, assistantMessage *types.Message,
+) error {
 	assistantMessage.UpdatedAt = time.Now()
 	assistantMessage.IsCompleted = true
 	if err := h.messageService.UpdateMessage(ctx, assistantMessage); err != nil {
@@ -1561,6 +1679,12 @@ func (h *Handler) completeAssistantMessage(
 		return fmt.Errorf("persist completed assistant message: %w", err)
 	}
 
+	return nil
+}
+
+func (h *Handler) runAssistantSuccessSideEffects(
+	ctx context.Context, assistantMessage *types.Message, userQuery, userMessageID string,
+) {
 	// Asynchronously index the Q&A pair into the chat history knowledge base for vector search.
 	// Use WithoutCancel so the goroutine survives after the HTTP request context is done.
 	bgCtx := context.WithoutCancel(ctx)
@@ -1579,7 +1703,6 @@ func (h *Handler) completeAssistantMessage(
 	if userQuery != "" {
 		go h.recordTurnMemory(bgCtx, assistantMessage, userQuery, userMessageID)
 	}
-	return nil
 }
 
 // recordTurnMemory runs the long-term memory write path for a finished turn.

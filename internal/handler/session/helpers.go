@@ -317,6 +317,7 @@ func (h *Handler) setupStopEventHandler(
 	assistantMessage *types.Message,
 	cancel context.CancelFunc,
 	terminal *qaTerminalCoordinator,
+	deferAgentSnapshot bool,
 ) {
 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
@@ -328,9 +329,13 @@ func (h *Handler) setupStopEventHandler(
 			context.WithoutCancel(ctx),
 			types.TenantIDContextKey, sessionTenantID,
 		)
-		if terminal.claim("stopped") {
-			if err := h.completeAssistantMessage(updateCtx, assistantMessage, "", ""); err != nil {
+		if terminal.requestStop(deferAgentSnapshot) && !deferAgentSnapshot {
+			if err := h.persistCompletedAssistantMessage(updateCtx, assistantMessage); err != nil {
+				terminal.failStoppedCommit()
 				logger.Warnf(updateCtx, "persist stopped assistant message %s: %v", assistantMessage.ID, err)
+				h.failAssistantMessage(updateCtx, assistantMessage, err.Error())
+			} else {
+				terminal.commitStopped()
 			}
 		}
 		return nil
