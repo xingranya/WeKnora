@@ -53,9 +53,11 @@ jobs:
         run: uv sync --python ${{ matrix.python-version }} --extra test
 
       - name: Run tests
-        # unittest avoids pytest importing __init__.py as a broken package root.
-        # Manual diagnostics live in check_imports.py (not matched by test_*.py).
-        run: uv run --python ${{ matrix.python-version }} python -m unittest discover -s . -p "test_*.py" -v
+        # 顶层测试沿用 unittest，避免 pytest 把仓库根 __init__.py 当成损坏的包导入。
+        # tests/ 下是 pytest 风格用例，必须单独执行，防止被 unittest 静默漏掉。
+        run: |
+          uv run --python ${{ matrix.python-version }} python -m unittest discover -s . -p "test_*.py" -v
+          uv run --python ${{ matrix.python-version }} pytest tests -v
 
   build:
     name: Build sdist + wheel
