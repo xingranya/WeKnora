@@ -1,6 +1,9 @@
 package common
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseLLMJsonResponse(t *testing.T) {
 	type payload struct {
@@ -36,6 +39,36 @@ func TestParseLLMJsonResponse(t *testing.T) {
 				t.Errorf("Key = %q, want %q", got.Key, tt.want)
 			}
 		})
+	}
+}
+
+func TestPipelineLogPreservesAuditContentButRedactsCredentials(t *testing.T) {
+	logLine := PipelineLog("Stream", "messages_ready", map[string]interface{}{
+		"request_id":     "req-123",
+		"message_count":  2,
+		"system_prompt":  "private system prompt",
+		"user_message":   "private user question",
+		"result_preview": []string{"private document"},
+		"error":          "provider echoed private content with sk-abcdefghijk",
+		"api_key":        "credential-must-not-leak",
+	})
+
+	for _, businessText := range []string{
+		"private system prompt", "private user question", "private document", "provider echoed private content",
+	} {
+		if !strings.Contains(logLine, businessText) {
+			t.Fatalf("PipelineLog missing audit content %q: %s", businessText, logLine)
+		}
+	}
+	for _, secret := range []string{"sk-abcdefghijk", "credential-must-not-leak"} {
+		if strings.Contains(logLine, secret) {
+			t.Fatalf("PipelineLog leaked credential %q: %s", secret, logLine)
+		}
+	}
+	for _, expected := range []string{"request_id=\"req-123\"", "message_count=2", "[redacted"} {
+		if !strings.Contains(logLine, expected) {
+			t.Fatalf("PipelineLog missing %q: %s", expected, logLine)
+		}
 	}
 }
 

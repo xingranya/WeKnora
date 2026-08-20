@@ -127,7 +127,7 @@ func (p *DuckDuckGoProvider) searchHTML(
 		}
 	})
 
-	logger.Infof(ctx, "DuckDuckGo HTML search returned %d results for query: %s", len(results), query)
+	logger.Infof(ctx, "DuckDuckGo HTML search returned %d results (query=%q)", len(results), logger.AuditText(query, 4096))
 	return results, nil
 }
 
@@ -158,7 +158,9 @@ func (p *DuckDuckGoProvider) searchAPI(
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("duckduckgo API returned status %d: %s", resp.StatusCode, string(body))
+		logger.Warnf(ctx, "DuckDuckGo API returned status %d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("duckduckgo API returned status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	var apiResponse struct {
@@ -214,7 +216,7 @@ func (p *DuckDuckGoProvider) searchAPI(
 		}
 	}
 
-	logger.Infof(ctx, "DuckDuckGo API search returned %d results for query: %s", len(results), query)
+	logger.Infof(ctx, "DuckDuckGo API search returned %d results (query=%q)", len(results), logger.AuditText(query, 4096))
 	return results, nil
 }
 

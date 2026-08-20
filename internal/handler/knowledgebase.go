@@ -308,8 +308,9 @@ func (h *KnowledgeBaseHandler) HybridSearch(c *gin.Context) {
 		return
 	}
 
-	logger.Infof(ctx, "Executing hybrid search, knowledge base ID: %s, query: %s, effectiveTenantID: %d",
-		secutils.SanitizeForLog(id), secutils.SanitizeForLog(req.QueryText), effectiveTenantID)
+	logger.Infof(ctx, "Executing hybrid search, actor_user_id=%s knowledge_base_id=%s query=%q effective_tenant_id=%d",
+		secutils.SanitizeForLog(c.GetString(types.UserIDContextKey.String())),
+		secutils.SanitizeForLog(id), secutils.SanitizeAuditLog(req.QueryText), effectiveTenantID)
 
 	// Execute hybrid search with default search parameters
 	// Note: For shared KBs, the service uses effectiveTenantID internally via context

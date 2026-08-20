@@ -117,7 +117,8 @@ func (r *NvidiaReranker) Rerank(ctx context.Context, query string, documents []s
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		logger.GetLogger(ctx).Errorf("JinaReranker API error: Http Status: %s, Body: %s", resp.Status, string(body))
+		logger.GetLogger(ctx).Errorf("NvidiaReranker API error: Http Status: %s, response=%q",
+			resp.Status, logger.AuditText(string(body), 4096))
 		return nil, fmt.Errorf("Rerank API error: Http Status: %s", resp.Status)
 	}
 

@@ -3,7 +3,6 @@ package asr
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -85,14 +84,8 @@ func (s *OpenAIASR) Transcribe(ctx context.Context, audioBytes []byte, fileName 
 		return nil, fmt.Errorf("ASR transcription request failed: %w", err)
 	}
 
-	jsonData, err := json.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("marshal transcription response: %w", err)
-	}
-	logger.Debugf(ctx, "[ASR] Transcription response: %s", string(jsonData))
-
 	text := strings.TrimSpace(resp.Text)
-	logger.Infof(ctx, "[ASR] Transcription completed, text length=%d", len(text))
+	logger.Infof(ctx, "[ASR] Transcription completed, text=%q", logger.AuditText(text, 8192))
 
 	var segments []Segment
 	for _, s := range resp.Segments {

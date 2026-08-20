@@ -161,12 +161,9 @@ func (e *GeminiEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyStr := string(body)
-		if len(bodyStr) > 1000 {
-			bodyStr = bodyStr[:1000] + "... (truncated)"
-		}
-		logger.GetLogger(ctx).Errorf("GeminiEmbedder BatchEmbed API error: Http Status %s, Response Body: %s", resp.Status, bodyStr)
-		return nil, fmt.Errorf("Gemini BatchEmbed API error: Http Status %s, Response: %s", resp.Status, bodyStr)
+		logger.GetLogger(ctx).Errorf("GeminiEmbedder BatchEmbed API error: Http Status %s, response=%q",
+			resp.Status, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("Gemini BatchEmbed API error: Http Status %s, response_bytes=%d", resp.Status, len(body))
 	}
 
 	var response geminiBatchEmbedResponse

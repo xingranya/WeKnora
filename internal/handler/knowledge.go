@@ -364,7 +364,9 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 	}
 
 	logger.Infof(ctx, "File upload successful, filename: %s, size: %.2f KB", displayFileName, float64(file.Size)/1024)
-	logger.Infof(ctx, "Creating knowledge, knowledge base ID: %s, filename: %s", kbID, displayFileName)
+	logger.Infof(ctx, "Creating knowledge, actor_user_id=%s tenant_id=%d knowledge_base_id=%s filename=%q",
+		secutils.SanitizeForLog(c.GetString(types.UserIDContextKey.String())),
+		c.GetUint64(types.TenantIDContextKey.String()), kbID, secutils.SanitizeAuditLog(displayFileName))
 
 	// Parse metadata if provided
 	var metadata map[string]string
@@ -775,11 +777,10 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 		return
 	}
 
-	logger.Infof(ctx, "Received URL request: %s, file_name: %s, file_type: %s",
-		secutils.SanitizeForLog(req.URL),
-		secutils.SanitizeForLog(req.FileName),
-		secutils.SanitizeForLog(req.FileType),
-	)
+	logger.Infof(ctx, "Received URL request: actor_user_id=%s tenant_id=%d url=%q file_name=%q title=%q file_type=%s",
+		secutils.SanitizeForLog(c.GetString(types.UserIDContextKey.String())),
+		c.GetUint64(types.TenantIDContextKey.String()), secutils.SanitizeAuditLog(req.URL), secutils.SanitizeAuditLog(req.FileName),
+		secutils.SanitizeAuditLog(req.Title), secutils.SanitizeForLog(req.FileType))
 
 	// SSRF validation for user-supplied URL
 	if err := secutils.ValidateURLForSSRF(req.URL); err != nil {
@@ -788,11 +789,7 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 		return
 	}
 
-	logger.Infof(ctx,
-		"Creating knowledge from URL, knowledge base ID: %s, URL: %s",
-		secutils.SanitizeForLog(kbID),
-		secutils.SanitizeForLog(req.URL),
-	)
+	logger.Infof(ctx, "Creating knowledge from URL, knowledge base ID: %s", secutils.SanitizeForLog(kbID))
 
 	// Create knowledge entry from the URL
 	knowledge, err := h.kgService.CreateKnowledgeFromURL(
@@ -812,12 +809,8 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 		return
 	}
 
-	logger.Infof(
-		ctx,
-		"Knowledge created successfully from URL, ID: %s, title: %s",
-		secutils.SanitizeForLog(knowledge.ID),
-		secutils.SanitizeForLog(knowledge.Title),
-	)
+	logger.Infof(ctx, "Knowledge created successfully from URL, ID: %s, title=%q",
+		secutils.SanitizeForLog(knowledge.ID), secutils.SanitizeAuditLog(knowledge.Title))
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data":    knowledge,
@@ -922,8 +915,8 @@ func (h *KnowledgeHandler) GetKnowledge(c *gin.Context) {
 		return
 	}
 
-	logger.Infof(ctx, "Knowledge retrieved successfully, ID: %s, title: %s",
-		secutils.SanitizeForLog(knowledge.ID), secutils.SanitizeForLog(knowledge.Title))
+	logger.Infof(ctx, "Knowledge retrieved successfully, ID: %s, title=%q",
+		secutils.SanitizeForLog(knowledge.ID), logger.AuditText(knowledge.Title, 4096))
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    knowledge,

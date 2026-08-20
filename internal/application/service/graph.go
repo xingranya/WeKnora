@@ -132,7 +132,8 @@ func (b *graphBuilder) extractEntities(ctx context.Context, chunk *types.Chunk) 
 	// Parse JSON response
 	var extractedEntities []*types.Entity
 	if err := common.ParseLLMJsonResponse(resp.Content, &extractedEntities); err != nil {
-		log.WithError(err).Errorf("Failed to parse entity extraction response, rsp content: %s", resp.Content)
+		log.WithError(err).Errorf("Failed to parse entity extraction response response=%q",
+			logger.AuditText(resp.Content, 8192))
 		return nil, fmt.Errorf("failed to parse entity extraction response: %w", err)
 	}
 	log.Infof("Extracted %d entities from chunk", len(extractedEntities))

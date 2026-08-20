@@ -156,7 +156,7 @@ type tenantAPIKeyResponse struct {
 	ID               uint64                `json:"id"`
 	ScopeType        types.APIKeyScopeType `json:"scope_type"`
 	Name             string                `json:"name"`
-	APIKey           string                `json:"api_key"`
+	APIKey           string                `json:"api_key"` // 仅返回掩码；完整值只存在于创建响应的 token 字段。
 	FullAccess       bool                  `json:"full_access"`
 	KnowledgeBaseIDs types.StringArray     `json:"knowledge_base_ids"`
 	Capabilities     types.StringArray     `json:"capabilities"`
@@ -789,7 +789,7 @@ func tenantAPIKeyForResponse(key *types.TenantAPIKey) tenantAPIKeyResponse {
 		ID:               key.ID,
 		ScopeType:        types.NormalizeAPIKeyScopeType(key.ScopeType),
 		Name:             key.Name,
-		APIKey:           key.APIKey,
+		APIKey:           maskManagedAPIKey(key.APIKey),
 		FullAccess:       key.FullAccess,
 		KnowledgeBaseIDs: key.KnowledgeBaseIDs,
 		Capabilities:     types.NormalizeAPIKeyCapabilities(key.Capabilities),

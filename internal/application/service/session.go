@@ -886,7 +886,8 @@ func (s *sessionService) GenerateTitleAsync(
 					"session_id": session.ID,
 				})
 			} else {
-				logger.Infof(bgCtx, "Title update event emitted successfully, session ID: %s, title: %s", session.ID, title)
+				logger.Infof(bgCtx, "Title update event emitted successfully, session ID: %s, title=%q",
+					session.ID, logger.AuditText(title, 4096))
 			}
 		}
 	}()

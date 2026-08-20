@@ -21,7 +21,7 @@ type TenantAPIKey struct {
 	ScopeType        APIKeyScopeType `json:"scope_type" gorm:"type:varchar(16);not null;default:tenant;index"`
 	Name             string          `json:"name" gorm:"type:varchar(128);not null"`
 	KeyHash          string          `json:"-" gorm:"type:varchar(64);not null;uniqueIndex"`
-	APIKey           string          `json:"api_key" gorm:"column:api_key;type:text;not null;default:''"`
+	APIKey           string          `json:"-" gorm:"column:api_key;type:text;not null;default:''"`
 	FullAccess       bool            `json:"full_access" gorm:"not null;default:false"`
 	KnowledgeBaseIDs StringArray     `json:"knowledge_base_ids" gorm:"type:jsonb;not null;default:'[]'"`
 	// Capabilities are bounded grants for non-full-access keys. Each
@@ -243,12 +243,9 @@ func NormalizeAPIKeyCapabilities(in StringArray) StringArray {
 }
 
 func (k *TenantAPIKey) BeforeSave(tx *gorm.DB) error {
-	if key := utils.GetAESKey(); key != nil && k.APIKey != "" {
-		encrypted, err := utils.EncryptAESGCM(k.APIKey, key)
+	if k.APIKey != "" {
+		encrypted, err := encryptSecretForStorage(k.APIKey, "tenant_api_keys.api_key")
 		if err != nil {
-			// Never fall through to storing the plaintext key: abort the
-			// write so the caller sees the failure instead of silently
-			// persisting an unencrypted secret.
 			return fmt.Errorf("encrypt tenant_api_keys.api_key (id=%d): %w", k.ID, err)
 		}
 		tx.Statement.SetColumn("api_key", encrypted)

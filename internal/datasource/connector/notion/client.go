@@ -111,7 +111,9 @@ func (c *notionClient) doRequest(ctx context.Context, method, path string, body 
 			return respBody, nil
 
 		case resp.StatusCode == 401 || resp.StatusCode == 403:
-			return nil, fmt.Errorf("%w: %s", datasource.ErrInvalidCredentials, string(respBody))
+			logger.Warnf(ctx, "[Notion] invalid credentials: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			return nil, fmt.Errorf("%w (response_bytes=%d)", datasource.ErrInvalidCredentials, len(respBody))
 
 		case resp.StatusCode == 404:
 			return nil, fmt.Errorf("%w: %s", datasource.ErrResourceNotFound, path)
@@ -122,8 +124,9 @@ func (c *notionClient) doRequest(ctx context.Context, method, path string, body 
 			if secs, err := strconv.ParseFloat(retryAfter, 64); err == nil && secs > 0 {
 				wait = time.Duration(secs * float64(time.Second))
 			}
-			logger.Warnf(ctx, "[Notion] rate limited, retry after %v (attempt %d/%d)", wait, attempt+1, maxRetries)
-			lastErr = fmt.Errorf("rate limited: %s", string(respBody))
+			logger.Warnf(ctx, "[Notion] rate limited, retry after %v (attempt %d/%d) response=%q",
+				wait, attempt+1, maxRetries, logger.AuditText(string(respBody), 4096))
+			lastErr = fmt.Errorf("rate limited (response_bytes=%d)", len(respBody))
 			if attempt < maxRetries {
 				if sErr := sleepWithContext(ctx, wait); sErr != nil {
 					return nil, sErr
@@ -132,7 +135,9 @@ func (c *notionClient) doRequest(ctx context.Context, method, path string, body 
 			}
 
 		case resp.StatusCode >= 500:
-			lastErr = fmt.Errorf("server error %d: %s", resp.StatusCode, string(respBody))
+			logger.Warnf(ctx, "[Notion] server error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			lastErr = fmt.Errorf("server error %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 			if attempt < maxRetries {
 				if sErr := sleepWithContext(ctx, time.Duration(1<<attempt)*time.Second); sErr != nil {
 					return nil, sErr
@@ -141,7 +146,9 @@ func (c *notionClient) doRequest(ctx context.Context, method, path string, body 
 			}
 
 		default:
-			return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+			logger.Warnf(ctx, "[Notion] API error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			return nil, fmt.Errorf("unexpected status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
@@ -90,10 +91,12 @@ func (c *Client) CreatePost(ctx context.Context, channelID, rootID, message stri
 		return "", fmt.Errorf("read mattermost create post response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		logger.Errorf(ctx, "Mattermost create post failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
 		if resp.StatusCode == http.StatusForbidden {
-			return "", fmt.Errorf("mattermost create post: 403 forbidden — add the bot user to this Mattermost channel (Channel menu → Members → Add); body=%s", truncateForErr(respBody))
+			return "", fmt.Errorf("mattermost create post: 403 forbidden; add the bot user to this Mattermost channel (response_bytes=%d)", len(respBody))
 		}
-		return "", fmt.Errorf("mattermost create post: status=%d body=%s", resp.StatusCode, truncateForErr(respBody))
+		return "", fmt.Errorf("mattermost create post: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 	}
 
 	var created struct {
@@ -129,7 +132,9 @@ func (c *Client) GetPost(ctx context.Context, postID string) (rootID string, err
 		return "", fmt.Errorf("read mattermost get post response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mattermost get post: status=%d body=%s", resp.StatusCode, truncateForErr(respBody))
+		logger.Errorf(ctx, "Mattermost get post failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return "", fmt.Errorf("mattermost get post: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 	}
 
 	var post struct {
@@ -167,7 +172,9 @@ func (c *Client) PatchPostMessage(ctx context.Context, postID, message string) e
 		return fmt.Errorf("read mattermost patch post response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("mattermost patch post: status=%d body=%s", resp.StatusCode, truncateForErr(respBody))
+		logger.Errorf(ctx, "Mattermost patch post failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("mattermost patch post: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 	}
 	return nil
 }
@@ -200,7 +207,9 @@ func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*FileInfo, err
 		return nil, fmt.Errorf("read mattermost file info response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("mattermost file info: status=%d body=%s", resp.StatusCode, truncateForErr(respBody))
+		logger.Errorf(ctx, "Mattermost file info failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return nil, fmt.Errorf("mattermost file info: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 	}
 
 	var info FileInfo
@@ -230,16 +239,9 @@ func (c *Client) GetFileReader(ctx context.Context, fileID string) (io.ReadClose
 		if readErr != nil {
 			return nil, fmt.Errorf("read mattermost get file error response (status=%d): %w", resp.StatusCode, readErr)
 		}
-		return nil, fmt.Errorf("mattermost get file: status=%d body=%s", resp.StatusCode, truncateForErr(body))
+		logger.Errorf(ctx, "Mattermost get file failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("mattermost get file: status=%d response_bytes=%d", resp.StatusCode, len(body))
 	}
 	return resp.Body, nil
-}
-
-func truncateForErr(b []byte) string {
-	const max = 512
-	s := string(b)
-	if len(s) > max {
-		return s[:max] + "..."
-	}
-	return s
 }

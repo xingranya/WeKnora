@@ -1,12 +1,14 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/sashabaranov/go-openai"
 	"github.com/stretchr/testify/assert"
@@ -25,6 +27,66 @@ func newTestRemoteChat(t *testing.T) *RemoteAPIChat {
 	})
 	require.NoError(t, err)
 	return chat
+}
+
+func TestRemoteAPIChatRequestLogPreservesAuditContentAndRedactsCredentials(t *testing.T) {
+	chat := newTestRemoteChat(t)
+	request := map[string]any{
+		"model": "test-model",
+		"messages": []map[string]any{
+			{"role": "system", "content": "private-system-content"},
+			{"role": "user", "content": "private-user-content"},
+		},
+		"tools": []map[string]any{{
+			"type": "function",
+			"function": map[string]any{
+				"name": "private_tool_name", "description": "private-tool-description",
+			},
+		}},
+		"api_key": "sk-abcdefghijk",
+	}
+
+	var logs bytes.Buffer
+	logger.SetOutput(&logs)
+	t.Cleanup(func() { logger.SetOutput(os.Stdout) })
+	chat.logRequest(context.Background(), request, true)
+
+	output := logs.String()
+	require.Contains(t, output, "model=test-model")
+	require.Contains(t, output, "stream=true")
+	require.Contains(t, output, "messages_count=2")
+	require.Contains(t, output, "tools_count=1")
+	require.Contains(t, output, "request_bytes=")
+	require.Contains(t, output, "private-system-content")
+	require.Contains(t, output, "private-user-content")
+	require.Contains(t, output, "private_tool_name")
+	require.Contains(t, output, "private-tool-description")
+	require.NotContains(t, output, "sk-abcdefghijk")
+}
+
+func TestRemoteAPIChatStreamDumpPreservesAuditContentAndRedactsCredentials(t *testing.T) {
+	chat := newTestRemoteChat(t)
+	t.Setenv("WEKNORA_LLM_STREAM_RAW_DUMP_DIR", t.TempDir())
+	request := map[string]any{
+		"messages": []map[string]any{{"role": "user", "content": "dump-private-content"}},
+		"tools":    []map[string]any{{"name": "dump-private-tool"}},
+		"api_key":  "sk-abcdefghijk",
+	}
+
+	dumper := chat.newSanitizedStreamPacketDumper(request)
+	require.NotNil(t, dumper)
+	path := dumper.Path()
+	dumper.Close()
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	serialized := string(body)
+	require.Contains(t, serialized, "dump-private-content")
+	require.Contains(t, serialized, "dump-private-tool")
+	require.NotContains(t, serialized, "sk-abcdefghijk")
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
 func TestBuildChatCompletionRequest_ParallelToolCalls(t *testing.T) {

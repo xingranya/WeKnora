@@ -164,6 +164,17 @@ func TestPresignedFile_GET_ReturnsContent(t *testing.T) {
 	if got := w.Body.String(); got != "PNG-BYTES" {
 		t.Fatalf("body = %q, want %q", got, "PNG-BYTES")
 	}
+	cacheControl := w.Header().Get("Cache-Control")
+	if !strings.HasPrefix(cacheControl, "private, max-age=") {
+		t.Fatalf("Cache-Control = %q", cacheControl)
+	}
+	maxAge, err := strconv.ParseInt(strings.TrimPrefix(cacheControl, "private, max-age="), 10, 64)
+	if err != nil || maxAge <= 0 || maxAge > int64(time.Hour/time.Second) {
+		t.Fatalf("Cache-Control 超过签名剩余寿命: %q", cacheControl)
+	}
+	if maxAge == 86400 {
+		t.Fatalf("Cache-Control 仍使用固定 24h: %q", cacheControl)
+	}
 }
 
 func TestPresignedFile_ForcesActiveContentDownload(t *testing.T) {
@@ -233,5 +244,60 @@ func TestPresignedFile_MissingFile_404(t *testing.T) {
 	engine.ServeHTTP(w, req)
 	if got, want := w.Code, http.StatusNotFound; got != want {
 		t.Fatalf("status = %d, want %d", got, want)
+	}
+}
+
+func TestPresignedFileRejectsNumericBucketTenantConfusion(t *testing.T) {
+	engine, _, signURL := setupPresignedTestServer(t)
+	// 旧解析器把第一个数字段（桶名 1）当成租户，忽略后面的真实租户目录 2。
+	filePath := "s3://1/company-prefix/2/exports/private.png"
+	req := httptest.NewRequest(http.MethodGet, signURL(filePath, 1, time.Hour), nil)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	if got, want := w.Code, http.StatusForbidden; got != want {
+		t.Fatalf("status = %d, want %d; body=%s", got, want, w.Body.String())
+	}
+}
+
+func TestValidateUnambiguousStorageTenant(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		tenantID uint64
+		wantErr  bool
+	}{
+		{name: "local", filePath: "local://42/exports/image.png", tenantID: 42},
+		{name: "cloud prefix", filePath: "s3://company-bucket/team/42/exports/image.png", tenantID: 42},
+		{name: "temporary exports layout", filePath: "oss://temp-bucket/exports/42/image.png", tenantID: 42},
+		{name: "backend wrapper", filePath: "storage://backend-a/minio://bucket/42/exports/image.png", tenantID: 42},
+		{name: "numeric filename allowed", filePath: "local://42/exports/2026", tenantID: 42},
+		{name: "wrong tenant", filePath: "local://7/exports/image.png", tenantID: 42, wantErr: true},
+		{name: "numeric bucket ambiguous", filePath: "s3://100/42/exports/image.png", tenantID: 42, wantErr: true},
+		{name: "numeric prefix ambiguous", filePath: "s3://bucket/2026/42/exports/image.png", tenantID: 42, wantErr: true},
+		{name: "tenant missing", filePath: "s3://bucket/team/exports/image.png", tenantID: 42, wantErr: true},
+		{name: "unknown provider", filePath: "https://files.example.com/42/image.png", tenantID: 42, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUnambiguousStorageTenant(tt.filePath, tt.tenantID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateUnambiguousStorageTenant(%q, %d) error = %v, wantErr=%v",
+					tt.filePath, tt.tenantID, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPresignedCacheControlNeverOutlivesSignature(t *testing.T) {
+	now := time.Unix(2_000_000, 0)
+	if got := presignedCacheControl(strconv.FormatInt(now.Add(90*time.Second).Unix(), 10), now); got != "private, max-age=90" {
+		t.Fatalf("有效签名缓存 = %q, want private, max-age=90", got)
+	}
+	if got := presignedCacheControl(strconv.FormatInt(now.Add(-time.Second).Unix(), 10), now); got != "private, no-store, max-age=0" {
+		t.Fatalf("过期签名缓存 = %q, want private, no-store, max-age=0", got)
+	}
+	if got := presignedCacheControl("invalid", now); got != "private, no-store, max-age=0" {
+		t.Fatalf("非法过期时间缓存 = %q", got)
 	}
 }

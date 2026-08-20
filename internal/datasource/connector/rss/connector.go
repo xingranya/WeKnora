@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/mmcdole/gofeed"
 )
 
@@ -310,7 +311,7 @@ func (c *Connector) resolveItem(
 				title = articleTitle
 			}
 		} else {
-			logger.Warnf(ctx, "[RSS] full-text fetch failed for %s (using feed content): %v", item.Link, err)
+			logger.Warnf(ctx, "[RSS] full-text fetch failed for %q (using feed content): %v", secutils.SanitizeAuditLog(item.Link), err)
 		}
 	}
 

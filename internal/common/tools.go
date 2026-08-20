@@ -210,7 +210,7 @@ func CleanInvalidUTF8(s string) string {
 }
 
 const (
-	pipelineLogValueMaxRune = 300
+	pipelineLogValueMaxRune = 4096
 	defaultPipelineStage    = "PIPELINE"
 	defaultPipelineAction   = "info"
 	pipelineLogPrefix       = "[PIPELINE]"
@@ -244,10 +244,49 @@ func PipelineLog(stage, action string, fields map[string]interface{}) string {
 			builder.WriteString(" ")
 			builder.WriteString(key)
 			builder.WriteString("=")
-			builder.WriteString(secutils.SanitizeForLog(formatPipelineLogValue(fields[key])))
+			value := fields[key]
+			if isCredentialPipelineField(key) {
+				value = redactedPipelineValue(value)
+			}
+			builder.WriteString(secutils.SanitizeAuditLog(formatPipelineLogValue(value)))
 		}
 	}
 	return builder.String()
+}
+
+func isCredentialPipelineField(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	for _, safeSuffix := range []string{
+		"_id", "_ids", "_count", "_counts", "_len", "_length", "_bytes",
+		"_size", "_duration", "_duration_ms", "_score", "_status", "_type",
+		"_enabled", "_code", "_rounds",
+	} {
+		if strings.HasSuffix(normalized, safeSuffix) {
+			return false
+		}
+	}
+	for _, fragment := range []string{
+		"password", "passwd", "authorization", "api_key", "apikey", "access_token",
+		"refresh_token", "jwt_secret", "system_aes_key", "client_secret", "cookie", "secret",
+	} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactedPipelineValue(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return fmt.Sprintf("[redacted chars=%d]", len([]rune(v)))
+	case []string:
+		return fmt.Sprintf("[redacted items=%d]", len(v))
+	case []interface{}:
+		return fmt.Sprintf("[redacted items=%d]", len(v))
+	default:
+		return "[redacted]"
+	}
 }
 
 // PipelineInfo logs pipeline info level entries.

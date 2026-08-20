@@ -43,6 +43,73 @@ var (
 	}
 )
 
+const (
+	auditSecretFieldNames = `(?:password|passwd|(?:new|old|current)[_-]?password|authorization|proxy[_-]?authorization|authorization[_-]?attempt|token|id[_-]?token|session[_-]?token|private[_-]?token|publish[_-]?token|invite[_-]?token|invitation[_-]?token|verification[_-]?token|reset[_-]?token|csrf[_-]?token|[a-z0-9_-]*api[_ -]?key|x[_-]?api[_-]?key|api[_-]?secret|api[_-]?token|auth(?:entication|orization)?[_-]?token|access[_-]?token|refresh[_-]?token|access[_-]?key(?:[_-]?id)?|secret[_-]?id|jwt[_-]?secret|system[_-]?aes[_-]?key|aes[_-]?key|encryption[_-]?key|app[_-]?secret|client[_-]?secret|hmac[_-]?secret|(?:[a-z0-9]+[_-])*secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|signature|sig|secret)`
+	// 必须从字段边界开始匹配，避免把 folder_token、document_token 等业务资源标识
+	// 误判为裸 token 凭据。点号用于兼容 config.api_key=... 这类结构化路径。
+	auditSecretFieldPrefix = `(^|[\s,{\[?&;；.(])`
+)
+
+var auditSecretFieldNamePattern = regexp.MustCompile(`(?i)^` + auditSecretFieldNames + `$`)
+
+var auditLogSecretPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{
+		pattern: regexp.MustCompile(
+			`(?i)` + auditSecretFieldPrefix + `(["']?(?:authorization|proxy[_-]?authorization)["']?\s*[:=]\s*)(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*`,
+		),
+		replacement: `${1}${2}[REDACTED]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]+=*`),
+		replacement: `${1}[REDACTED]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+		replacement: `[REDACTED_JWT]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}\b`),
+		replacement: `[REDACTED_API_KEY]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`\b(?:github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{8,})\b`),
+		replacement: `[REDACTED_PROVIDER_TOKEN]`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^:/@\s]+:)[^/@\s]+@`),
+		replacement: `${1}[REDACTED]@`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/:@\s]+@`),
+		replacement: `${1}[REDACTED]@`,
+	},
+	{
+		pattern: regexp.MustCompile(
+			`(?i)` + auditSecretFieldPrefix + `(["']?` + auditSecretFieldNames + `["']?\s*[:=]\s*)(")((?:\\.|[^"\\])*)(")`,
+		),
+		replacement: `${1}${2}${3}[REDACTED]${5}`,
+	},
+	{
+		pattern: regexp.MustCompile(
+			`(?i)` + auditSecretFieldPrefix + `(["']?` + auditSecretFieldNames + `["']?\s*[:=]\s*)(')((?:\\.|[^'\\])*)(')`,
+		),
+		replacement: `${1}${2}${3}[REDACTED]${5}`,
+	},
+	{
+		pattern: regexp.MustCompile(
+			`(?i)` + auditSecretFieldPrefix + `(["']?` + auditSecretFieldNames + `["']?\s*[:=]\s*)(["']?)([^"',}\]&;；\s)]+)(["']?)`,
+		),
+		replacement: `${1}${2}${3}[REDACTED]${5}`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
+		replacement: `[REDACTED_PRIVATE_KEY]`,
+	},
+}
+
 // SanitizeHTML 清理 HTML 内容，防止 XSS 攻击
 func SanitizeHTML(input string) string {
 	if input == "" {
@@ -565,6 +632,28 @@ func SanitizeForLog(input string) string {
 	sanitized = builder.String()
 
 	return sanitized
+}
+
+// RedactAuditSecrets 仅遮蔽可直接用于认证的凭据，保留正文及换行结构。
+// 专用审计文件（例如逐请求 LLM 调试记录）应使用该函数，以保留可读分段。
+func RedactAuditSecrets(input string) string {
+	sanitized := input
+	for _, secretPattern := range auditLogSecretPatterns {
+		sanitized = secretPattern.pattern.ReplaceAllString(sanitized, secretPattern.replacement)
+	}
+	return sanitized
+}
+
+// IsAuditSecretFieldName 判断结构化日志字段名是否明确表示认证凭据。
+// 必须完整匹配，folder_token/document_token 等业务标识不会命中。
+func IsAuditSecretFieldName(name string) bool {
+	return auditSecretFieldNamePattern.MatchString(strings.TrimSpace(name))
+}
+
+// SanitizeAuditLog 保留公司审计所需的业务文本，同时防止日志注入并遮蔽认证凭据。
+// 它不负责裁剪长度；调用方应按自己的日志类型设置合理上限。
+func SanitizeAuditLog(input string) string {
+	return RedactAuditSecrets(SanitizeForLog(input))
 }
 
 // SanitizeForLogArray 清理日志输入数组,防止日志注入攻击

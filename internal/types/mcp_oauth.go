@@ -37,14 +37,12 @@ func (m *MCPOAuthClient) BeforeCreate(tx *gorm.DB) error {
 	if m.ID == "" {
 		m.ID = uuid.New().String()
 	}
-	m.encryptSecret()
-	return nil
+	return m.encryptSecret()
 }
 
 // BeforeSave re-encrypts the secret on update paths.
 func (m *MCPOAuthClient) BeforeSave(tx *gorm.DB) error {
-	m.encryptSecret()
-	return nil
+	return m.encryptSecret()
 }
 
 // AfterFind decrypts the client secret after loading.
@@ -57,15 +55,16 @@ func (m *MCPOAuthClient) AfterFind(tx *gorm.DB) error {
 	return nil
 }
 
-func (m *MCPOAuthClient) encryptSecret() {
+func (m *MCPOAuthClient) encryptSecret() error {
 	if m.ClientSecret == "" {
-		return
+		return nil
 	}
-	if key := utils.GetAESKey(); key != nil {
-		if enc, err := utils.EncryptAESGCM(m.ClientSecret, key); err == nil {
-			m.ClientSecret = enc
-		}
+	encrypted, err := encryptSecretForStorage(m.ClientSecret, "mcp_oauth_clients.client_secret")
+	if err != nil {
+		return err
 	}
+	m.ClientSecret = encrypted
+	return nil
 }
 
 // MCPOAuthToken stores a per-principal OAuth token for an MCP service. The
@@ -103,14 +102,12 @@ func (m *MCPOAuthToken) BeforeCreate(tx *gorm.DB) error {
 	if m.ID == "" {
 		m.ID = uuid.New().String()
 	}
-	m.encryptSecrets()
-	return nil
+	return m.encryptSecrets()
 }
 
 // BeforeSave re-encrypts secrets on update paths.
 func (m *MCPOAuthToken) BeforeSave(tx *gorm.DB) error {
-	m.encryptSecrets()
-	return nil
+	return m.encryptSecrets()
 }
 
 // AfterFind decrypts secrets after loading.
@@ -128,19 +125,20 @@ func (m *MCPOAuthToken) AfterFind(tx *gorm.DB) error {
 	return nil
 }
 
-func (m *MCPOAuthToken) encryptSecrets() {
-	key := utils.GetAESKey()
-	if key == nil {
-		return
-	}
+func (m *MCPOAuthToken) encryptSecrets() error {
 	if m.AccessToken != "" {
-		if enc, err := utils.EncryptAESGCM(m.AccessToken, key); err == nil {
-			m.AccessToken = enc
+		encrypted, err := encryptSecretForStorage(m.AccessToken, "mcp_oauth_tokens.access_token")
+		if err != nil {
+			return err
 		}
+		m.AccessToken = encrypted
 	}
 	if m.RefreshToken != "" {
-		if enc, err := utils.EncryptAESGCM(m.RefreshToken, key); err == nil {
-			m.RefreshToken = enc
+		encrypted, err := encryptSecretForStorage(m.RefreshToken, "mcp_oauth_tokens.refresh_token")
+		if err != nil {
+			return err
 		}
+		m.RefreshToken = encrypted
 	}
+	return nil
 }

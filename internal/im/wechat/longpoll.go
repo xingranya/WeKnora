@@ -139,7 +139,9 @@ func (c *LongPollClient) poll(ctx context.Context) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("getupdates returned status %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "WeChat long poll failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("getupdates returned status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result getUpdatesResponse

@@ -1376,7 +1376,7 @@ func (s *userService) populateOIDCEndpoints(ctx context.Context, cfg *config.OID
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("OIDC discovery request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("OIDC discovery request failed: status=%d response_bytes=%d", resp.StatusCode, len(body))
 	}
 
 	var doc oidcDiscoveryDocument

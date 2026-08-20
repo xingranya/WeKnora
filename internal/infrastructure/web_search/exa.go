@@ -91,7 +91,7 @@ func (p *ExaProvider) Search(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
 
-	logger.Infof(ctx, "[WebSearch][Exa] query=%q maxResults=%d url=%s", query, maxResults, p.baseURL)
+	logger.Infof(ctx, "[WebSearch][Exa] query=%q maxResults=%d", logger.AuditText(query, 4096), maxResults)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute Exa request: %w", err)
@@ -102,8 +102,8 @@ func (p *ExaProvider) Search(
 		return nil, fmt.Errorf("failed to read Exa response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		logger.Warnf(ctx, "[WebSearch][Exa] API returned status %d: %s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("exa API returned status %d: %s", resp.StatusCode, string(body))
+		logger.Warnf(ctx, "[WebSearch][Exa] API returned status %d response=%q", resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("exa API returned status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	var data exaSearchResponse

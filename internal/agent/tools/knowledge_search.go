@@ -812,8 +812,8 @@ Output only the scores, no explanations or additional text.`,
 			continue
 		}
 
-		logger.Infof(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d response: %s",
-			batchStart+1, batchEnd, response.Content)
+		logger.Infof(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d response=%q",
+			batchStart+1, batchEnd, logger.AuditText(response.Content, 8192))
 
 		// Parse scores from response
 		batchScores, err := t.parseScoresFromResponse(response.Content, len(batch))

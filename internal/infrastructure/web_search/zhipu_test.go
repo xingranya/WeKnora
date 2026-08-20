@@ -180,7 +180,7 @@ func TestZhipuProviderSearchError(t *testing.T) {
 		contentSize:  defaultZhipuContentSize,
 	}
 	_, err := provider.Search(context.Background(), "test", 1, false)
-	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+	if err == nil || !strings.Contains(err.Error(), "rate limited") || strings.Contains(err.Error(), `"message"`) {
 		t.Fatalf("Search() error = %v, want rate limited error", err)
 	}
 }

@@ -177,12 +177,12 @@ func (r *dorisRepository) streamLoadOnce(ctx context.Context,
 		return fmt.Errorf("read stream load response: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("stream load HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("stream load HTTP %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result streamLoadResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("decode stream load response: %w (raw=%s)", err, string(respBody))
+		return fmt.Errorf("decode stream load response: %w (response_bytes=%d)", err, len(respBody))
 	}
 
 	switch result.Status {

@@ -1634,7 +1634,8 @@ func (s *wikiIngestService) extractEntitiesAndConceptsNoUpsert(
 
 	var result combinedExtraction
 	if err := json.Unmarshal([]byte(extractionJSON), &result); err != nil {
-		logger.Warnf(ctx, "wiki ingest: failed to parse combined extraction JSON: %v\nRaw: %s", err, extractionJSON)
+		logger.Warnf(ctx, "wiki ingest: failed to parse combined extraction JSON: %v response=%q",
+			err, logger.AuditText(extractionJSON, 8192))
 		return nil, nil, nil, fmt.Errorf("parse combined extraction JSON: %w", err)
 	}
 

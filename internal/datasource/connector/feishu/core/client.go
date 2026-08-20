@@ -218,12 +218,12 @@ func (c *Client) DoRequest(ctx context.Context, method, path string, body interf
 			return lastErr
 		}
 
-		logger.Infof(ctx, "[Feishu] %s %s → status=%d bodyLen=%d body=%s",
-			method, path, resp.StatusCode, len(respBody), truncate(string(respBody), 1000))
+		logger.Infof(ctx, "[Feishu] %s request → status=%d bodyLen=%d", method, resp.StatusCode, len(respBody))
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			logger.Warnf(ctx, "[Feishu] API rate limited: response=%q", logger.AuditText(string(respBody), 4096))
 			wait := parseRetryAfter(resp.Header.Get("Retry-After"), backoff[min(attempt, len(backoff)-1)])
-			lastErr = fmt.Errorf("feishu rate limited: status=429 body=%s", truncate(string(respBody), 500))
+			lastErr = fmt.Errorf("feishu rate limited: status=429 response_bytes=%d", len(respBody))
 			if attempt < maxRetries {
 				if sErr := sleepCtx(ctx, wait); sErr != nil {
 					return sErr
@@ -234,7 +234,9 @@ func (c *Client) DoRequest(ctx context.Context, method, path string, body interf
 		}
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			lastErr = fmt.Errorf("feishu server error: status=%d body=%s", resp.StatusCode, truncate(string(respBody), 500))
+			logger.Warnf(ctx, "[Feishu] API server error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			lastErr = fmt.Errorf("feishu server error: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 			if attempt < max5xxRetries {
 				if sErr := sleepCtx(ctx, retry5xxDelay); sErr != nil {
 					return sErr
@@ -245,7 +247,9 @@ func (c *Client) DoRequest(ctx context.Context, method, path string, body interf
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("feishu api error: status=%d body=%s", resp.StatusCode, string(respBody))
+			logger.Warnf(ctx, "[Feishu] API error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			return fmt.Errorf("feishu api error: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 		}
 
 		if result != nil {
@@ -715,7 +719,7 @@ func (c *Client) downloadRawBytes(ctx context.Context, path string) ([]byte, err
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			wait := parseRetryAfter(resp.Header.Get("Retry-After"), feishuRetryBackoff[min(attempt, len(feishuRetryBackoff)-1)])
-			lastErr = fmt.Errorf("download rate limited: status=429 body=%s", truncate(string(body), 500))
+			lastErr = fmt.Errorf("download rate limited: status=429 response_bytes=%d", len(body))
 			if attempt < feishuMaxRetries {
 				if sErr := sleepCtx(ctx, wait); sErr != nil {
 					return nil, sErr
@@ -728,7 +732,7 @@ func (c *Client) downloadRawBytes(ctx context.Context, path string) ([]byte, err
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			lastErr = fmt.Errorf("download server error: status=%d body=%s", resp.StatusCode, truncate(string(body), 500))
+			lastErr = fmt.Errorf("download server error: status=%d response_bytes=%d", resp.StatusCode, len(body))
 			if attempt < feishuMax5xxRetries {
 				if sErr := sleepCtx(ctx, feishuRetry5xxDelay); sErr != nil {
 					return nil, sErr
@@ -741,8 +745,9 @@ func (c *Client) downloadRawBytes(ctx context.Context, path string) ([]byte, err
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			logger.Errorf(ctx, "[Feishu] download GET %s → status=%d body=%s", path, resp.StatusCode, truncate(string(body), 500))
-			return nil, fmt.Errorf("download failed: status=%d body=%s", resp.StatusCode, string(body))
+			logger.Errorf(ctx, "[Feishu] download failed: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(body), 4096))
+			return nil, fmt.Errorf("download failed: status=%d response_bytes=%d", resp.StatusCode, len(body))
 		}
 
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxFeishuDownloadBytes+1))

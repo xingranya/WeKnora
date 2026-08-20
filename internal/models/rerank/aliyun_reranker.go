@@ -138,7 +138,9 @@ func (r *AliyunReranker) Rerank(ctx context.Context, query string, documents []s
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("aliyun rerank API error: Http Status: %s, Body: %s", resp.Status, string(body))
+		logger.GetLogger(ctx).Errorf("AliyunReranker API error: Http Status: %s, response=%q",
+			resp.Status, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("aliyun rerank API error: Http Status: %s, response_bytes=%d", resp.Status, len(body))
 	}
 
 	var response AliyunRerankResponse

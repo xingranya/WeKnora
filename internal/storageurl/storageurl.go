@@ -131,12 +131,12 @@ func (w *Rewriter) ref(ctx context.Context, ref string) string {
 func (w *Rewriter) resolve(ctx context.Context, ref string) string {
 	fileSvc := w.resolver.ResolveFileService(ref)
 	if fileSvc == nil {
-		logger.Warnf(ctx, "[%s] storage URL rewrite: no file service for src=%s", w.logPrefix, ref)
+		logger.Warnf(ctx, "[%s] storage URL rewrite: no file service", w.logPrefix)
 		return ref
 	}
 	httpURL, err := fileSvc.GetFileURL(ctx, ref)
 	if err != nil {
-		logger.Warnf(ctx, "[%s] storage URL rewrite failed: src=%s err=%v", w.logPrefix, ref, err)
+		logger.Warnf(ctx, "[%s] storage URL rewrite failed: %v", w.logPrefix, err)
 		return ref
 	}
 	// A non-http(s) result cannot be fetched by the client — this covers both an
@@ -144,13 +144,11 @@ func (w *Rewriter) resolve(ctx context.Context, ref string) string {
 	// path (APP_EXTERNAL_URL unset / nginx not proxying /r/).
 	if !IsHTTPURL(httpURL) {
 		logger.Warnf(ctx,
-			"[%s] storage URL rewrite no-op (resolved to non-HTTP URL %q; for local/private storage set "+
-				"APP_EXTERNAL_URL and ensure nginx proxies /r/): src=%s",
-			w.logPrefix, httpURL, ref)
+			"[%s] storage URL rewrite no-op; for local/private storage set APP_EXTERNAL_URL and ensure nginx proxies /r/",
+			w.logPrefix)
 		return ref
 	}
-	logger.Infof(ctx, "[%s] storage URL rewrite: src=%s", w.logPrefix, ref)
-	logger.Debugf(ctx, "[%s] storage URL rewrite dst=%s", w.logPrefix, httpURL)
+	logger.Infof(ctx, "[%s] storage URL rewrite completed", w.logPrefix)
 	return httpURL
 }
 

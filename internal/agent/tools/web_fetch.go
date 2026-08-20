@@ -115,7 +115,7 @@ func (t *WebFetchTool) fetchItem(ctx context.Context, item WebFetchItem) *webFet
 	content, err := t.fetcher.Fetch(ctx, fetchURL)
 	if err != nil {
 		code, retryable, message := webfetch.ErrorDetails(err)
-		logger.Warnf(ctx, "[Tool][WebFetch] fetch failed url=%s code=%s retryable=%v err=%v", displayURL, code, retryable, err)
+		logger.Warnf(ctx, "[Tool][WebFetch] fetch failed code=%s retryable=%v err=%v", code, retryable, err)
 		return failedWebFetchResult(displayURL, retryable, string(code), message)
 	}
 
@@ -134,7 +134,7 @@ func (t *WebFetchTool) fetchItem(ctx context.Context, item WebFetchItem) *webFet
 		data["summary_status"] = "failed"
 		data["summary_error_code"] = "summary_failed"
 		data["summary_error_message"] = summaryErr.Error()
-		logger.Warnf(ctx, "[Tool][WebFetch] summary failed url=%s err=%v", displayURL, summaryErr)
+		logger.Warnf(ctx, "[Tool][WebFetch] summary failed: %v", summaryErr)
 	} else if summary != "" {
 		data["summary_status"] = "success"
 		data["summary"] = summary

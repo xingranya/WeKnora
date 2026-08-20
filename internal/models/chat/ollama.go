@@ -274,13 +274,7 @@ func (c *OllamaChat) ChatStream(
 			return nil
 		})
 		if err != nil {
-			logger.GetLogger(ctx).Errorf("流式聊天请求失败: %v", err)
-			// 发送错误响应
-			streamChan <- types.StreamResponse{
-				ResponseType: types.ResponseTypeError,
-				Content:      err.Error(),
-				Done:         true,
-			}
+			streamChan <- publicModelStreamFailure(ctx, "ollama_stream", err)
 		}
 	}()
 

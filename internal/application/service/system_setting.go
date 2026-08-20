@@ -618,7 +618,7 @@ func (s *systemSettingService) GetInt(ctx context.Context, key string, envName s
 				return v
 			}
 		}
-		logger.Warnf(ctx, "[system_settings] %q: cannot parse %s as int, falling back", key, string(raw))
+		logger.Warnf(ctx, "[system_settings] %q: cannot parse %q as int, falling back", key, logger.AuditText(string(raw), 4096))
 	}
 	if envName != "" {
 		if v := os.Getenv(envName); v != "" {
@@ -637,7 +637,7 @@ func (s *systemSettingService) GetString(ctx context.Context, key string, envNam
 		if err := json.Unmarshal(raw, &v); err == nil {
 			return v
 		}
-		logger.Warnf(ctx, "[system_settings] %q: cannot parse %s as string, falling back", key, string(raw))
+		logger.Warnf(ctx, "[system_settings] %q: cannot parse %q as string, falling back", key, logger.AuditText(string(raw), 4096))
 	}
 	if envName != "" {
 		if v := os.Getenv(envName); v != "" {
@@ -655,7 +655,7 @@ func (s *systemSettingService) GetBool(ctx context.Context, key string, envName 
 		if err := json.Unmarshal(raw, &v); err == nil {
 			return v
 		}
-		logger.Warnf(ctx, "[system_settings] %q: cannot parse %s as bool, falling back", key, string(raw))
+		logger.Warnf(ctx, "[system_settings] %q: cannot parse %q as bool, falling back", key, logger.AuditText(string(raw), 4096))
 	}
 	if envName != "" {
 		if v := os.Getenv(envName); v != "" {
@@ -687,7 +687,7 @@ func (s *systemSettingService) GetStringList(ctx context.Context, key string, en
 			}
 			return v
 		}
-		logger.Warnf(ctx, "[system_settings] %q: cannot parse %s as string_list, falling back", key, string(raw))
+		logger.Warnf(ctx, "[system_settings] %q: cannot parse %q as string_list, falling back", key, logger.AuditText(string(raw), 4096))
 	}
 	if envName != "" {
 		if raw := os.Getenv(envName); raw != "" {

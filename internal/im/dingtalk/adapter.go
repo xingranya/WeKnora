@@ -266,7 +266,9 @@ func (a *Adapter) DownloadFile(ctx context.Context, msg *im.IncomingMessage) (io
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("download file returned %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "DingTalk download failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, "", fmt.Errorf("download file returned %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 	return resp.Body, msg.FileName, nil
 }
@@ -453,7 +455,9 @@ func (a *Adapter) replyViaSessionWebhook(ctx context.Context, webhookURL, conten
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("dingtalk sessionWebhook returned %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "DingTalk session webhook failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("dingtalk sessionWebhook returned %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 	return nil
 }
@@ -504,7 +508,9 @@ func (a *Adapter) replyViaOpenAPI(ctx context.Context, incoming *im.IncomingMess
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("dingtalk OpenAPI returned %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "DingTalk OpenAPI reply failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("dingtalk OpenAPI returned %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 	return nil
 }
@@ -548,7 +554,9 @@ func (a *Adapter) getAccessToken(ctx context.Context) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("dingtalk accessToken returned %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "DingTalk access token request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return "", fmt.Errorf("dingtalk accessToken returned %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var result struct {
@@ -597,7 +605,9 @@ func (a *Adapter) dingtalkAPI(ctx context.Context, method, path string, body int
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("dingtalk API %s returned %d: %s", path, resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "DingTalk API request failed: path=%q status=%d response=%q",
+			logger.AuditText(path, 4096), resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return nil, fmt.Errorf("dingtalk API request returned %d (path_chars=%d response_bytes=%d)", resp.StatusCode, len(path), len(respBody))
 	}
 	return respBody, nil
 }

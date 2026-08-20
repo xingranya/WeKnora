@@ -530,14 +530,16 @@ func (d *DataSourceConfig) ToJSON() (JSON, error) {
 		return nil, nil
 	}
 	out := *d
-	if key := utils.GetAESKey(); key != nil && len(out.Credentials) > 0 {
+	if len(out.Credentials) > 0 {
 		encCreds := make(map[string]interface{}, len(out.Credentials))
 		for k, v := range out.Credentials {
 			if s, ok := v.(string); ok && s != "" {
-				if enc, err := utils.EncryptAESGCM(s, key); err == nil {
-					encCreds[k] = enc
-					continue
+				enc, err := encryptSecretForStorage(s, "datasource.credentials."+k)
+				if err != nil {
+					return nil, err
 				}
+				encCreds[k] = enc
+				continue
 			}
 			encCreds[k] = v
 		}

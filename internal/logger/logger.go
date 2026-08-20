@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -74,6 +76,40 @@ type CustomFormatter struct {
 	threadNeeded bool
 }
 
+type sanitizingFormatter struct {
+	inner logrus.Formatter
+}
+
+func (f *sanitizingFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	// CustomFormatter 已在消息和结构化字段边界执行同一套脱敏；避免包装层
+	// 再次处理 [REDACTED]，造成占位符尾部重复或破坏业务文本格式。
+	if _, ok := f.inner.(*CustomFormatter); ok {
+		return f.inner.Format(entry)
+	}
+	clone := *entry
+	clone.Message = secutils.SanitizeAuditLog(entry.Message)
+	clone.Data = make(logrus.Fields, len(entry.Data))
+	for key, value := range entry.Data {
+		if secutils.IsAuditSecretFieldName(key) {
+			clone.Data[key] = "[REDACTED]"
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			clone.Data[key] = secutils.SanitizeAuditLog(fmt.Sprintf("%v", value))
+			continue
+		}
+		sanitized := secutils.SanitizeAuditLog(string(raw))
+		var decoded any
+		if err := json.Unmarshal([]byte(sanitized), &decoded); err != nil {
+			clone.Data[key] = sanitized
+		} else {
+			clone.Data[key] = decoded
+		}
+	}
+	return f.inner.Format(&clone)
+}
+
 // levelColorFor 返回日志级别对应的 ANSI 颜色码，无颜色时返回空串。
 func levelColorFor(level logrus.Level) string {
 	switch level {
@@ -110,9 +146,13 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 
 	// 自定义模板模式
 	if f.Template != "" {
-		msg := entry.Message
+		msg := secutils.SanitizeAuditLog(entry.Message)
 		for _, k := range keys {
-			msg += fmt.Sprintf(" %s=%v", k, entry.Data[k])
+			value := secutils.SanitizeAuditLog(fmt.Sprintf("%v", entry.Data[k]))
+			if secutils.IsAuditSecretFieldName(k) {
+				value = "[REDACTED]"
+			}
+			msg += fmt.Sprintf(" %s=%s", k, value)
 		}
 		shortCaller := caller
 		if len(shortCaller) > 50 {
@@ -168,18 +208,22 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 
 	// request_id 优先输出
 	if v, ok := entry.Data["request_id"]; ok {
+		safeRequestID := secutils.SanitizeAuditLog(fmt.Sprintf("%v", v))
 		if f.ForceColor {
-			fields += fmt.Sprintf("%s%v%s ",
-				colorBlue, v, colorReset)
+			fields += fmt.Sprintf("%s%s%s ",
+				colorBlue, safeRequestID, colorReset)
 		} else {
-			fields += fmt.Sprintf("%v ", v)
+			fields += fmt.Sprintf("%s ", safeRequestID)
 		}
 	}
 
 	// 其余字段排序后输出
 	for _, k := range keys {
+		val := secutils.SanitizeAuditLog(fmt.Sprintf("%v", entry.Data[k]))
+		if secutils.IsAuditSecretFieldName(k) {
+			val = "[REDACTED]"
+		}
 		if f.ForceColor {
-			val := fmt.Sprintf("%v", entry.Data[k])
 			coloredVal := fmt.Sprintf("%s%s%s", colorWhite, val, colorReset)
 			if k == "error" {
 				coloredVal = fmt.Sprintf("%s%s%s", colorRed, val, colorReset)
@@ -187,7 +231,7 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 			fields += fmt.Sprintf("%s%s%s=%s ",
 				colorCyan, k, colorReset, coloredVal)
 		} else {
-			fields += fmt.Sprintf("%s=%v ", k, entry.Data[k])
+			fields += fmt.Sprintf("%s=%s ", k, val)
 		}
 	}
 
@@ -201,11 +245,12 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 			coloredCaller = fmt.Sprintf("%s%s%s", colorPurple, caller, resetColor)
 		}
 		return []byte(fmt.Sprintf("%s%-5s%s[%s] [%s] %-20s | %s\n",
-			levelColor, level, resetColor, coloredTimestamp, fields, coloredCaller, entry.Message)), nil
+			levelColor, level, resetColor, coloredTimestamp, fields, coloredCaller,
+			secutils.SanitizeAuditLog(entry.Message))), nil
 	}
 
 	return []byte(fmt.Sprintf("%-5s[%s] [%s] %-20s | %s\n",
-		level, timestamp, fields, caller, entry.Message)), nil
+		level, timestamp, fields, caller, secutils.SanitizeAuditLog(entry.Message))), nil
 }
 
 func getGoroutineID() string {
@@ -270,11 +315,21 @@ func ConfigureFromEnv() {
 
 	// 设置日志格式而不修改全局时区
 	tmpl := resolveLogFormatFromEnv()
-	appLogger.SetFormatter(&CustomFormatter{
-		ForceColor:   forceColor,
-		Template:     tmpl,
-		threadNeeded: strings.Contains(tmpl, "%thread"),
-	})
+	var formatter logrus.Formatter
+	if strings.EqualFold(tmpl, "json") {
+		formatter = &logrus.JSONFormatter{DisableHTMLEscape: true}
+	} else {
+		if tmpl != "" && !strings.Contains(tmpl, "%msg") {
+			fmt.Fprintln(os.Stderr, "logger: LOG_FORMAT must contain %msg; using the default format")
+			tmpl = ""
+		}
+		formatter = &CustomFormatter{
+			ForceColor:   forceColor,
+			Template:     tmpl,
+			threadNeeded: strings.Contains(tmpl, "%thread"),
+		}
+	}
+	appLogger.SetFormatter(&sanitizingFormatter{inner: formatter})
 	appLogger.SetReportCaller(false)
 }
 
@@ -316,6 +371,20 @@ func SetLogLevel(level LogLevel) {
 	}
 
 	appLogger.SetLevel(logLevel)
+}
+
+// AuditText 保留可审计业务内容，并在统一凭据脱敏后按字符数裁剪。
+// 第三方响应体和文档片段应通过该函数进入日志，避免单条日志无限增长。
+func AuditText(content string, maxRunes int) string {
+	sanitized := secutils.SanitizeAuditLog(content)
+	if maxRunes <= 0 {
+		return sanitized
+	}
+	runes := []rune(sanitized)
+	if len(runes) <= maxRunes {
+		return sanitized
+	}
+	return string(runes[:maxRunes]) + "..."
 }
 
 // getLogLevelFromEnv 从环境变量读取日志级别配置
@@ -378,9 +447,25 @@ func defaultMacAppLogPath() string {
 func openLogFile(logPath string) (io.WriteCloser, error) {
 	dir := filepath.Dir(logPath)
 	if dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	// lumberjack 会延迟创建文件；先以最小权限建立并收紧已有文件，避免
+	// 进程 umask 或历史部署留下的 0644 权限暴露审计正文。
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
 	}
 	return &lumberjack.Logger{
 		Filename:   logPath,

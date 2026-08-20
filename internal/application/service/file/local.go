@@ -165,7 +165,7 @@ func (s *localFileService) FinalizeReaderPath(
 // Supports both provider scheme: local://{relative_path} and legacy absolute paths.
 // 路径必须在 baseDir 下，防止路径遍历（如 ../../）
 func (s *localFileService) GetFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
-	logger.Infof(ctx, "Getting file: %s", filePath)
+	logger.Infof(ctx, "Getting local file: path=%q", logger.AuditText(filePath, 4096))
 
 	candidate := s.normalizePathForBase(filePath)
 	resolved, err := secutils.SafePathUnderBase(s.baseDir, candidate)
@@ -179,7 +179,8 @@ func (s *localFileService) GetFile(ctx context.Context, filePath string) (io.Rea
 		// baseDir/resolved are logged so a storage base-dir mismatch (e.g.
 		// writer and reader started with different LOCAL_STORAGE_BASE_DIR)
 		// is immediately visible instead of just "no such file or directory".
-		logger.Errorf(ctx, "Failed to open file: baseDir=%s resolvedPath=%s err=%v", s.baseDir, resolved, err)
+		logger.Errorf(ctx, "Failed to open local file: base_dir=%q resolved_path=%q err=%v",
+			logger.AuditText(s.baseDir, 4096), logger.AuditText(resolved, 4096), err)
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
@@ -191,7 +192,7 @@ func (s *localFileService) GetFile(ctx context.Context, filePath string) (io.Rea
 // Returns an error if deletion fails
 // 路径必须在 baseDir 下，防止路径遍历（如 ../../）
 func (s *localFileService) DeleteFile(ctx context.Context, filePath string) error {
-	logger.Infof(ctx, "Deleting file: %s", filePath)
+	logger.Infof(ctx, "Deleting local file: path=%q", logger.AuditText(filePath, 4096))
 
 	candidate := s.normalizePathForBase(filePath)
 	resolved, err := secutils.SafePathUnderBase(s.baseDir, candidate)
@@ -302,7 +303,8 @@ func (s *localFileService) SaveBytes(ctx context.Context, data []byte, tenantID 
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	logger.Infof(ctx, "Bytes data saved successfully: %s", filePath)
+	logger.Infof(ctx, "Bytes data saved successfully: path=%q bytes=%d",
+		logger.AuditText(filePath, 4096), len(data))
 	relPath, _ := filepath.Rel(s.baseDir, filePath)
 	return localScheme + filepath.ToSlash(relPath), nil
 }
@@ -332,7 +334,8 @@ func (s *localFileService) GetFileURL(ctx context.Context, filePath string) (str
 		tenantID := secutils.ParseTenantIDFromStoragePath(normalized)
 		presignedURL, err := secutils.SignFileURL(s.externalURL, normalized, tenantID, 0)
 		if err != nil {
-			logger.Warnf(ctx, "Failed to generate presigned URL for %s: %v, returning local:// path", normalized, err)
+			logger.Warnf(ctx, "Failed to generate presigned URL for path=%q: %v, returning local storage path",
+				logger.AuditText(normalized, 4096), err)
 			return normalized, nil
 		}
 		return presignedURL, nil

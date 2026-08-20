@@ -98,13 +98,12 @@ func (c *client) doRequest(ctx context.Context, method, path string, result inte
 			return lastErr
 		}
 
-		bodyPreview := truncate(string(body), 500)
-		logger.Infof(ctx, "[Yuque] %s %s → status=%d bodyLen=%d body=%s",
-			method, path, resp.StatusCode, len(body), bodyPreview)
+		logger.Infof(ctx, "[Yuque] %s request → status=%d bodyLen=%d", method, resp.StatusCode, len(body))
 
 		if resp.StatusCode == 429 {
+			logger.Warnf(ctx, "[Yuque] API rate limited: response=%q", logger.AuditText(string(body), 4096))
 			wait := parseRetryAfter(resp.Header.Get("Retry-After"), backoff[min(attempt, len(backoff)-1)])
-			lastErr = fmt.Errorf("yuque rate limited: status=429 body=%s", bodyPreview)
+			lastErr = fmt.Errorf("yuque rate limited: status=429 response_bytes=%d", len(body))
 			if attempt < maxRetries {
 				if sErr := sleepCtx(ctx, wait); sErr != nil {
 					return sErr
@@ -115,7 +114,9 @@ func (c *client) doRequest(ctx context.Context, method, path string, result inte
 		}
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			lastErr = fmt.Errorf("yuque server error: status=%d body=%s", resp.StatusCode, bodyPreview)
+			logger.Warnf(ctx, "[Yuque] API server error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(body), 4096))
+			lastErr = fmt.Errorf("yuque server error: status=%d response_bytes=%d", resp.StatusCode, len(body))
 			if attempt < max5xxRetries {
 				if sErr := sleepCtx(ctx, retry5xxDelay); sErr != nil {
 					return sErr
@@ -128,16 +129,18 @@ func (c *client) doRequest(ctx context.Context, method, path string, result inte
 		// 401/403 → surface as ErrInvalidCredentials so DataSourceService can
 		// distinguish bad-token from transient failures and auto-flag the source.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return fmt.Errorf("%w: status=%d body=%s", datasource.ErrInvalidCredentials, resp.StatusCode, bodyPreview)
+			return fmt.Errorf("%w: status=%d", datasource.ErrInvalidCredentials, resp.StatusCode)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			logger.Warnf(ctx, "[Yuque] API error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(body), 4096))
 			var apiErr apiErrorBody
 			_ = json.Unmarshal(body, &apiErr)
 			if apiErr.Message != "" {
 				return fmt.Errorf("yuque api error: status=%d msg=%s", resp.StatusCode, apiErr.Message)
 			}
-			return fmt.Errorf("yuque api error: status=%d body=%s", resp.StatusCode, bodyPreview)
+			return fmt.Errorf("yuque api error: status=%d response_bytes=%d", resp.StatusCode, len(body))
 		}
 
 		if result != nil {

@@ -64,7 +64,7 @@ func (p *GoogleProvider) Search(
 	if len(query) == 0 {
 		return nil, fmt.Errorf("query is empty")
 	}
-	logger.Infof(ctx, "[WebSearch][Google] query=%q maxResults=%d engineID=%s", query, maxResults, p.engineID)
+	logger.Infof(ctx, "[WebSearch][Google] query=%q maxResults=%d", logger.AuditText(query, 4096), maxResults)
 	cseCall := p.srv.Cse.List().Context(ctx).Cx(p.engineID).Q(query)
 
 	if maxResults > 0 {

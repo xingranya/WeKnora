@@ -178,7 +178,8 @@ func (e *JinaEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]floa
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		logger.GetLogger(ctx).Errorf("JinaEmbedder EmbedBatch API error: Http Status %s, Body: %s", resp.Status, string(body))
+		logger.GetLogger(ctx).Errorf("JinaEmbedder EmbedBatch API error: Http Status %s, response=%q",
+			resp.Status, logger.AuditText(string(body), 4096))
 		return nil, fmt.Errorf("EmbedBatch API error: Http Status %s", resp.Status)
 	}
 

@@ -144,18 +144,17 @@ func (c *client) callAPIAt(
 		// The body is only ever logged on an error path: successful responses
 		// (get_media_info in particular) carry pre-signed storage URLs and
 		// per-request auth headers that must not land in the server log.
-		bodyPreview := truncate(string(respBody), 500)
 		logger.Infof(ctx, "[IMA] POST %s → status=%d bodyLen=%d", label, resp.StatusCode, len(respBody))
 
 		// HTTP-level auth failures: surface as ErrInvalidCredentials.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return fmt.Errorf("%w: status=%d body=%s",
-				datasource.ErrInvalidCredentials, resp.StatusCode, bodyPreview)
+			return fmt.Errorf("%w: status=%d", datasource.ErrInvalidCredentials, resp.StatusCode)
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			logger.Warnf(ctx, "[IMA] API rate limited: response=%q", logger.AuditText(string(respBody), 4096))
 			wait := backoff[minInt(attempt, len(backoff)-1)]
-			lastErr = fmt.Errorf("ima rate limited: status=429 body=%s", bodyPreview)
+			lastErr = fmt.Errorf("ima rate limited: status=429 response_bytes=%d", len(respBody))
 			if attempt < maxRetries {
 				if sErr := sleepCtx(ctx, wait); sErr != nil {
 					return sErr
@@ -166,7 +165,9 @@ func (c *client) callAPIAt(
 		}
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			lastErr = fmt.Errorf("ima server error: status=%d body=%s", resp.StatusCode, bodyPreview)
+			logger.Warnf(ctx, "[IMA] API server error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			lastErr = fmt.Errorf("ima server error: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 			if attempt < max5xxRetries {
 				if sErr := sleepCtx(ctx, retry5xxDelay); sErr != nil {
 					return sErr
@@ -177,7 +178,9 @@ func (c *client) callAPIAt(
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("ima api http error: status=%d body=%s", resp.StatusCode, bodyPreview)
+			logger.Warnf(ctx, "[IMA] API error: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(respBody), 4096))
+			return fmt.Errorf("ima api http error: status=%d response_bytes=%d", resp.StatusCode, len(respBody))
 		}
 
 		var env apiEnvelope

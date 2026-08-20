@@ -918,7 +918,7 @@ func (a *Adapter) cardkitCreate(ctx context.Context, accessToken, cardJSON strin
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("decode: %w (body: %s)", err, string(respBody))
+		return "", fmt.Errorf("decode response (%d bytes): %w", len(respBody), err)
 	}
 	if result.Code != 0 {
 		return "", fmt.Errorf("code=%d msg=%s", result.Code, result.Msg)

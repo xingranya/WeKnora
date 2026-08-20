@@ -162,7 +162,8 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (string, error) {
 		content, parseErr := htmlToText(string(httpResult.body))
 		requiresBrowser := parseErr == nil && needsBrowserFallback(content, httpResult.body)
 		if parseErr == nil && strings.TrimSpace(content) != "" && !requiresBrowser {
-			logger.Infof(ctx, "[WebFetch] fetched %s → %d chars", rawURL, len(content))
+			logger.Infof(ctx, "[WebFetch] fetched page: url=%q content=%q",
+				logger.AuditText(rawURL, 4096), logger.AuditText(content, 8192))
 			return content, nil
 		}
 		if f.renderBrowser != nil {
@@ -170,7 +171,8 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (string, error) {
 			if rendered, browserErr := f.fetchWithBrowser(requestCtx, browserURL); browserErr == nil {
 				content, browserParseErr := htmlToText(rendered)
 				if browserParseErr == nil && strings.TrimSpace(content) != "" {
-					logger.Infof(ctx, "[WebFetch] rendered %s → %d chars", rawURL, len(content))
+					logger.Infof(ctx, "[WebFetch] rendered page: url=%q content=%q",
+						logger.AuditText(rawURL, 4096), logger.AuditText(content, 8192))
 					return content, nil
 				}
 			}
@@ -188,7 +190,8 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (string, error) {
 		if rendered, browserErr := f.fetchWithBrowser(requestCtx, rawURL); browserErr == nil {
 			content, browserParseErr := htmlToText(rendered)
 			if browserParseErr == nil && strings.TrimSpace(content) != "" {
-				logger.Infof(ctx, "[WebFetch] rendered %s → %d chars", rawURL, len(content))
+				logger.Infof(ctx, "[WebFetch] rendered page: url=%q content=%q",
+					logger.AuditText(rawURL, 4096), logger.AuditText(content, 8192))
 				return content, nil
 			}
 		}

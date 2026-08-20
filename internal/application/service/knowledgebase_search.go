@@ -94,11 +94,8 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		searchKBIDs = []string{id}
 	}
 
-	// QueryText is user-controlled; sanitize before logging to prevent
-	// CR/LF/tab log injection. Matches the handler-layer sanitization at
-	// handler/knowledgebase.go.
-	logger.Infof(ctx, "Hybrid search parameters, knowledge base IDs: %v, query text: %s",
-		searchKBIDs, secutils.SanitizeForLog(params.QueryText))
+	logger.Infof(ctx, "Hybrid search parameters, knowledge_bases=%d query=%q",
+		len(searchKBIDs), secutils.SanitizeAuditLog(params.QueryText))
 
 	tenantInfo, _ := types.TenantInfoFromContext(ctx)
 	requestTenantID := types.MustTenantIDFromContext(ctx)
@@ -441,7 +438,7 @@ func (s *knowledgeBaseService) resolveQueryEmbedding(
 	logger.Info(ctx, "Starting to generate query embedding")
 	queryEmbedding, err := embeddingModel.Embed(ctx, params.QueryText)
 	if err != nil {
-		logger.Errorf(ctx, "Failed to embed query text, query text: %s, error: %v", params.QueryText, err)
+		logger.Errorf(ctx, "Failed to embed query text query=%q: %v", secutils.SanitizeAuditLog(params.QueryText), err)
 		return nil, err
 	}
 	logger.Infof(ctx, "Query embedding generated successfully, embedding vector length: %d", len(queryEmbedding))

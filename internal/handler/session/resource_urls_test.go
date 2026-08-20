@@ -217,6 +217,8 @@ func TestEmitStreamEvent_FlushesHeldContentOnError(t *testing.T) {
 		indexOf(body, `"response_type":"error"`),
 		"held content must precede the error",
 	)
+	assert.Contains(t, body, publicSessionFailureMessage)
+	assert.NotContains(t, body, "upstream failed")
 }
 
 // A user-requested stop ends the stream without a completion event, and the text

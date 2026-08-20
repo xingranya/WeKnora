@@ -140,7 +140,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		}, fmt.Errorf("missing sql parameter")
 	}
 
-	logger.Infof(ctx, "[Tool][DatabaseQuery] Original SQL query:\n%s", input.SQL)
+	logger.Infof(ctx, "[Tool][DatabaseQuery] SQL received: %q", logger.AuditText(input.SQL, 8192))
 	logger.Infof(ctx, "[Tool][DatabaseQuery] Tenant ID: %d", tenantID)
 
 	// Validate and secure the SQL query
@@ -154,9 +154,8 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		}, err
 	}
 
-	logger.Infof(ctx, "[Tool][DatabaseQuery] Secured SQL query:\n%s", securedSQL)
-	logger.Infof(ctx, "Executing secured SQL query - original: %s, secured: %s, tenant_id: %d",
-		input.SQL, securedSQL, tenantID)
+	logger.Infof(ctx, "[Tool][DatabaseQuery] Secured SQL ready: sql=%q tenant_id=%d",
+		logger.AuditText(securedSQL, 8192), tenantID)
 
 	// Execute the query
 	logger.Infof(ctx, "[Tool][DatabaseQuery] Executing query against database...")

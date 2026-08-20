@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 var llmDebug struct {
@@ -36,8 +38,12 @@ func configureLLMDebugLog() {
 		dir = "llm_debug"
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "llm_debug: failed to create dir %s: %v\n", dir, err)
+		return
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "llm_debug: failed to secure dir %s: %v\n", dir, err)
 		return
 	}
 
@@ -92,7 +98,7 @@ func LLMDebugLog(ctx context.Context, record *LLMCallRecord) {
 		return
 	}
 
-	text := formatRecord(record)
+	text := secutils.RedactAuditSecrets(formatRecord(record))
 
 	reqID := extractRequestID(ctx)
 	filename := buildFilename(reqID)
@@ -100,19 +106,39 @@ func LLMDebugLog(ctx context.Context, record *LLMCallRecord) {
 	llmDebug.mu.Lock()
 	defer llmDebug.mu.Unlock()
 
-	path := filepath.Join(llmDebug.dir, filename)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	baseDir, err := filepath.Abs(filepath.Clean(llmDebug.dir))
+	if err != nil {
+		return
+	}
+	path := filepath.Join(baseDir, filepath.Base(filename))
+	if rel, err := filepath.Rel(baseDir, path); err != nil || rel != filepath.Base(filename) {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "llm_debug: open %s: %v\n", path, err)
 		return
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "llm_debug: failed to secure %s: %v\n", path, err)
+		return
+	}
 	_, _ = f.WriteString(text)
 }
 
 func buildFilename(reqID string) string {
 	if reqID != "" {
-		return reqID + ".log"
+		safeID := strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, reqID)
+		if len(safeID) > 64 {
+			safeID = safeID[:64]
+		}
+		return safeID + ".log"
 	}
 	return time.Now().Format("20060102_150405.000") + ".log"
 }

@@ -2,12 +2,14 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/gin-gonic/gin"
@@ -87,6 +89,69 @@ func parseStorageTarget(filePath string) (backendID, provider string) {
 		providerPath = filePath
 	}
 	return backendID, types.ParseProviderScheme(providerPath)
+}
+
+// validateUnambiguousStorageTenant 仅接受租户归属无歧义的 provider:// 路径。
+// 历史解析器取第一个纯数字段，数字桶名/前缀可能因此冒充 tenant_id；这里要求
+// 目录段中唯一的纯数字段就是签名或登录上下文绑定的租户。数字文件名不参与判断。
+// 对包含数字桶名、数字前缀或数字 knowledge ID 的旧路径采取安全失败，调用方应
+// 迁移为 resource:// 目录记录，由资源表中的 TenantID 作为权威归属。
+func validateUnambiguousStorageTenant(filePath string, tenantID uint64) error {
+	if tenantID == 0 {
+		return fmt.Errorf("workspace id is empty")
+	}
+	providerPath := filePath
+	if strings.HasPrefix(providerPath, "storage://") {
+		_, inner, ok := types.ParseStorageBackendPath(providerPath)
+		if !ok {
+			return fmt.Errorf("invalid storage backend path")
+		}
+		providerPath = inner
+	}
+	provider := types.ParseProviderScheme(providerPath)
+	if provider == "" {
+		return fmt.Errorf("unsupported storage provider path")
+	}
+	rest := strings.TrimPrefix(providerPath, provider+"://")
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 {
+		return fmt.Errorf("storage path has no tenant directory")
+	}
+
+	want := strconv.FormatUint(tenantID, 10)
+	numericDirectories := 0
+	for _, part := range parts[:len(parts)-1] {
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			continue
+		}
+		numericDirectories++
+		if part != strconv.FormatUint(parsed, 10) {
+			return fmt.Errorf("storage path has non-canonical numeric directory")
+		}
+		if part != want {
+			return fmt.Errorf("storage path contains a different workspace directory")
+		}
+	}
+	if numericDirectories != 1 {
+		return fmt.Errorf("storage path workspace directory is ambiguous")
+	}
+	return nil
+}
+
+func presignedCacheControl(expiresStr string, now time.Time) string {
+	expires, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil {
+		return "private, no-store, max-age=0"
+	}
+	remaining := expires - now.Unix()
+	if remaining <= 0 {
+		return "private, no-store, max-age=0"
+	}
+	return fmt.Sprintf("private, max-age=%d", remaining)
 }
 
 // requireFilePathQuery validates the file_path query parameter every proxy
@@ -212,8 +277,8 @@ func streamStoredFile(c *gin.Context, reader io.ReadCloser, contentType string, 
 // newFileServeHandler builds the file-proxy handler. It reads the tenant from
 // the request context (set by whichever auth middleware precedes it), so the
 // same handler backs both the authenticated /files route and the embed route
-// (where EmbedAuth injects the channel's tenant). Tenant ownership of the
-// requested path is enforced via ValidateStoragePathTenant either way.
+// (where EmbedAuth injects the channel's tenant). Tenant ownership of raw
+// provider paths is enforced by the unambiguous directory parser either way.
 func newFileServeHandler(
 	globalFileService interfaces.FileService,
 	storageResolver interfaces.StorageBackendResolver,
@@ -247,7 +312,7 @@ func newFileServeHandler(
 		// paths remain an internal locator and are not required to encode access
 		// control metadata (some cloud layouts contain other numeric segments).
 		if !resourceResolved {
-			if err := secutils.ValidateStoragePathTenant(filePath, tenant.ID); err != nil {
+			if err := validateUnambiguousStorageTenant(filePath, tenant.ID); err != nil {
 				logger.Warnf(c.Request.Context(),
 					"[Router] /files denied cross-tenant or invalid path: tenant_id=%d file_path=%q err=%v",
 					tenant.ID, filePath, err)
@@ -302,7 +367,7 @@ func serveFilesWithResources(
 	// API-key guard. A KB-restricted key is denied (a raw storage path cannot
 	// be bounded to its allow-list); full-access keys and tenant-wide retrieve
 	// keys pass, since the handler still enforces same-tenant paths
-	// (ValidateStoragePathTenant). Embed routes use their own
+	// (validateUnambiguousStorageTenant). Embed routes use their own
 	// /embed/.../files handler.
 	r.GET(
 		"/files",
@@ -470,9 +535,15 @@ func newKBScopedFileServeHandlerWithResources(
 			return
 		}
 
+		if err := validateUnambiguousStorageTenant(filePath, ownerTenantID); err != nil {
+			logger.Warnf(ctx, "[Router] /knowledge-bases/:id/files denied ambiguous tenant path: owner_tenant_id=%d err=%v",
+				ownerTenantID, err)
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: file path not accessible"})
+			return
+		}
 		if err := secutils.ValidateKBScopedStoragePath(filePath, ownerTenantID); err != nil {
-			logger.Warnf(ctx, "[Router] /knowledge-bases/:id/files denied path not allowed for KB proxy: owner_tenant_id=%d file_path=%q err=%v",
-				ownerTenantID, filePath, err)
+			logger.Warnf(ctx, "[Router] /knowledge-bases/:id/files denied path not allowed for KB proxy: owner_tenant_id=%d err=%v",
+				ownerTenantID, err)
 			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: file path not accessible"})
 			return
 		}
@@ -597,7 +668,7 @@ func newMessageScopedFileServeHandler(
 		// Registered resources carry authoritative tenant ownership. Legacy
 		// provider paths must still encode the authorized owner tenant.
 		if resource == nil {
-			if err := secutils.ValidateStoragePathTenant(resolvedPath, ownerTenantID); err != nil {
+			if err := validateUnambiguousStorageTenant(resolvedPath, ownerTenantID); err != nil {
 				logger.Warnf(ctx,
 					"[Router] message files denied cross-tenant or invalid path: owner_tenant_id=%d file_path=%q err=%v",
 					ownerTenantID, resolvedPath, err)
@@ -715,13 +786,13 @@ func presignedFileHandler(tenantService interfaces.TenantService, absDir string,
 		sig := strings.TrimSpace(c.Query("sig"))
 
 		if filePath == "" || tenantIDStr == "" || expiresStr == "" || sig == "" {
-			logger.Warnf(ctx, "[Router] /files/presigned missing params: client_ip=%s ua=%q file_path=%q tenant_id=%q expires=%q has_sig=%v",
-				clientIP, userAgent, filePath, tenantIDStr, expiresStr, sig != "")
+			logger.Warnf(ctx, "[Router] /files/presigned missing params: client_ip=%s ua=%q tenant_id=%q expires=%q has_file_path=%v has_sig=%v",
+				clientIP, userAgent, tenantIDStr, expiresStr, filePath != "", sig != "")
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing required parameters"})
 			return
 		}
 		if strings.Contains(filePath, "..") {
-			logger.Warnf(ctx, "[Router] /files/presigned rejected path traversal: client_ip=%s file_path=%q", clientIP, filePath)
+			logger.Warnf(ctx, "[Router] /files/presigned rejected path traversal: client_ip=%s", clientIP)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file path"})
 			return
 		}
@@ -738,9 +809,14 @@ func presignedFileHandler(tenantService interfaces.TenantService, absDir string,
 		// with, the IM platform cached an expired URL, or SYSTEM_AES_KEY was
 		// rotated without invalidating in-flight links.
 		if !secutils.VerifyFileURLSig(filePath, tenantID, expiresStr, sig) {
-			logger.Warnf(ctx, "[Router] /files/presigned sig invalid or expired: client_ip=%s ua=%q tenant_id=%d file_path=%q expires=%s",
-				clientIP, userAgent, tenantID, filePath, expiresStr)
+			logger.Warnf(ctx, "[Router] /files/presigned sig invalid or expired: client_ip=%s ua=%q tenant_id=%d expires=%s",
+				clientIP, userAgent, tenantID, expiresStr)
 			c.JSON(http.StatusForbidden, gin.H{"error": "invalid or expired signature"})
+			return
+		}
+		if err := validateUnambiguousStorageTenant(filePath, tenantID); err != nil {
+			logger.Warnf(ctx, "[Router] /files/presigned path tenant mismatch: client_ip=%s tenant_id=%d", clientIP, tenantID)
+			c.JSON(http.StatusForbidden, gin.H{"error": "file path not accessible"})
 			return
 		}
 
@@ -767,14 +843,14 @@ func presignedFileHandler(tenantService interfaces.TenantService, absDir string,
 		// mysteriously fail.
 		reader, err := fileSvc.GetFile(ctx, filePath)
 		if err != nil {
-			logger.Warnf(ctx, "[Router] /files/presigned get file failed: client_ip=%s tenant_id=%d provider=%s path=%q err=%v",
-				clientIP, tenantID, resolvedProvider, filePath, err)
+			logger.Warnf(ctx, "[Router] /files/presigned get file failed: client_ip=%s tenant_id=%d provider=%s err=%v",
+				clientIP, tenantID, resolvedProvider, err)
 			c.Status(http.StatusNotFound)
 			return
 		}
 
 		contentType, inline := secutils.SafeContentTypeByFilename(filePath)
-		streamStoredFile(c, reader, contentType, inline, "public, max-age=86400", "/files/presigned")
+		streamStoredFile(c, reader, contentType, inline, presignedCacheControl(expiresStr, time.Now()), "/files/presigned")
 	}
 }
 
@@ -797,55 +873,72 @@ func servePresignedPreview(r *gin.Engine, cfg *config.Config, storageResolver in
 	r.GET("/api/v1/files/presigned-preview",
 		middleware.DenyAPIKeyPrincipal(),
 		middleware.RequireRole(types.TenantRoleAdmin, cfg),
-		func(c *gin.Context) {
-			ctx := c.Request.Context()
-			filePath, ok := requireFilePathQuery(c)
-			if !ok {
-				return
-			}
+		newPresignedPreviewHandler(absDir, storageResolver))
+}
 
-			tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-			if tenant == nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: workspace context missing"})
-				return
-			}
+func newPresignedPreviewHandler(absDir string, storageResolver interfaces.StorageBackendResolver) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		filePath, ok := requireFilePathQuery(c)
+		if !ok {
+			return
+		}
 
-			backendID, provider := parseStorageTarget(filePath)
-			fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error":    err.Error(),
-					"provider": provider,
-					"hint":     "workspace storage config is missing or incomplete for this provider",
-				})
-				return
-			}
+		tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+		if tenant == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: workspace context missing"})
+			return
+		}
+		if err := validateUnambiguousStorageTenant(filePath, tenant.ID); err != nil {
+			logger.Warnf(ctx,
+				"[Router] /files/presigned-preview denied cross-tenant or invalid path: tenant_id=%d err=%v",
+				tenant.ID, err)
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: file path not accessible"})
+			return
+		}
 
-			httpURL, err := fileSvc.GetFileURL(ctx, filePath)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":    err.Error(),
-					"provider": resolvedProvider,
-					"hint":     "GetFileURL failed; for local storage this usually means APP_EXTERNAL_URL is unset",
-				})
-				return
-			}
-
-			// Detect the "no-op" case where local storage falls back to the
-			// provider:// path because APP_EXTERNAL_URL is missing. Surfacing
-			// this explicitly is the whole point of the endpoint.
-			rewritten := httpURL != filePath
-			hint := ""
-			if !rewritten {
-				hint = "URL unchanged; for local storage set APP_EXTERNAL_URL to enable presigned HTTP URLs"
-			}
-
-			c.JSON(http.StatusOK, gin.H{
-				"file_path": filePath,
-				"provider":  resolvedProvider,
-				"url":       httpURL,
-				"rewritten": rewritten,
-				"hint":      hint,
+		backendID, provider := parseStorageTarget(filePath)
+		fileSvc, resolvedProvider, err := resolveFileService(ctx, tenant, backendID, provider, absDir, storageResolver)
+		if err != nil {
+			logger.Warnf(ctx,
+				"[Router] /files/presigned-preview resolve file service failed: tenant_id=%d provider=%s path=%q err=%v",
+				tenant.ID, provider, filePath, err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":    "workspace storage configuration is unavailable",
+				"provider": provider,
+				"hint":     "workspace storage config is missing or incomplete for this provider",
 			})
+			return
+		}
+
+		httpURL, err := fileSvc.GetFileURL(ctx, filePath)
+		if err != nil {
+			logger.Warnf(ctx,
+				"[Router] /files/presigned-preview generate URL failed: tenant_id=%d provider=%s path=%q err=%v",
+				tenant.ID, resolvedProvider, filePath, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":    "failed to generate file URL",
+				"provider": resolvedProvider,
+				"hint":     "GetFileURL failed; for local storage this usually means APP_EXTERNAL_URL is unset",
+			})
+			return
+		}
+
+		// Detect the "no-op" case where local storage falls back to the
+		// provider:// path because APP_EXTERNAL_URL is missing. Surfacing
+		// this explicitly is the whole point of the endpoint.
+		rewritten := httpURL != filePath
+		hint := ""
+		if !rewritten {
+			hint = "URL unchanged; for local storage set APP_EXTERNAL_URL to enable presigned HTTP URLs"
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"file_path": filePath,
+			"provider":  resolvedProvider,
+			"url":       httpURL,
+			"rewritten": rewritten,
+			"hint":      hint,
 		})
+	}
 }

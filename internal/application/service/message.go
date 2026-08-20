@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 // regThinkIndex matches <think>...</think> blocks for stripping from KB index content.
@@ -499,7 +500,7 @@ func (s *messageService) GetSessionArtifacts(
 // SearchMessages searches messages by keyword and/or vector similarity across all sessions of the current tenant.
 // Vector search is delegated to the chat history knowledge base's HybridSearch (configured via ChatHistoryConfig).
 func (s *messageService) SearchMessages(ctx context.Context, params *types.MessageSearchParams) (*types.MessageSearchResult, error) {
-	logger.Infof(ctx, "Start searching messages, query: %s, mode: %s", params.Query, params.Mode)
+	logger.Infof(ctx, "Start searching messages, query=%q mode=%s", secutils.SanitizeAuditLog(params.Query), params.Mode)
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 

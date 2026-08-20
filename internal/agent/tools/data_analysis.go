@@ -246,7 +246,8 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 
 	if !isReadOnly {
 		// Reject modification queries
-		logger.Warnf(ctx, "[Tool][DataAnalysis] Modification query rejected for session %s: %s", t.sessionID, input.Sql)
+		logger.Warnf(ctx, "[Tool][DataAnalysis] Modification query rejected for session %s sql=%q",
+			t.sessionID, logger.AuditText(input.Sql, 8192))
 		return &types.ToolResult{
 			Success: false,
 			Error:   "DuckDB tool only supports read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, PRAGMA). Modification operations (INSERT, UPDATE, DELETE, CREATE, DROP, etc.) are not allowed.",
@@ -268,7 +269,8 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		}, fmt.Errorf("SQL validation failed: %v", validation.Errors)
 	}
 
-	logger.Infof(ctx, "[Tool][DataAnalysis] Received SQL query for session %s: %s", t.sessionID, input.Sql)
+	logger.Infof(ctx, "[Tool][DataAnalysis] Received SQL query for session %s sql=%q",
+		t.sessionID, logger.AuditText(input.Sql, 8192))
 	// Execute single query and get results
 	results, err := t.executeSingleQuery(ctx, input.Sql)
 	if err != nil {

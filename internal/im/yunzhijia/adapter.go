@@ -362,7 +362,9 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("yunzhijia sendMsgUrl returned %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "Yunzhijia send message failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("yunzhijia sendMsgUrl returned %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	return nil
@@ -395,7 +397,9 @@ func (a *Adapter) DownloadFile(ctx context.Context, msg *im.IncomingMessage) (io
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("download file returned %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "Yunzhijia download failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, "", fmt.Errorf("download file returned %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	fileName := msg.FileName
@@ -551,7 +555,9 @@ func (a *Adapter) getAppAccessToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("read yunzhijia token response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("yunzhijia token endpoint returned %d: %s", resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "Yunzhijia access token request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return "", fmt.Errorf("yunzhijia token endpoint returned %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	var tokenResp appAccessTokenResponse

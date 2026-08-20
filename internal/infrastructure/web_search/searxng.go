@@ -112,7 +112,7 @@ func (p *SearxngProvider) Search(
 	q.Set("language", "all")
 
 	reqURL := p.baseURL + "/search?" + q.Encode()
-	logger.Infof(ctx, "[WebSearch][SearXNG] query=%q maxResults=%d url=%s", query, maxResults, p.baseURL)
+	logger.Infof(ctx, "[WebSearch][SearXNG] query=%q maxResults=%d", logger.AuditText(query, 4096), maxResults)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -129,7 +129,9 @@ func (p *SearxngProvider) Search(
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("searxng returned status %d: %s", resp.StatusCode, string(body))
+		logger.Warnf(ctx, "[WebSearch][SearXNG] API returned status %d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("searxng returned status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	var data searxngResponse

@@ -2,6 +2,8 @@ package logger
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,207 @@ func TestFormat_DefaultModeUnchanged(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "\n") {
 		t.Errorf("default output should end with newline, got %q", got)
+	}
+}
+
+func TestFormat_PreservesAuditContentAndRedactsCredentials(t *testing.T) {
+	f := &CustomFormatter{}
+	entry := newEntry(logrus.InfoLevel,
+		`员工上传了报价单，Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature`,
+		logrus.Fields{
+			"document_title": "客户年度方案",
+			"api_key":        "sk-abcdefghijk",
+		})
+
+	out, err := f.Format(entry)
+	if err != nil {
+		t.Fatalf("Format returned error: %v", err)
+	}
+	got := string(out)
+	for _, businessText := range []string{"员工上传了报价单", "客户年度方案"} {
+		if !strings.Contains(got, businessText) {
+			t.Fatalf("审计日志丢失业务文本 %q: %s", businessText, got)
+		}
+	}
+	for _, credential := range []string{"eyJhbGciOiJIUzI1NiJ9", "signature", "sk-abcdefghijk"} {
+		if strings.Contains(got, credential) {
+			t.Fatalf("日志格式化器泄露凭据 %q: %s", credential, got)
+		}
+	}
+}
+
+func TestAuditTextRedactsCredentialsAndCapsRunes(t *testing.T) {
+	got := AuditText("公司正文 sk-abcdefghijk 后续内容", 8)
+	if strings.Contains(got, "sk-abcdefghijk") {
+		t.Fatalf("AuditText leaked credential: %s", got)
+	}
+	if len([]rune(got)) != 11 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("AuditText did not apply rune cap: %q", got)
+	}
+}
+
+func TestOpenLogFileEnforcesPrivatePermissions(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit", "weknora.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := openLogFile(logPath)
+	if err != nil {
+		t.Fatalf("openLogFile: %v", err)
+	}
+	defer writer.Close()
+
+	fileInfo, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("日志文件权限 = %o, want 600", got)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("日志目录权限 = %o, want 700", got)
+	}
+}
+
+func TestLLMDebugLogStaysInPrivateDirectoryAndRedactsOnlyCredentials(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	llmDebug.mu.Lock()
+	oldEnabled, oldDir := llmDebug.enabled, llmDebug.dir
+	llmDebug.enabled, llmDebug.dir = true, dir
+	llmDebug.mu.Unlock()
+	t.Cleanup(func() {
+		llmDebug.mu.Lock()
+		llmDebug.enabled, llmDebug.dir = oldEnabled, oldDir
+		llmDebug.mu.Unlock()
+	})
+
+	ctx := WithRequestID(context.Background(), "../../outside")
+	LLMDebugLog(ctx, &LLMCallRecord{
+		CallType: "Chat Stream",
+		Model:    "company-model",
+		Sections: []RecordSection{{
+			Title:   "Request",
+			Content: "员工问题第一行\n员工问题第二行\nimage_url=https://cdn.example.com/a.png\napi_key=private-key-value",
+		}},
+	})
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("调试日志文件数 = %d, want 1", len(entries))
+	}
+	if strings.Contains(entries[0].Name(), "/") || strings.Contains(entries[0].Name(), "..") {
+		t.Fatalf("不安全的调试日志文件名: %q", entries[0].Name())
+	}
+	path := filepath.Join(dir, entries[0].Name())
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("LLM 调试日志权限 = %o, want 600", got)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, businessText := range []string{"员工问题第一行\n员工问题第二行", "image_url=https://cdn.example.com/a.png", "company-model"} {
+		if !strings.Contains(got, businessText) {
+			t.Fatalf("LLM 审计日志丢失业务内容 %q: %s", businessText, got)
+		}
+	}
+	if strings.Contains(got, "private-key-value") || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("LLM 审计日志凭据脱敏失败: %s", got)
+	}
+}
+
+func TestSanitizingFormatterProtectsJSONAndTraceFields(t *testing.T) {
+	f := &sanitizingFormatter{inner: &logrus.JSONFormatter{DisableTimestamp: true}}
+	entry := newEntry(logrus.InfoLevel, "用户查询 token=opaque-value", logrus.Fields{
+		"request_id":     "session_token=trace-secret",
+		"mineru_api_key": "opaque-structured-secret",
+		"folder_token":   "folder-business-id",
+		"payload": map[string]any{
+			"content":  "员工正文",
+			"id_token": "identity-secret",
+		},
+	})
+	out, err := f.Format(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, businessText := range []string{"用户查询", "员工正文", "folder-business-id"} {
+		if !strings.Contains(got, businessText) {
+			t.Fatalf("JSON 日志丢失业务文本 %q: %s", businessText, got)
+		}
+	}
+	for _, secret := range []string{"opaque-value", "trace-secret", "identity-secret", "opaque-structured-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("JSON 日志泄露凭据 %q: %s", secret, got)
+		}
+	}
+}
+
+func TestSanitizingFormatterPreservesCompanyAuditDimensions(t *testing.T) {
+	f := &sanitizingFormatter{inner: &logrus.JSONFormatter{DisableTimestamp: true}}
+	entry := newEntry(logrus.InfoLevel, "员工执行文档解析", logrus.Fields{
+		"actor_id":      "employee-42",
+		"document_name": "客户报价单.pdf",
+		"summary":       "年度采购摘要",
+		"source_url":    "https://docs.example.com/报价单",
+		"image_url":     "https://cdn.example.com/chart.png",
+		"model_result":  "报价风险中等",
+		"parser_result": "提取 28 页",
+		"password":      "arbitrary-password-secret",
+	})
+	out, err := f.Format(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, businessText := range []string{
+		"员工执行文档解析", "employee-42", "客户报价单.pdf", "年度采购摘要",
+		"https://docs.example.com/报价单", "https://cdn.example.com/chart.png",
+		"报价风险中等", "提取 28 页",
+	} {
+		if !strings.Contains(got, businessText) {
+			t.Fatalf("公司审计日志丢失 %q: %s", businessText, got)
+		}
+	}
+	if strings.Contains(got, "arbitrary-password-secret") {
+		t.Fatalf("公司审计日志泄露密码: %s", got)
+	}
+}
+
+func TestSanitizingCustomFormatterRedactsExactlyOnce(t *testing.T) {
+	f := &sanitizingFormatter{inner: &CustomFormatter{}}
+	entry := newEntry(logrus.InfoLevel, "connector token=opaque-secret base=https://docs.example.com", nil)
+	out, err := f.Format(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "token=[REDACTED] base=https://docs.example.com") {
+		t.Fatalf("文本日志脱敏格式错误: %s", got)
+	}
+	if strings.Contains(got, "opaque-secret") || strings.Contains(got, "[REDACTED]]") {
+		t.Fatalf("文本日志重复脱敏或泄漏凭据: %s", got)
 	}
 }
 

@@ -2397,7 +2397,8 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		Merges map[string]string `json:"merges"`
 	}
 	if err := json.Unmarshal([]byte(dedupeJSON), &dedupeResult); err != nil {
-		logger.Warnf(ctx, "wiki ingest: failed to parse dedup JSON: %v\nRaw: %s", err, dedupeJSON)
+		logger.Warnf(ctx, "wiki ingest: failed to parse dedup JSON: %v response=%q",
+			err, logger.AuditText(dedupeJSON, 8192))
 		return entities, concepts
 	}
 

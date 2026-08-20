@@ -1635,43 +1635,51 @@ type ModelTestRequest struct {
 	ExtraConfig               map[string]string `json:"extraConfig,omitempty"`
 	// AppSecret 用于 LKEAP / Volcengine Rerank 等需要第二段密钥的场景（对应模型 Parameters.AppSecret）。
 	AppSecret string `json:"appSecret,omitempty"`
-	// ModelID, when set, instructs the handler to substitute any missing
-	// secrets (APIKey, AppSecret via ExtraConfig) from the stored model
-	// record before assembling the test client. This lets the "Test
-	// connection" button work on existing models without making the
-	// frontend reload — and ship — the plaintext API key. Other fields
-	// (BaseURL, ModelName, etc.) on this request still override the
-	// stored values, so a user can validate a new endpoint against the
-	// existing credentials in one click.
+	// ModelID 非空时，后端必须完整采用已保存模型的连接配置。调用方不能把
+	// 已保存凭据与自定义 BaseURL、请求头或模型名混用；测试未保存配置时应
+	// 省略 ModelID 并显式提交所需凭据。
 	ModelID string `json:"modelId,omitempty"`
 }
 
-// fillSecretsFromStoredModel mutates req in place: if req.ModelID is set
-// and a secret field on the request is empty, the corresponding value from
-// the stored (and decrypted) model is copied in. Non-empty request values
-// are always preferred — they represent the user actively typing a new key
-// they want to verify. Missing or inaccessible model is treated as a no-op
-// (the connection test will fail downstream with a clearer "missing apiKey"
-// error than we could produce here).
-func (h *InitializationHandler) fillSecretsFromStoredModel(ctx context.Context, req *ModelTestRequest) {
-	if req == nil || req.ModelID == "" {
-		return
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
 	}
-	if req.APIKey != "" && req.AppSecret != "" {
-		return
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+// resolveStoredModelTestRequest 使用租户可见的已保存模型覆盖整个测试请求。
+// 这是凭据边界：只补 API Key 会允许调用者把公司凭据发送到任意 BaseURL。
+func (h *InitializationHandler) resolveStoredModelTestRequest(
+	ctx context.Context,
+	req *ModelTestRequest,
+) error {
+	if req == nil || req.ModelID == "" {
+		return nil
 	}
 	stored, err := h.modelService.GetModelByID(ctx, req.ModelID)
 	if err != nil || stored == nil {
-		logger.Warnf(ctx, "test-connection: stored model %s not found, leaving secrets empty: %v",
+		logger.Warnf(ctx, "test-connection: stored model %s is unavailable: %v",
 			utils.SanitizeForLog(req.ModelID), err)
-		return
+		return errors.NewNotFoundError("模型不存在或无权访问")
 	}
-	if req.APIKey == "" {
-		req.APIKey = stored.Parameters.APIKey
-	}
-	if req.AppSecret == "" {
-		req.AppSecret = stored.Parameters.AppSecret
-	}
+
+	req.Source = string(stored.Source)
+	req.ModelName = stored.Name
+	req.BaseURL = stored.Parameters.BaseURL
+	req.APIKey = stored.Parameters.APIKey
+	req.Provider = stored.Parameters.Provider
+	req.InterfaceType = stored.Parameters.InterfaceType
+	req.Dimension = stored.Parameters.EmbeddingParameters.Dimension
+	req.SupportsDimensionOverride = stored.Parameters.EmbeddingParameters.SupportsDimensionOverride
+	req.CustomHeaders = cloneStringMap(stored.Parameters.CustomHeaders)
+	req.ExtraConfig = cloneStringMap(stored.Parameters.ExtraConfig)
+	req.AppSecret = stored.Parameters.AppSecret
+	return nil
 }
 
 // RemoteModelCheckRequest 兼容旧 swagger 定义。
@@ -1703,6 +1711,7 @@ func (h *InitializationHandler) buildTestModel(
 		source = defaultSource
 	}
 	return &types.Model{
+		ID:     req.ModelID,
 		Name:   req.ModelName,
 		Type:   modelType,
 		Source: source,
@@ -1762,7 +1771,10 @@ func (h *InitializationHandler) CheckRemoteModel(c *gin.Context) {
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
-	h.fillSecretsFromStoredModel(ctx, &req)
+	if err := h.resolveStoredModelTestRequest(ctx, &req); err != nil {
+		c.Error(err)
+		return
+	}
 
 	if req.ModelName == "" || req.BaseURL == "" {
 		logger.Error(ctx, "Model name and base URL are required")
@@ -1785,7 +1797,7 @@ func (h *InitializationHandler) CheckRemoteModel(c *gin.Context) {
 	model := h.buildTestModel(&req, types.ModelTypeKnowledgeQA, types.ModelSourceRemote)
 	available, message := h.checkChatModelConnection(ctx, model, appID, appSecret)
 
-	logger.Infof(ctx, "Remote model check completed, available: %v, message: %s", available, message)
+	logger.Infof(ctx, "Remote model check completed, available: %v", available)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -1819,7 +1831,10 @@ func (h *InitializationHandler) TestEmbeddingModel(c *gin.Context) {
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
-	h.fillSecretsFromStoredModel(ctx, &req)
+	if err := h.resolveStoredModelTestRequest(ctx, &req); err != nil {
+		c.Error(err)
+		return
+	}
 	if req.Source == "" {
 		req.Source = string(types.ModelSourceRemote)
 	}
@@ -1927,11 +1942,6 @@ func (h *InitializationHandler) checkChatModelConnection(
 	_, err = chatInstance.Chat(ctx, testMessages, testOptions)
 	if err != nil {
 		errMsg := err.Error()
-		// 400 = endpoint reachable + auth ok, just a parameter mismatch
-		// (e.g. max_tokens vs max_completion_tokens). Treat as success.
-		if strings.Contains(errMsg, "status code: 400") {
-			return true, "连接正常，模型可用"
-		}
 		// For every other failure mode we surface a human-readable hint
 		// AND the upstream error verbatim. Swallowing the underlying
 		// message used to hide things like the actual URL the SDK
@@ -1987,7 +1997,10 @@ func (h *InitializationHandler) CheckRerankModel(c *gin.Context) {
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
-	h.fillSecretsFromStoredModel(ctx, &req)
+	if err := h.resolveStoredModelTestRequest(ctx, &req); err != nil {
+		c.Error(err)
+		return
+	}
 
 	if req.ModelName == "" || req.BaseURL == "" {
 		logger.Error(ctx, "Model name and base URL are required")
@@ -2015,7 +2028,7 @@ func (h *InitializationHandler) CheckRerankModel(c *gin.Context) {
 	}
 	available, message := h.checkRerankModelConnection(ctx, model, appID, appSecret)
 
-	logger.Infof(ctx, "Rerank model check completed, available: %v, message: %s", available, message)
+	logger.Infof(ctx, "Rerank model check completed, available: %v", available)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -2049,7 +2062,10 @@ func (h *InitializationHandler) CheckASRModel(c *gin.Context) {
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
-	h.fillSecretsFromStoredModel(ctx, &req)
+	if err := h.resolveStoredModelTestRequest(ctx, &req); err != nil {
+		c.Error(err)
+		return
+	}
 
 	if req.ModelName == "" || req.BaseURL == "" {
 		logger.Error(ctx, "Model name and base URL are required for ASR check")
@@ -2113,7 +2129,7 @@ func (h *InitializationHandler) CheckASRModel(c *gin.Context) {
 		message = fmt.Sprintf("ASR连接成功，转写结果: %s", text)
 	}
 
-	logger.Infof(ctx, "ASR model check completed, available: %v, message: %s", available, message)
+	logger.Infof(ctx, "ASR model check completed, available: %v", available)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

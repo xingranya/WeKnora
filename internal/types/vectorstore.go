@@ -159,17 +159,12 @@ type ConnectionConfig struct {
 // Value implements the driver.Valuer interface.
 // Encrypts Password and APIKey before persisting to database.
 func (c ConnectionConfig) Value() (driver.Value, error) {
-	if key := utils.GetAESKey(); key != nil {
-		if c.Password != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.Password, key); err == nil {
-				c.Password = encrypted
-			}
-		}
-		if c.APIKey != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.APIKey, key); err == nil {
-				c.APIKey = encrypted
-			}
-		}
+	var err error
+	if c.Password, err = encryptSecretForStorage(c.Password, "vector_store.connection.password"); err != nil {
+		return nil, err
+	}
+	if c.APIKey, err = encryptSecretForStorage(c.APIKey, "vector_store.connection.api_key"); err != nil {
+		return nil, err
 	}
 	return json.Marshal(c)
 }

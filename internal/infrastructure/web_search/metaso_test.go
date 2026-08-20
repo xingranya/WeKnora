@@ -81,7 +81,7 @@ func TestMetasoProviderHTTPError(t *testing.T) {
 	defer server.Close()
 	metaso := &MetasoProvider{client: server.Client(), baseURL: server.URL, apiKey: "bad", scope: defaultMetasoScope}
 	_, err := metaso.Search(context.Background(), "test", 1, false)
-	if err == nil || !strings.Contains(err.Error(), "invalid API key") {
+	if err == nil || !strings.Contains(err.Error(), "invalid credentials") || strings.Contains(err.Error(), "invalid API key") {
 		t.Fatalf("error = %v", err)
 	}
 }

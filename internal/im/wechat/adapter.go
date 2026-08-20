@@ -300,7 +300,9 @@ func (a *Adapter) ilinkPost(ctx context.Context, path string, payload interface{
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ilink api %s returned status %d: %s", path, resp.StatusCode, string(respBody))
+		logger.Errorf(ctx, "WeChat iLink request failed: path=%q status=%d response=%q",
+			logger.AuditText(path, 4096), resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return fmt.Errorf("ilink API request returned status %d (path_chars=%d response_bytes=%d)", resp.StatusCode, len(path), len(respBody))
 	}
 
 	return nil

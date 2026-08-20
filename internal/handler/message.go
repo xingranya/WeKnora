@@ -269,8 +269,9 @@ func (h *MessageHandler) SearchMessages(c *gin.Context) {
 		SessionIDs: request.SessionIDs,
 	}
 
-	logger.Infof(ctx, "Searching messages with params: query=%s, mode=%s, limit=%d, session_ids=%v",
-		params.Query, params.Mode, params.Limit, params.SessionIDs)
+	logger.Infof(ctx, "Searching messages with params: actor_user_id=%s tenant_id=%d query=%q mode=%s limit=%d sessions=%d",
+		secutils.SanitizeForLog(c.GetString(types.UserIDContextKey.String())), c.GetUint64(types.TenantIDContextKey.String()),
+		secutils.SanitizeAuditLog(params.Query), params.Mode, params.Limit, len(params.SessionIDs))
 
 	result, err := h.MessageService.SearchMessages(ctx, params)
 	if err != nil {

@@ -156,12 +156,65 @@ func (c *RemoteAPIChat) buildOutbound(
 	return body, endpoint, useRawHTTP, nil
 }
 
-// logRequest 记录请求日志
-func (c *RemoteAPIChat) logRequest(ctx context.Context, req any, isStream bool) {
-	if jsonData, err := json.MarshalIndent(req, "", "  "); err == nil {
-		logger.Infof(ctx, "[LLM Request] model=%s, stream=%v, request:\n%s",
-			c.modelName, isStream, secutils.CompactImageDataURLForLog(string(jsonData)))
+type remoteRequestLogStats struct {
+	Model         string `json:"model"`
+	Stream        bool   `json:"stream"`
+	RequestBytes  int    `json:"request_bytes"`
+	MessagesCount int    `json:"messages_count"`
+	MessagesBytes int    `json:"messages_bytes"`
+	ToolsCount    int    `json:"tools_count"`
+	ToolsBytes    int    `json:"tools_bytes"`
+	SummaryError  bool   `json:"summary_error"`
+}
+
+// requestLogStats 只提取请求结构统计，任何消息、内容或工具定义原文都不会进入返回值。
+func (c *RemoteAPIChat) requestLogStats(req any, isStream bool) remoteRequestLogStats {
+	stats := remoteRequestLogStats{Model: c.modelName, Stream: isStream}
+	data, err := json.Marshal(req)
+	if err != nil {
+		stats.SummaryError = true
+		return stats
 	}
+	stats.RequestBytes = len(data)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		stats.SummaryError = true
+		return stats
+	}
+	stats.MessagesCount, stats.MessagesBytes = jsonArrayStats(fields["messages"])
+	stats.ToolsCount, stats.ToolsBytes = jsonArrayStats(fields["tools"])
+	return stats
+}
+
+func jsonArrayStats(raw json.RawMessage) (count, size int) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, 0
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return 0, len(raw)
+	}
+	return len(items), len(raw)
+}
+
+// logRequest 记录公司审计所需的模型请求，同时由统一日志层遮蔽认证凭据。
+func (c *RemoteAPIChat) logRequest(ctx context.Context, req any, isStream bool) {
+	stats := c.requestLogStats(req, isStream)
+	serialized, marshalErr := json.Marshal(req)
+	requestAudit := ""
+	if marshalErr == nil {
+		requestAudit = logger.AuditText(string(serialized), 16384)
+	}
+	logger.Infof(ctx,
+		"[LLM Request] model=%s stream=%v request_bytes=%d messages_count=%d messages_bytes=%d tools_count=%d tools_bytes=%d summary_error=%v request=%q",
+		stats.Model, stats.Stream, stats.RequestBytes, stats.MessagesCount, stats.MessagesBytes,
+		stats.ToolsCount, stats.ToolsBytes, stats.SummaryError || marshalErr != nil, requestAudit,
+	)
+}
+
+func (c *RemoteAPIChat) newSanitizedStreamPacketDumper(req any) *streamPacketDumper {
+	return newStreamPacketDumper(c.modelName, req)
 }
 
 // Chat 进行非流式聊天
@@ -215,8 +268,7 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 	if err := secutils.ValidateURLForSSRF(endpoint); err != nil {
 		return nil, fmt.Errorf("endpoint SSRF check failed: %w", err)
 	}
-	logger.Infof(ctx, "[LLM Request] Remote HTTP, endpoint=%s, model=%s, raw HTTP request:\n%s",
-		endpoint, c.modelName, secutils.CompactImageDataURLForLog(string(jsonData)))
+	c.logRequest(ctx, customReq, false)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -239,8 +291,10 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		logger.Errorf(ctx, "Remote chat API request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("API request failed with status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -282,7 +336,7 @@ func (c *RemoteAPIChat) ChatStream(ctx context.Context, messages []Message, opts
 	req := *(body.(*openai.ChatCompletionRequest))
 	c.logRequest(timeoutCtx, req, true)
 
-	streamDumper := newStreamPacketDumper(c.modelName, &req)
+	streamDumper := c.newSanitizedStreamPacketDumper(&req)
 	if streamDumper != nil {
 		logger.Infof(timeoutCtx, "[LLM Stream Raw Dump] writing packets to %s", streamDumper.Path())
 	}
@@ -347,12 +401,8 @@ func (c *RemoteAPIChat) chatStreamWithRawHTTP(ctx context.Context, endpoint stri
 		return nil, fmt.Errorf("endpoint SSRF check failed: %w", err)
 	}
 
-	if prettyJSON, pErr := json.MarshalIndent(customReq, "", "  "); pErr == nil {
-		logger.Infof(ctx, "[LLM Stream Request] endpoint=%s, model=%s, stream=true, request:\n%s",
-			endpoint, c.modelName, secutils.CompactImageDataURLForLog(string(prettyJSON)))
-	} else {
-		logger.Infof(ctx, "[LLM Stream] endpoint=%s, model=%s", endpoint, c.modelName)
-	}
+	c.logRequest(ctx, customReq, true)
+	logger.Infof(ctx, "[LLM Stream] endpoint=%s, model=%s", endpoint, c.modelName)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -371,13 +421,15 @@ func (c *RemoteAPIChat) chatStreamWithRawHTTP(ctx context.Context, endpoint stri
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		resp.Body.Close()
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "Remote chat stream request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("API request failed with status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	streamChan := make(chan types.StreamResponse)
-	streamDumper := newStreamPacketDumper(c.modelName, customReq)
+	streamDumper := c.newSanitizedStreamPacketDumper(customReq)
 	if streamDumper != nil {
 		logger.Infof(ctx, "[LLM Stream Raw Dump] writing packets to %s", streamDumper.Path())
 	}

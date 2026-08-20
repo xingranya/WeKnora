@@ -108,17 +108,12 @@ type StorageBackendConfig struct {
 }
 
 func (c StorageBackendConfig) Value() (driver.Value, error) {
-	if key := utils.GetAESKey(); key != nil {
-		if c.AccessKeyID != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.AccessKeyID, key); err == nil {
-				c.AccessKeyID = encrypted
-			}
-		}
-		if c.SecretAccessKey != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.SecretAccessKey, key); err == nil {
-				c.SecretAccessKey = encrypted
-			}
-		}
+	var err error
+	if c.AccessKeyID, err = encryptSecretForStorage(c.AccessKeyID, "storage_backend.access_key_id"); err != nil {
+		return nil, err
+	}
+	if c.SecretAccessKey, err = encryptSecretForStorage(c.SecretAccessKey, "storage_backend.secret_access_key"); err != nil {
+		return nil, err
 	}
 	return json.Marshal(c)
 }

@@ -154,17 +154,12 @@ type Model struct {
 // Value implements the driver.Valuer interface, used to convert ModelParameters to database value.
 // Encrypts APIKey and AppSecret before persisting to database (value receiver = no memory pollution).
 func (c ModelParameters) Value() (driver.Value, error) {
-	if key := utils.GetAESKey(); key != nil {
-		if c.APIKey != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.APIKey, key); err == nil {
-				c.APIKey = encrypted
-			}
-		}
-		if c.AppSecret != "" {
-			if encrypted, err := utils.EncryptAESGCM(c.AppSecret, key); err == nil {
-				c.AppSecret = encrypted
-			}
-		}
+	var err error
+	if c.APIKey, err = encryptSecretForStorage(c.APIKey, "model.parameters.api_key"); err != nil {
+		return nil, err
+	}
+	if c.AppSecret, err = encryptSecretForStorage(c.AppSecret, "model.parameters.app_secret"); err != nil {
+		return nil, err
 	}
 	return json.Marshal(c)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 // Compile-time proof that *Connector satisfies the datasource.Connector interface.
@@ -422,18 +423,18 @@ func fetchNote(
 ) (types.FetchedItem, fetchOutcome) {
 	noteID := info.NotebookExtInfo.NotebookID
 	if noteID == "" {
-		logger.Warnf(ctx, "[IMA] note %s (title=%q) has no notebook_id, skipping", f.MediaID, f.Title)
+		logger.Warnf(ctx, "[IMA] note %s (title=%q) has no notebook_id, skipping", f.MediaID, secutils.SanitizeAuditLog(f.Title))
 		return types.FetchedItem{}, fetchSkipped
 	}
 
 	content, err := cli.GetNoteContent(ctx, noteID)
 	if err != nil {
 		logger.Warnf(ctx, "[IMA] get_doc_content(note %s, title=%q) failed, will retry next sync: %v",
-			noteID, f.Title, err)
+			noteID, secutils.SanitizeAuditLog(f.Title), err)
 		return types.FetchedItem{}, fetchFailed
 	}
 	if strings.TrimSpace(content) == "" {
-		logger.Infof(ctx, "[IMA] note %s (title=%q) is empty, skipping", noteID, f.Title)
+		logger.Infof(ctx, "[IMA] note %s (title=%q) is empty, skipping", noteID, secutils.SanitizeAuditLog(f.Title))
 		return types.FetchedItem{}, fetchSkipped
 	}
 
@@ -492,12 +493,12 @@ func fetchOneMedia(
 
 	if isSkippableMediaType(info.MediaType) {
 		logger.Infof(ctx, "[IMA] skip media %s (title=%q media_type=%d): unsupported by the IMA OpenAPI",
-			f.MediaID, f.Title, info.MediaType)
+			f.MediaID, secutils.SanitizeAuditLog(f.Title), info.MediaType)
 		return types.FetchedItem{}, fetchSkipped
 	}
 
 	if info.URLInfo.URL == "" {
-		logger.Warnf(ctx, "[IMA] media %s (title=%q) has no url_info.url, skipping", f.MediaID, f.Title)
+		logger.Warnf(ctx, "[IMA] media %s (title=%q) has no url_info.url, skipping", f.MediaID, secutils.SanitizeAuditLog(f.Title))
 		return types.FetchedItem{}, fetchSkipped
 	}
 
@@ -527,7 +528,7 @@ func fetchOneMedia(
 	body, ct, err := cli.DownloadURL(ctx, info.URLInfo)
 	if err != nil {
 		logger.Warnf(ctx, "[IMA] download media %s (title=%q) failed, will retry next sync: %v",
-			f.MediaID, f.Title, err)
+			f.MediaID, secutils.SanitizeAuditLog(f.Title), err)
 		return types.FetchedItem{}, fetchFailed
 	}
 

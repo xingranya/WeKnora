@@ -50,7 +50,8 @@ func deleteExtractedImages(ctx context.Context, fileSvc interfaces.FileService, 
 	logger.Infof(ctx, "Deleting %d extracted images", len(imageURLs))
 	for _, url := range imageURLs {
 		if err := fileSvc.DeleteFile(ctx, url); err != nil {
-			logger.Errorf(ctx, "Failed to delete extracted image %s: %v", url, err)
+			logger.Errorf(ctx, "Failed to delete extracted image url=%q: %v",
+				logger.AuditText(url, 4096), err)
 		}
 	}
 }

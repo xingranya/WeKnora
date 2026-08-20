@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,37 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestTenantAPIKeyRepositoryEncryptsAndHidesAPIKey(t *testing.T) {
+	t.Setenv("SYSTEM_AES_KEY", strings.Repeat("k", 32))
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&types.TenantAPIKey{}))
+
+	tenantID := uint64(42)
+	rawAPIKey := "sk-production-secret"
+	key := &types.TenantAPIKey{
+		TenantID: &tenantID, ScopeType: types.APIKeyScopeTenant,
+		Name: "encrypted", KeyHash: "hash-encrypted", APIKey: rawAPIKey,
+	}
+	repo := NewTenantAPIKeyRepository(db)
+	require.NoError(t, repo.CreateAPIKey(context.Background(), key))
+
+	var stored string
+	require.NoError(t, db.Table("tenant_api_keys").
+		Select("api_key").Where("id = ?", key.ID).Scan(&stored).Error)
+	require.NotEqual(t, rawAPIKey, stored)
+	require.True(t, strings.HasPrefix(stored, "enc:v1:"))
+
+	loaded, err := repo.GetAPIKeyByHash(context.Background(), key.KeyHash)
+	require.NoError(t, err)
+	// 认证热路径刻意 SkipHooks：只按 KeyHash 鉴权，不把可恢复密钥解密进内存。
+	require.Equal(t, stored, loaded.APIKey)
+	rawJSON, err := json.Marshal(loaded)
+	require.NoError(t, err)
+	require.NotContains(t, string(rawJSON), rawAPIKey)
+	require.NotContains(t, string(rawJSON), `"api_key"`)
+}
 
 func TestTenantAPIKeyRepositoryPersistsUTCExpiry(t *testing.T) {
 	t.Setenv("TZ", "Asia/Shanghai")

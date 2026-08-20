@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -77,7 +78,7 @@ func completedAnswerStream() []interfaces.StreamEvent {
 	}
 }
 
-func newContinueStreamRouter(t *testing.T) *gin.Engine {
+func newContinueStreamRouterWithEvents(t *testing.T, events []interfaces.StreamEvent) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -85,11 +86,16 @@ func newContinueStreamRouter(t *testing.T) *gin.Engine {
 	h := &Handler{
 		sessionService: &stubSessionService{},
 		messageService: &stubMessageServiceForStream{},
-		streamManager:  &stubStreamManager{events: completedAnswerStream()},
+		streamManager:  &stubStreamManager{events: events},
 		fileService:    &stubResourceFileService{},
 	}
 	r.GET("/sessions/continue-stream/:session_id", h.ContinueStream)
 	return r
+}
+
+func newContinueStreamRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	return newContinueStreamRouterWithEvents(t, completedAnswerStream())
 }
 
 func continueStream(t *testing.T, query string) (int, string) {
@@ -137,4 +143,32 @@ func TestContinueStream_RejectsInvalidResourceURLMode(t *testing.T) {
 	code, body := continueStream(t, "&resource_urls=signed")
 	assert.Equal(t, http.StatusBadRequest, code, body)
 	assert.Contains(t, body, "resource_urls")
+}
+
+func TestContinueStream_TerminalErrorReturnsWithoutWaiting(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	router := newContinueStreamRouterWithEvents(t, []interfaces.StreamEvent{{
+		ID: "error-1", Type: types.ResponseTypeError, Content: "upstream failed", Done: true,
+	}})
+	router.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodGet, "/sessions/continue-stream/sess1?message_id=msg1", nil))
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"response_type":"error"`)
+	assert.Contains(t, recorder.Body.String(), `"done":true`)
+	assert.Contains(t, recorder.Body.String(), publicSessionFailureMessage)
+	assert.NotContains(t, recorder.Body.String(), "upstream failed")
+}
+
+func TestContinueStream_StopReturnsWithoutWaiting(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	router := newContinueStreamRouterWithEvents(t, []interfaces.StreamEvent{{
+		ID: "stop-1", Type: types.ResponseType(event.EventStop), Content: "", Done: true,
+	}})
+	router.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodGet, "/sessions/continue-stream/sess1?message_id=msg1", nil))
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"response_type":"stop"`)
+	assert.Contains(t, recorder.Body.String(), `"done":true`)
 }

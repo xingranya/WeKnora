@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 // streamRawDumpDir returns the directory for per-stream raw packet dumps.
@@ -43,7 +45,10 @@ func newStreamPacketDumper(modelName string, request any) *streamPacketDumper {
 	if dir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil
 	}
 
@@ -70,8 +75,12 @@ func newStreamPacketDumper(modelName string, request any) *streamPacketDumper {
 		return nil
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		return nil
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return nil
 	}
 
@@ -81,11 +90,20 @@ func newStreamPacketDumper(modelName string, request any) *streamPacketDumper {
 }
 
 func (d *streamPacketDumper) writeRequest(request any) error {
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	sanitizedJSON := secutils.SanitizeAuditLog(string(requestJSON))
+	var sanitizedRequest any
+	if err := json.Unmarshal([]byte(sanitizedJSON), &sanitizedRequest); err != nil {
+		sanitizedRequest = sanitizedJSON
+	}
 	line, err := json.Marshal(map[string]any{
 		"type":      "request",
 		"model":     d.model,
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"data":      request,
+		"data":      sanitizedRequest,
 	})
 	if err != nil {
 		return err
@@ -112,6 +130,7 @@ func (d *streamPacketDumper) WritePacketRaw(raw []byte) {
 	if len(raw) == 0 {
 		return
 	}
+	raw = []byte(secutils.SanitizeAuditLog(string(raw)))
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -143,7 +162,7 @@ func (d *streamPacketDumper) WriteError(message string) {
 		"type":      "error",
 		"model":     d.model,
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"message":   message,
+		"message":   secutils.SanitizeAuditLog(message),
 	})
 	if err != nil {
 		return
@@ -163,7 +182,7 @@ func (d *streamPacketDumper) WriteHTTPError(statusCode int, body []byte) {
 		"status_code": statusCode,
 	}
 	if len(body) > 0 {
-		trimmed := bytesTrimSpace(body)
+		trimmed := []byte(secutils.SanitizeAuditLog(string(bytesTrimSpace(body))))
 		if json.Valid(trimmed) {
 			var parsed any
 			if json.Unmarshal(trimmed, &parsed) == nil {

@@ -122,9 +122,7 @@ func (h *SystemHandler) ListPlatformAPIKeys(c *gin.Context) {
 	}
 	response := make([]tenantAPIKeyResponse, 0, len(keys))
 	for _, key := range keys {
-		item := tenantAPIKeyForResponse(key)
-		item.APIKey = maskManagedAPIKey(key.APIKey)
-		response = append(response, item)
+		response = append(response, tenantAPIKeyForResponse(key))
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": response})
 }
@@ -174,7 +172,6 @@ func (h *SystemHandler) CreatePlatformAPIKey(c *gin.Context) {
 		return
 	}
 	item := tenantAPIKeyForResponse(result.APIKey)
-	item.APIKey = maskManagedAPIKey(result.Token)
 	h.emitAPIKeyAudit(c.Request.Context(), types.AuditActionSystemAPIKeyCreated, result.APIKey)
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,

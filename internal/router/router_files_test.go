@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -20,7 +21,14 @@ import (
 var _ interfaces.FileService = (*stubFileService)(nil)
 
 type stubFileService struct {
-	getFile func(ctx context.Context, filePath string) (io.ReadCloser, error)
+	getFile    func(ctx context.Context, filePath string) (io.ReadCloser, error)
+	getFileURL func(ctx context.Context, filePath string) (string, error)
+}
+
+type stubStorageBackendResolver struct {
+	fileService  interfaces.FileService
+	resolveCalls int
+	resolveErr   error
 }
 
 type stubResourceCatalog struct {
@@ -114,7 +122,10 @@ func (s *stubFileService) GetFile(ctx context.Context, filePath string) (io.Read
 }
 
 func (s *stubFileService) GetFileURL(ctx context.Context, filePath string) (string, error) {
-	panic("unexpected call to GetFileURL")
+	if s.getFileURL == nil {
+		panic("unexpected call to GetFileURL")
+	}
+	return s.getFileURL(ctx, filePath)
 }
 
 func (s *stubFileService) DeleteFile(ctx context.Context, filePath string) error {
@@ -123,6 +134,140 @@ func (s *stubFileService) DeleteFile(ctx context.Context, filePath string) error
 
 func (s *stubFileService) CopyFile(ctx context.Context, srcPath string, tenantID uint64, knowledgeID string) (string, error) {
 	panic("unexpected call to CopyFile")
+}
+
+func (s *stubStorageBackendResolver) ResolveFileService(
+	context.Context,
+	*types.Tenant,
+	string,
+	string,
+	string,
+) (interfaces.FileService, string, error) {
+	s.resolveCalls++
+	return s.fileService, "local", s.resolveErr
+}
+
+func (s *stubStorageBackendResolver) ResolveBackend(
+	context.Context,
+	*types.Tenant,
+	string,
+	string,
+) (*types.StorageBackend, error) {
+	panic("unexpected call to ResolveBackend")
+}
+
+func TestPresignedPreviewRejectsCrossTenantPathBeforeFileService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	getFileURLCalls := 0
+	resolver := &stubStorageBackendResolver{fileService: &stubFileService{
+		getFileURL: func(context.Context, string) (string, error) {
+			getFileURLCalls++
+			return "https://files.example.test/should-not-be-returned", nil
+		},
+	}}
+	engine := gin.New()
+	engine.GET("/api/v1/files/presigned-preview", newPresignedPreviewHandler(t.TempDir(), resolver))
+
+	filePath := "local://7/exports/private.png"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/presigned-preview?file_path="+url.QueryEscape(filePath), nil)
+	req = req.WithContext(context.WithValue(req.Context(), types.TenantInfoContextKey, &types.Tenant{ID: 42}))
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	if got, want := recorder.Code, http.StatusForbidden; got != want {
+		t.Fatalf("status = %d, want %d; body=%s", got, want, recorder.Body.String())
+	}
+	if resolver.resolveCalls != 0 {
+		t.Fatalf("ResolveFileService calls = %d, want 0", resolver.resolveCalls)
+	}
+	if getFileURLCalls != 0 {
+		t.Fatalf("GetFileURL calls = %d, want 0", getFileURLCalls)
+	}
+}
+
+func TestPresignedPreviewAllowsCurrentTenantPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const expectedURL = "https://files.example.test/current-tenant.png"
+	getFileURLCalls := 0
+	resolver := &stubStorageBackendResolver{fileService: &stubFileService{
+		getFileURL: func(_ context.Context, filePath string) (string, error) {
+			getFileURLCalls++
+			if filePath != "local://42/exports/current.png" {
+				t.Fatalf("GetFileURL path = %q", filePath)
+			}
+			return expectedURL, nil
+		},
+	}}
+	engine := gin.New()
+	engine.GET("/api/v1/files/presigned-preview", newPresignedPreviewHandler(t.TempDir(), resolver))
+
+	filePath := "local://42/exports/current.png"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/presigned-preview?file_path="+url.QueryEscape(filePath), nil)
+	req = req.WithContext(context.WithValue(req.Context(), types.TenantInfoContextKey, &types.Tenant{ID: 42}))
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	if got, want := recorder.Code, http.StatusOK; got != want {
+		t.Fatalf("status = %d, want %d; body=%s", got, want, recorder.Body.String())
+	}
+	if getFileURLCalls != 1 {
+		t.Fatalf("GetFileURL calls = %d, want 1", getFileURLCalls)
+	}
+	if !strings.Contains(recorder.Body.String(), expectedURL) {
+		t.Fatalf("body = %s, want URL %q", recorder.Body.String(), expectedURL)
+	}
+}
+
+func TestPresignedPreviewDoesNotReturnResolverErrorBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const privateError = "dial failed: client_secret=private-storage-secret"
+	resolver := &stubStorageBackendResolver{resolveErr: errors.New(privateError)}
+	engine := gin.New()
+	engine.GET("/api/v1/files/presigned-preview", newPresignedPreviewHandler(t.TempDir(), resolver))
+
+	filePath := "local://42/exports/current.png"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/presigned-preview?file_path="+url.QueryEscape(filePath), nil)
+	req = req.WithContext(context.WithValue(req.Context(), types.TenantInfoContextKey, &types.Tenant{ID: 42}))
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	if got, want := recorder.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("status = %d, want %d; body=%s", got, want, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), privateError) || strings.Contains(recorder.Body.String(), "private-storage-secret") {
+		t.Fatalf("预签名预览回传内部错误: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "workspace storage configuration is unavailable") {
+		t.Fatalf("预签名预览缺少稳定公开错误: %s", recorder.Body.String())
+	}
+}
+
+func TestPresignedPreviewDoesNotReturnGetFileURLErrorBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const privateError = "upstream body: api_key=private-provider-key"
+	resolver := &stubStorageBackendResolver{fileService: &stubFileService{
+		getFileURL: func(context.Context, string) (string, error) {
+			return "", errors.New(privateError)
+		},
+	}}
+	engine := gin.New()
+	engine.GET("/api/v1/files/presigned-preview", newPresignedPreviewHandler(t.TempDir(), resolver))
+
+	filePath := "local://42/exports/current.png"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/presigned-preview?file_path="+url.QueryEscape(filePath), nil)
+	req = req.WithContext(context.WithValue(req.Context(), types.TenantInfoContextKey, &types.Tenant{ID: 42}))
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	if got, want := recorder.Code, http.StatusInternalServerError; got != want {
+		t.Fatalf("status = %d, want %d; body=%s", got, want, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), privateError) || strings.Contains(recorder.Body.String(), "private-provider-key") {
+		t.Fatalf("预签名预览回传内部错误: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "failed to generate file URL") {
+		t.Fatalf("预签名预览缺少稳定公开错误: %s", recorder.Body.String())
+	}
 }
 
 func TestServeFilesFallsBackToGlobalFileService(t *testing.T) {

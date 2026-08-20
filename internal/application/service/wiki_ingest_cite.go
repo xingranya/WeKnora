@@ -110,7 +110,8 @@ func (s *wikiIngestService) extractCandidateSlugs(
 
 	var result combinedExtraction
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		logger.Warnf(ctx, "wiki ingest: failed to parse candidate slug JSON: %v\nRaw: %s", err, raw)
+		logger.Warnf(ctx, "wiki ingest: failed to parse candidate slug JSON: %v response=%q",
+			err, logger.AuditText(raw, 8192))
 		return nil, nil, nil, fmt.Errorf("parse candidate slug JSON: %w", err)
 	}
 
@@ -293,7 +294,8 @@ func (s *wikiIngestService) classifyChunkCitations(
 
 			var parsed citationBatchResult
 			if jerr := json.Unmarshal([]byte(raw), &parsed); jerr != nil {
-				logger.Warnf(ectx, "wiki ingest: citation batch %d parse failed: %v\nRaw: %s", batchIdx, jerr, raw)
+				logger.Warnf(ectx, "wiki ingest: citation batch %d parse failed: %v response=%q",
+					batchIdx, jerr, logger.AuditText(raw, 8192))
 				return nil
 			}
 

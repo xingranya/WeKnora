@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
@@ -78,7 +79,9 @@ func (s *QRCodeService) GetLoginQRCode(ctx context.Context) (*QRCodeResult, erro
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("qrcode API returned status %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "WeChat QR code request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("qrcode API returned status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	var result struct {
@@ -86,11 +89,14 @@ func (s *QRCodeService) GetLoginQRCode(ctx context.Context) (*QRCodeResult, erro
 		QRCodeImgContent string `json:"qrcode_img_content"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(body))
+		logger.Errorf(ctx, "WeChat QR code response decode failed: response=%q err=%v",
+			logger.AuditText(string(body), 4096), err)
+		return nil, fmt.Errorf("decode qrcode response (%d bytes): %w", len(body), err)
 	}
 
 	if result.QRCode == "" {
-		return nil, fmt.Errorf("empty qrcode in response: %s", string(body))
+		logger.Errorf(ctx, "WeChat QR code response is empty: response=%q", logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("empty qrcode in response")
 	}
 
 	return &QRCodeResult{
@@ -141,7 +147,9 @@ func (s *QRCodeService) PollQRCodeStatus(ctx context.Context, qrcode string) (*L
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("qrcode status API returned status %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "WeChat QR status request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("qrcode status API returned status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	var result struct {
@@ -152,7 +160,9 @@ func (s *QRCodeService) PollQRCodeStatus(ctx context.Context, qrcode string) (*L
 		BaseURL     string `json:"baseurl"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(body))
+		logger.Errorf(ctx, "WeChat QR status response decode failed: response=%q err=%v",
+			logger.AuditText(string(body), 4096), err)
+		return nil, fmt.Errorf("decode qrcode status response (%d bytes): %w", len(body), err)
 	}
 
 	return &LoginResult{

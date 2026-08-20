@@ -500,8 +500,7 @@ func (c *LongConnClient) heartbeatLoop(ctx context.Context, conn *ws.Conn) {
 }
 
 func (c *LongConnClient) handleCallback(ctx context.Context, conn *ws.Conn, frame wsFrame) {
-	// Log raw message body for debugging
-	logger.Debugf(ctx, "[WeCom] Raw callback body: %s", string(frame.Body))
+	logger.Debugf(ctx, "[WeCom] Raw callback body=%q", logger.AuditText(string(frame.Body), 8192))
 
 	var msg botMessage
 	if err := json.Unmarshal(frame.Body, &msg); err != nil {
@@ -509,9 +508,10 @@ func (c *LongConnClient) handleCallback(ctx context.Context, conn *ws.Conn, fram
 		return
 	}
 
-	logger.Debugf(ctx, "[WeCom] Parsed message: msgid=%s msgtype=%s from=%s chattype=%s text=%q image_url=%q file_url=%q voice=%q mixed_items=%d",
-		msg.MsgID, msg.MsgType, msg.From.UserID, msg.ChatType,
-		msg.Text.Content, msg.Image.URL, msg.File.URL, msg.Voice.Content, len(msg.Mixed.MsgItem))
+	logger.Debugf(ctx, "[WeCom] Parsed message: msgid=%s msgtype=%s from=%q chattype=%s text=%q image_url=%q file_url=%q voice=%q mixed_items=%d",
+		msg.MsgID, msg.MsgType, secutils.SanitizeAuditLog(msg.From.UserID), msg.ChatType, secutils.SanitizeAuditLog(msg.Text.Content),
+		secutils.SanitizeAuditLog(msg.Image.URL), secutils.SanitizeAuditLog(msg.File.URL),
+		secutils.SanitizeAuditLog(msg.Voice.Content), len(msg.Mixed.MsgItem))
 
 	// Handle server-side events (e.g. disconnected_event) before normal messages.
 	if msg.MsgType == "event" {

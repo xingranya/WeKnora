@@ -77,7 +77,7 @@ func (p *KeenableProvider) Search(
 		path = "/v1/search"
 	}
 	endpoint := p.baseURL + path
-	logger.Infof(ctx, "[WebSearch][Keenable] query=%q maxResults=%d url=%s", query, maxResults, endpoint)
+	logger.Infof(ctx, "[WebSearch][Keenable] query=%q maxResults=%d", logger.AuditText(query, 4096), maxResults)
 
 	bodyBytes, err := json.Marshal(keenableSearchRequest{Query: query, Mode: "pro"})
 	if err != nil {
@@ -103,8 +103,8 @@ func (p *KeenableProvider) Search(
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		logger.Warnf(ctx, "[WebSearch][Keenable] API returned status %d: %s", resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("keenable API returned status %d: %s", resp.StatusCode, string(respBody))
+		logger.Warnf(ctx, "[WebSearch][Keenable] API returned status %d response=%q", resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return nil, fmt.Errorf("keenable API returned status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	respBody, err := io.ReadAll(resp.Body)

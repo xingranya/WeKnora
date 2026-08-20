@@ -62,7 +62,7 @@ func (p *TavilyProvider) Search(
 	if len(query) == 0 {
 		return nil, fmt.Errorf("query is empty")
 	}
-	logger.Infof(ctx, "[WebSearch][Tavily] query=%q maxResults=%d url=%s", query, maxResults, p.baseURL)
+	logger.Infof(ctx, "[WebSearch][Tavily] query=%q maxResults=%d", logger.AuditText(query, 4096), maxResults)
 
 	reqBody := tavilySearchRequest{
 		APIKey:     p.apiKey,
@@ -89,8 +89,8 @@ func (p *TavilyProvider) Search(
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		logger.Warnf(ctx, "[WebSearch][Tavily] API returned status %d: %s", resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("tavily API returned status %d: %s", resp.StatusCode, string(respBody))
+		logger.Warnf(ctx, "[WebSearch][Tavily] API returned status %d response=%q", resp.StatusCode, logger.AuditText(string(respBody), 4096))
+		return nil, fmt.Errorf("tavily API returned status %d (response_bytes=%d)", resp.StatusCode, len(respBody))
 	}
 
 	respBody, err := io.ReadAll(resp.Body)

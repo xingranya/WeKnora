@@ -32,6 +32,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/storageurl"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -1687,10 +1688,10 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 	tenantID := channel.TenantID
 	agentID := channel.AgentID
 
-	logger.Infof(ctx, "[IM] HandleMessage: channel=%s platform=%s user=%s chat=%s msgtype=%s content_len=%d",
-		channelID, msg.Platform, msg.UserID, msg.ChatID, msg.MessageType, len(msg.Content))
-	logger.Debugf(ctx, "[IM] HandleMessage detail: msgid=%s filekey=%s filename=%s",
-		msg.MessageID, msg.FileKey, msg.FileName)
+	logger.Infof(ctx, "[IM] HandleMessage: channel=%s platform=%s user=%s chat=%s msgtype=%s content=%q",
+		channelID, msg.Platform, msg.UserID, msg.ChatID, msg.MessageType, secutils.SanitizeAuditLog(msg.Content))
+	logger.Debugf(ctx, "[IM] HandleMessage detail: msgid=%s filekey=%q filename=%q",
+		msg.MessageID, secutils.SanitizeAuditLog(msg.FileKey), secutils.SanitizeAuditLog(msg.FileName))
 
 	// ── File/Image message handling ──
 	// File messages use the normal QA path as well.  A configured knowledge base

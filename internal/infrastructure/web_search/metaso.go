@@ -98,7 +98,7 @@ func (p *MetasoProvider) Search(ctx context.Context, query string, maxResults in
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	logger.Infof(ctx, "[WebSearch][Metaso] query=%q maxResults=%d scope=%s", query, maxResults, p.scope)
+	logger.Infof(ctx, "[WebSearch][Metaso] query=%q maxResults=%d scope=%s", logger.AuditText(query, 4096), maxResults, p.scope)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute Metaso request: %w", err)
@@ -109,6 +109,8 @@ func (p *MetasoProvider) Search(ctx context.Context, query string, maxResults in
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		logger.Warnf(ctx, "[WebSearch][Metaso] API returned status %d response=%q",
+			resp.StatusCode, logger.AuditText(string(respBody), 4096))
 		return nil, metasoHTTPError(resp.StatusCode, respBody)
 	}
 
@@ -152,27 +154,15 @@ func readMetasoResponseBody(reader io.Reader) ([]byte, error) {
 }
 
 func metasoHTTPError(statusCode int, body []byte) error {
-	var apiError struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return fmt.Errorf("Metaso API returned status %d: invalid credentials (response_bytes=%d)", statusCode, len(body))
+	case http.StatusForbidden:
+		return fmt.Errorf("Metaso API returned status %d: access forbidden (response_bytes=%d)", statusCode, len(body))
+	case http.StatusTooManyRequests:
+		return fmt.Errorf("Metaso API returned status %d: rate limited (response_bytes=%d)", statusCode, len(body))
 	}
-	if json.Unmarshal(body, &apiError) == nil {
-		detail := strings.TrimSpace(apiError.Message)
-		if detail == "" {
-			detail = strings.TrimSpace(apiError.Error)
-		}
-		if detail != "" {
-			return fmt.Errorf("Metaso API returned status %d: %s", statusCode, detail)
-		}
-	}
-	detail := strings.TrimSpace(string(body))
-	if len(detail) > 4096 {
-		detail = detail[:4096]
-	}
-	if detail == "" {
-		return fmt.Errorf("Metaso API returned status %d", statusCode)
-	}
-	return fmt.Errorf("Metaso API returned status %d: %s", statusCode, detail)
+	return fmt.Errorf("Metaso API returned status %d (response_bytes=%d)", statusCode, len(body))
 }
 
 func parseMetasoDate(value string) (time.Time, bool) {

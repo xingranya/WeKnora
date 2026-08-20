@@ -142,9 +142,14 @@ func TestClient_TokenNeverLoggedInFull(t *testing.T) {
 	if strings.Contains(out, rawToken) {
 		t.Errorf("raw token leaked into logs:\n%s", out)
 	}
-	// Verify the redacted form was emitted (positive assertion, not just absence).
-	if !strings.Contains(out, redactToken(rawToken)) {
-		t.Errorf("expected redacted token %q in logs, got:\n%s", redactToken(rawToken), out)
+	// 中央审计边界必须完全隐藏 token，不能保留前后缀指纹。
+	if !strings.Contains(out, "token=[REDACTED]") {
+		t.Errorf("expected fully redacted token in logs, got:\n%s", out)
+	}
+	for _, fragment := range []string{rawToken[:6], rawToken[len(rawToken)-4:], redactToken(rawToken)} {
+		if strings.Contains(out, fragment) {
+			t.Errorf("token fragment %q leaked into logs:\n%s", fragment, out)
+		}
 	}
 }
 

@@ -222,12 +222,9 @@ func (c *APIPrincipalConfig) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	cp := *c
-	if cp.HMACSecret != "" {
-		if key := utils.GetAESKey(); key != nil {
-			if encrypted, err := utils.EncryptAESGCM(cp.HMACSecret, key); err == nil {
-				cp.HMACSecret = encrypted
-			}
-		}
+	var err error
+	if cp.HMACSecret, err = encryptSecretForStorage(cp.HMACSecret, "tenant.api_principal_config.hmac_secret"); err != nil {
+		return nil, err
 	}
 	return json.Marshal(&cp)
 }
@@ -270,11 +267,14 @@ func (c *CredentialsConfig) Value() (driver.Value, error) {
 	}
 	cp := *c
 	if cp.WeKnoraCloud != nil && cp.WeKnoraCloud.AppSecret != "" {
-		if key := utils.GetAESKey(); key != nil {
-			if encrypted, err := utils.EncryptAESGCM(cp.WeKnoraCloud.AppSecret, key); err == nil {
-				cp.WeKnoraCloud = &WeKnoraCloudCredentials{AppID: cp.WeKnoraCloud.AppID, AppSecret: encrypted}
-			}
+		encrypted, err := encryptSecretForStorage(
+			cp.WeKnoraCloud.AppSecret,
+			"tenant.credentials.we_knora_cloud.app_secret",
+		)
+		if err != nil {
+			return nil, err
 		}
+		cp.WeKnoraCloud = &WeKnoraCloudCredentials{AppID: cp.WeKnoraCloud.AppID, AppSecret: encrypted}
 	}
 	return json.Marshal(cp)
 }
@@ -756,34 +756,34 @@ func (c *TenantSandboxConfig) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	cp := *c
-	key := utils.GetAESKey()
-
-	encrypt := func(plain string) string {
-		if plain == "" || key == nil {
-			return plain
-		}
-		encrypted, err := utils.EncryptAESGCM(plain, key)
-		if err != nil {
-			return plain
-		}
-		return encrypted
-	}
 
 	if c.Cube != nil {
 		cube := *c.Cube
-		cube.APIKey = encrypt(cube.APIKey)
+		var err error
+		cube.APIKey, err = encryptSecretForStorage(cube.APIKey, "tenant_sandbox_config.cube.api_key")
+		if err != nil {
+			return nil, err
+		}
 		cp.Cube = &cube
 	}
 	if c.E2B != nil {
 		e2b := *c.E2B
-		e2b.APIKey = encrypt(e2b.APIKey)
+		var err error
+		e2b.APIKey, err = encryptSecretForStorage(e2b.APIKey, "tenant_sandbox_config.e2b.api_key")
+		if err != nil {
+			return nil, err
+		}
 		cp.E2B = &e2b
 	}
 	// Keys stay readable so operators can still see which variables are set.
 	if len(c.EnvVars) > 0 {
 		envVars := make(map[string]string, len(c.EnvVars))
 		for name, value := range c.EnvVars {
-			envVars[name] = encrypt(value)
+			encrypted, err := encryptSecretForStorage(value, "tenant_sandbox_config.env_vars."+name)
+			if err != nil {
+				return nil, err
+			}
+			envVars[name] = encrypted
 		}
 		cp.EnvVars = envVars
 	}

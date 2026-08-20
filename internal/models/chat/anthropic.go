@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/provider"
 	"github.com/Tencent/WeKnora/internal/types"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -150,10 +151,12 @@ func (c *AnthropicChat) Chat(ctx context.Context, messages []Message, opts *Chat
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		chatResp, err := parseAnthropicSSE(bytes.NewReader(body))
 		if err != nil {
-			return nil, err
+			return nil, publicModelCallFailure(ctx, "anthropic_sse_response", err)
 		}
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, chatResp.Content)
+			logger.Errorf(ctx, "Anthropic SSE request failed: status=%d response=%q",
+				resp.StatusCode, logger.AuditText(string(body), 4096))
+			return nil, fmt.Errorf("API request failed with status %d (response_bytes=%d)", resp.StatusCode, len(body))
 		}
 		logUsage(ctx, c.modelName, &chatResp.Usage)
 		return chatResp, nil
@@ -164,10 +167,14 @@ func (c *AnthropicChat) Chat(ctx context.Context, messages []Message, opts *Chat
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		if chatResp.Error != nil && chatResp.Error.Message != "" {
-			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, chatResp.Error.Message)
+		if chatResp.Error != nil && chatResp.Error.Type != "" {
+			logger.Errorf(ctx, "Anthropic API request failed: status=%d type=%s response=%q",
+				resp.StatusCode, chatResp.Error.Type, logger.AuditText(string(body), 4096))
+			return nil, fmt.Errorf("API request failed with status %d (type=%s)", resp.StatusCode, chatResp.Error.Type)
 		}
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "Anthropic API request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("API request failed with status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	result := c.parseResponse(&chatResp)
@@ -203,9 +210,11 @@ func (c *AnthropicChat) ChatStream(ctx context.Context, messages []Message, opts
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		resp.Body.Close()
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		logger.Errorf(ctx, "Anthropic stream request failed: status=%d response=%q",
+			resp.StatusCode, logger.AuditText(string(body), 4096))
+		return nil, fmt.Errorf("API request failed with status %d (response_bytes=%d)", resp.StatusCode, len(body))
 	}
 
 	streamChan := make(chan types.StreamResponse)
@@ -431,11 +440,7 @@ func processAnthropicStream(ctx context.Context, model string, resp *http.Respon
 					FinishReason: finishReason,
 				}
 			} else {
-				streamChan <- types.StreamResponse{
-					ResponseType: types.ResponseTypeError,
-					Content:      err.Error(),
-					Done:         true,
-				}
+				streamChan <- publicModelStreamFailure(ctx, "anthropic_sse_read", err)
 			}
 			return
 		}
@@ -456,19 +461,12 @@ func processAnthropicStream(ctx context.Context, model string, resp *http.Respon
 
 		var streamEvent anthropicStreamEvent
 		if err := json.Unmarshal(event.Data, &streamEvent); err != nil {
-			streamChan <- types.StreamResponse{
-				ResponseType: types.ResponseTypeError,
-				Content:      fmt.Sprintf("decode SSE response: %v", err),
-				Done:         true,
-			}
+			streamChan <- publicModelStreamFailure(ctx, "anthropic_sse_decode", fmt.Errorf("decode SSE response: %w", err))
 			return
 		}
 		if streamEvent.Error != nil && streamEvent.Error.Message != "" {
-			streamChan <- types.StreamResponse{
-				ResponseType: types.ResponseTypeError,
-				Content:      streamEvent.Error.Message,
-				Done:         true,
-			}
+			streamChan <- publicModelStreamFailure(ctx, "anthropic_upstream_error",
+				fmt.Errorf("%s: %s", streamEvent.Error.Type, streamEvent.Error.Message))
 			return
 		}
 		if streamEvent.Message != nil {
