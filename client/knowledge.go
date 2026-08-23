@@ -815,9 +815,16 @@ type UpdateManualKnowledgeRequest struct {
 	Content string `json:"content,omitempty"`
 }
 
-// BatchUpdateKnowledgeTagsRequest contains the mapping of knowledge IDs to tag IDs.
+// BatchUpdateKnowledgeTagsRequest 保留旧版“每条知识最多一个标签”的请求类型。
+// Deprecated: 请改用 BatchReplaceKnowledgeTagsRequest。
 type BatchUpdateKnowledgeTagsRequest struct {
-	Updates map[string]*string `json:"updates"` // knowledge_id -> tag_id (nil to clear)
+	Updates map[string]*string `json:"updates"`
+}
+
+// BatchReplaceKnowledgeTagsRequest 保存知识 ID 到标签 ID 列表的映射。
+// 空数组表示清空该知识的全部标签。
+type BatchReplaceKnowledgeTagsRequest struct {
+	Updates map[string][]string `json:"updates"`
 }
 
 // CreateManualKnowledge creates a knowledge entry from manual Markdown content.
@@ -959,10 +966,18 @@ func (c *Client) PreviewKnowledgeFile(ctx context.Context, knowledgeID string) (
 	return c.doRequest(ctx, http.MethodGet, path, nil, nil)
 }
 
-// BatchUpdateKnowledgeTags batch updates knowledge tags.
-// The updates map contains knowledge_id -> tag_id mappings. Set tag_id to nil to clear the tag.
-func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[string]*string) error {
-	request := &BatchUpdateKnowledgeTagsRequest{Updates: updates}
+// BatchReplaceKnowledgeTags 批量整体替换知识标签。
+// updates 的键为 knowledge_id，值为多个 tag_id；空数组表示精确清空全部标签。
+func (c *Client) BatchReplaceKnowledgeTags(ctx context.Context, updates map[string][]string) error {
+	normalized := make(map[string][]string, len(updates))
+	for knowledgeID, tagIDs := range updates {
+		if len(tagIDs) == 0 {
+			normalized[knowledgeID] = []string{}
+			continue
+		}
+		normalized[knowledgeID] = append([]string(nil), tagIDs...)
+	}
+	request := &BatchReplaceKnowledgeTagsRequest{Updates: normalized}
 	resp, err := c.doRequest(ctx, http.MethodPut, "/api/v1/knowledge/tags", request, nil)
 	if err != nil {
 		return err
@@ -974,4 +989,18 @@ func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[strin
 	}
 
 	return parseResponse(resp, &batchResponse)
+}
+
+// BatchUpdateKnowledgeTags 兼容旧版“每条知识最多一个标签”的调用契约。
+// Deprecated: 请改用 BatchReplaceKnowledgeTags；nil 或空字符串会转换为空数组。
+func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[string]*string) error {
+	normalized := make(map[string][]string, len(updates))
+	for knowledgeID, tagID := range updates {
+		if tagID == nil || *tagID == "" {
+			normalized[knowledgeID] = []string{}
+			continue
+		}
+		normalized[knowledgeID] = []string{*tagID}
+	}
+	return c.BatchReplaceKnowledgeTags(ctx, normalized)
 }

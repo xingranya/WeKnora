@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/minio/minio-go/v7"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -442,11 +444,20 @@ func (s *knowledgeService) reusePreparedFileURLSource(
 	}
 	reader, err := fileSvc.GetFile(ctx, candidate)
 	if err != nil {
-		return nil, "", false, nil
+		if isMissingPreparedFileURLObject(err) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, fmt.Errorf("open existing stable file URL object: %w", err)
 	}
 	defer reader.Close()
 	content, err = io.ReadAll(io.LimitReader(reader, maxFileURLSize+1))
 	if err != nil {
+		// MinIO 的 GetObject 是惰性的：对象不存在时 GetFile 仍可能成功
+		// 返回 reader，NoSuchKey 直到第一次读取才出现。该错误只表示稳定
+		// 对象尚未写入，应回退到远程下载；其他读取错误仍必须终止任务。
+		if isMissingPreparedFileURLObject(err) {
+			return nil, "", false, nil
+		}
 		return nil, "", false, fmt.Errorf("read existing stable file URL object: %w", err)
 	}
 	if int64(len(content)) > maxFileURLSize {
@@ -467,6 +478,24 @@ func (s *knowledgeService) reusePreparedFileURLSource(
 		return nil, "", false, fmt.Errorf("finalize existing stable file URL object: %w", err)
 	}
 	return content, filePath, true, nil
+}
+
+func isMissingPreparedFileURLObject(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, interfaces.ErrResourceNotFound) {
+		return true
+	}
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		switch response := current.(type) {
+		case minio.ErrorResponse:
+			return response.Code == "NoSuchKey" || response.Code == "NoSuchObject"
+		case *minio.ErrorResponse:
+			return response != nil && (response.Code == "NoSuchKey" || response.Code == "NoSuchObject")
+		}
+	}
+	return false
 }
 
 // persistFileURLSourceFields 一次写入远程文件的最终定位和内容事实。

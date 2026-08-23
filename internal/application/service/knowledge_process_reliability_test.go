@@ -22,6 +22,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/hibiken/asynq"
+	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/require"
 )
 
@@ -585,9 +586,18 @@ func (processReliabilityTenantService) GetWeKnoraCloudCredentials(
 type processReliabilityFileService struct {
 	mu sync.Mutex
 
-	objects         map[string][]byte
-	saveReaderCalls int
-	saveBytesCalls  int
+	objects              map[string][]byte
+	missingObjectReadErr error
+	saveReaderCalls      int
+	saveBytesCalls       int
+}
+
+type processReliabilityErrorReader struct {
+	err error
+}
+
+func (r processReliabilityErrorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 func (s *processReliabilityFileService) CheckConnectivity(context.Context) error { return nil }
@@ -667,7 +677,10 @@ func (s *processReliabilityFileService) GetFile(_ context.Context, filePath stri
 	defer s.mu.Unlock()
 	data, ok := s.objects[filePath]
 	if !ok {
-		return nil, errors.New("对象不存在")
+		if s.missingObjectReadErr != nil {
+			return io.NopCloser(processReliabilityErrorReader{err: s.missingObjectReadErr}), nil
+		}
+		return nil, interfaces.ErrResourceNotFound
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
@@ -1192,6 +1205,188 @@ func TestProcessDocumentFileURLRetryReusesStoredObjectAndSourceQuota(t *testing.
 	require.Equal(t, int64(len(content)), repo.knowledge.SourceFileQuotaBytes())
 	require.Empty(t, tenantRepo.deltas)
 	require.Equal(t, []int64{int64(len(content)), 0}, repo.reserveDeltas)
+}
+
+func TestProcessDocumentFileURLLazyMissingStableObjectFallsBackToDownload(t *testing.T) {
+	content := []byte("first remote file URL download")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Disposition", `attachment; filename="document.txt"`)
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1,localhost,::1")
+	secutils.ResetSSRFWhitelistForTest()
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
+	tenant := &types.Tenant{ID: 1, StorageQuota: 1024}
+	repo := &processReliabilityKnowledgeRepo{
+		knowledge: &types.Knowledge{
+			ID:              "knowledge-file-url-lazy-miss",
+			TenantID:        tenant.ID,
+			KnowledgeBaseID: "kb-1",
+			Type:            "file_url",
+			Source:          server.URL + "/document.txt",
+			ParseStatus:     types.ParseStatusPending,
+		},
+		atomicTenant: tenant,
+	}
+	fileService := &processReliabilityFileService{
+		objects: make(map[string][]byte),
+		missingObjectReadErr: minio.ErrorResponse{
+			Code:       "NoSuchKey",
+			Message:    "The specified key does not exist.",
+			StatusCode: http.StatusNotFound,
+		},
+	}
+	service := &knowledgeService{
+		repo:          repo,
+		tenantRepo:    &processReliabilityTenantRepo{tenant: tenant},
+		tenantService: processReliabilityTenantService{},
+		kbService: processReliabilityKBService{kb: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: tenant.ID,
+		}},
+		fileSvc:      fileService,
+		chunkService: &parentChildChunkService{},
+		graphEngine:  parentChildGraphRepo{},
+		task:         &processReliabilityTaskEnqueuer{},
+	}
+	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
+		TenantID:        tenant.ID,
+		KnowledgeID:     repo.knowledge.ID,
+		KnowledgeBaseID: repo.knowledge.KnowledgeBaseID,
+		FileURL:         repo.knowledge.Source,
+		FileName:        "document.txt",
+		FileType:        "txt",
+	})
+
+	require.NoError(t, service.ProcessDocument(context.Background(), task))
+	require.Equal(t, int32(1), requests.Load())
+	require.Equal(t, 1, fileService.saveReaderCalls)
+	require.Equal(t, "memory/1/knowledge-file-url-lazy-miss/document.txt", repo.knowledge.FilePath)
+	require.Equal(t, int64(len(content)), repo.knowledge.FileSize)
+	require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(content)), repo.knowledge.FileHash)
+}
+
+func TestProcessDocumentFileURLReusesPreparedStableObjectWithoutRemoteDownload(t *testing.T) {
+	content := []byte("prepared stable object")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("unexpected remote response"))
+	}))
+	defer server.Close()
+
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1,localhost,::1")
+	secutils.ResetSSRFWhitelistForTest()
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
+	tenant := &types.Tenant{ID: 1, StorageQuota: 1024}
+	repo := &processReliabilityKnowledgeRepo{
+		knowledge: &types.Knowledge{
+			ID:              "knowledge-file-url-stable-hit",
+			TenantID:        tenant.ID,
+			KnowledgeBaseID: "kb-1",
+			Type:            "file_url",
+			Source:          server.URL + "/document.txt",
+			ParseStatus:     types.ParseStatusPending,
+		},
+		atomicTenant: tenant,
+	}
+	stablePath := "memory/1/knowledge-file-url-stable-hit/document.txt"
+	fileService := &processReliabilityFileService{
+		objects: map[string][]byte{stablePath: append([]byte(nil), content...)},
+	}
+	service := &knowledgeService{
+		repo:          repo,
+		tenantRepo:    &processReliabilityTenantRepo{tenant: tenant},
+		tenantService: processReliabilityTenantService{},
+		kbService: processReliabilityKBService{kb: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: tenant.ID,
+		}},
+		fileSvc:      fileService,
+		chunkService: &parentChildChunkService{},
+		graphEngine:  parentChildGraphRepo{},
+		task:         &processReliabilityTaskEnqueuer{},
+	}
+	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
+		TenantID:        tenant.ID,
+		KnowledgeID:     repo.knowledge.ID,
+		KnowledgeBaseID: repo.knowledge.KnowledgeBaseID,
+		FileURL:         repo.knowledge.Source,
+		FileName:        "document.txt",
+		FileType:        "txt",
+	})
+
+	require.NoError(t, service.ProcessDocument(context.Background(), task))
+	require.Zero(t, requests.Load())
+	require.Zero(t, fileService.saveReaderCalls)
+	require.Equal(t, stablePath, repo.knowledge.FilePath)
+	require.Equal(t, int64(len(content)), repo.knowledge.FileSize)
+	require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(content)), repo.knowledge.FileHash)
+}
+
+func TestProcessDocumentFileURLPreparedObjectReadFailureDoesNotRedownload(t *testing.T) {
+	readErr := errors.New("稳定对象读取校验失败")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("must not be downloaded"))
+	}))
+	defer server.Close()
+
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1,localhost,::1")
+	secutils.ResetSSRFWhitelistForTest()
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
+	tenant := &types.Tenant{ID: 1, StorageQuota: 1024}
+	repo := &processReliabilityKnowledgeRepo{
+		knowledge: &types.Knowledge{
+			ID:              "knowledge-file-url-read-error",
+			TenantID:        tenant.ID,
+			KnowledgeBaseID: "kb-1",
+			Type:            "file_url",
+			Source:          server.URL + "/document.txt",
+			ParseStatus:     types.ParseStatusPending,
+		},
+		atomicTenant: tenant,
+	}
+	fileService := &processReliabilityFileService{
+		objects:              make(map[string][]byte),
+		missingObjectReadErr: readErr,
+	}
+	service := &knowledgeService{
+		repo:          repo,
+		tenantRepo:    &processReliabilityTenantRepo{tenant: tenant},
+		tenantService: processReliabilityTenantService{},
+		kbService: processReliabilityKBService{kb: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: tenant.ID,
+		}},
+		fileSvc:      fileService,
+		chunkService: &parentChildChunkService{},
+		graphEngine:  parentChildGraphRepo{},
+		task:         &processReliabilityTaskEnqueuer{},
+	}
+	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
+		TenantID:        tenant.ID,
+		KnowledgeID:     repo.knowledge.ID,
+		KnowledgeBaseID: repo.knowledge.KnowledgeBaseID,
+		FileURL:         repo.knowledge.Source,
+		FileName:        "document.txt",
+		FileType:        "txt",
+	})
+
+	err := service.ProcessDocument(context.Background(), task)
+	require.ErrorIs(t, err, readErr)
+	require.ErrorContains(t, err, "read existing stable file URL object")
+	require.Zero(t, requests.Load())
+	require.Zero(t, fileService.saveReaderCalls)
+	require.Empty(t, repo.knowledge.FilePath)
 }
 
 func TestProcessDocumentFileURLMetadataRetryCleansUnownedStableObject(t *testing.T) {
