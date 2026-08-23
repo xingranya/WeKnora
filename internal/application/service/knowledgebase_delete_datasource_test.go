@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -122,6 +123,17 @@ func (kbDeleteTaskEnqueuer) Enqueue(_ *asynq.Task, _ ...asynq.Option) (*asynq.Ta
 	return &asynq.TaskInfo{ID: "kb-delete-task"}, nil
 }
 
+type kbDeleteShareRepo struct {
+	interfaces.KBShareRepository
+	deletedKBIDs []string
+	deleteErr    error
+}
+
+func (r *kbDeleteShareRepo) DeleteByKnowledgeBaseID(_ context.Context, kbID string) error {
+	r.deletedKBIDs = append(r.deletedKBIDs, kbID)
+	return r.deleteErr
+}
+
 func TestDeleteDataSourcesForKnowledgeBase(t *testing.T) {
 	const kbID = "kb-1"
 	dsRepo := newKBDeleteDSRepo(kbID,
@@ -215,6 +227,48 @@ func TestDeleteKnowledgeBaseContinuesWhenDataSourceCleanupFails(t *testing.T) {
 	err := svc.DeleteKnowledgeBase(ctxWithTenantStorage(1, "local"), kbID)
 	require.NoError(t, err)
 	assert.Equal(t, kbID, kbRepo.deletedID)
+}
+
+func TestProcessKBDeleteCleansAncillaryResourcesForEmptyKnowledgeBase(t *testing.T) {
+	const kbID = "empty-kb-with-ancillary-resources"
+	dsRepo := newKBDeleteDSRepo(kbID, &types.DataSource{ID: "ds-empty-kb", KnowledgeBaseID: kbID})
+	syncLogRepo := &kbDeleteSyncLogRepo{}
+	shareRepo := &kbDeleteShareRepo{}
+	svc := &knowledgeBaseService{
+		kgRepo:      emptyKBKnowledgeRepo{},
+		shareRepo:   shareRepo,
+		dsRepo:      dsRepo,
+		syncLogRepo: syncLogRepo,
+	}
+	payload, err := json.Marshal(types.KBDeletePayload{
+		TenantID:        1,
+		KnowledgeBaseID: kbID,
+		DataSourceIDs:   []string{"ds-empty-kb"},
+	})
+	require.NoError(t, err)
+
+	err = svc.ProcessKBDelete(context.Background(), asynq.NewTask(types.TypeKBDelete, payload))
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{kbID}, shareRepo.deletedKBIDs)
+	assert.Equal(t, []string{"ds-empty-kb"}, dsRepo.deleteIDs)
+	assert.Equal(t, []string{"ds-empty-kb"}, syncLogRepo.canceled)
+}
+
+func TestProcessKBDeleteReportsAncillaryCleanupFailure(t *testing.T) {
+	const kbID = "empty-kb-with-share-failure"
+	shareRepo := &kbDeleteShareRepo{deleteErr: errors.New("share database unavailable")}
+	svc := &knowledgeBaseService{
+		kgRepo:    emptyKBKnowledgeRepo{},
+		shareRepo: shareRepo,
+	}
+	payload, err := json.Marshal(types.KBDeletePayload{TenantID: 1, KnowledgeBaseID: kbID})
+	require.NoError(t, err)
+
+	err = svc.ProcessKBDelete(context.Background(), asynq.NewTask(types.TypeKBDelete, payload))
+
+	require.ErrorContains(t, err, "share database unavailable")
+	assert.Equal(t, []string{kbID}, shareRepo.deletedKBIDs)
 }
 
 // deleteErrDSRepo injects a delete failure for testing best-effort cleanup.

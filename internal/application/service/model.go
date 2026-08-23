@@ -148,7 +148,12 @@ func (s *modelService) CreateModel(ctx context.Context, model *types.Model) erro
 			model.Status = types.ModelStatusActive
 		}
 		logger.Infof(newCtx, "Updating model status to: %s", model.Status)
-		s.repo.Update(newCtx, model)
+		if updateErr := s.repo.UpdateStatus(newCtx, model.TenantID, model.ID, model.Status); updateErr != nil {
+			logger.ErrorWithFields(newCtx, updateErr, map[string]interface{}{
+				"model_id":     model.ID,
+				"model_status": model.Status,
+			})
+		}
 	}()
 
 	logger.Infof(ctx, "Model creation initiated successfully: %s", model.ID)
@@ -251,7 +256,7 @@ func (s *modelService) UpdateModel(ctx context.Context, model *types.Model) erro
 	}
 
 	// Update model in repository
-	err = s.repo.Update(ctx, model)
+	err = s.repo.UpdateConfiguration(ctx, model)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"model_id":   model.ID,
@@ -286,22 +291,35 @@ func (s *modelService) UpdateModelCredentials(
 	}
 
 	changed := false
+	var apiKeyUpdate *string
+	var appSecretUpdate *string
 	if apiKey != nil && *apiKey != "" && *apiKey != existing.Parameters.APIKey {
 		existing.Parameters.APIKey = *apiKey
+		apiKeyUpdate = apiKey
 		changed = true
 	}
 	if appSecret != nil && *appSecret != "" && *appSecret != existing.Parameters.AppSecret {
 		existing.Parameters.AppSecret = *appSecret
+		appSecretUpdate = appSecret
 		changed = true
 	}
 	if !changed {
 		return existing, nil
 	}
+	var managedByUpdate *string
 	if existing.IsBuiltin {
 		// Credential changes are also runtime overrides of YAML-managed data.
 		existing.ManagedBy = ""
+		managedByUpdate = &existing.ManagedBy
 	}
-	if err := s.repo.Update(ctx, existing); err != nil {
+	if err := s.repo.UpdateCredentials(
+		ctx,
+		existing.TenantID,
+		existing.ID,
+		apiKeyUpdate,
+		appSecretUpdate,
+		managedByUpdate,
+	); err != nil {
 		return nil, err
 	}
 	logger.Infof(ctx, "Model credentials updated: id=%s", id)
@@ -324,15 +342,19 @@ func (s *modelService) ClearModelCredential(ctx context.Context, id, field strin
 	}
 
 	changed := false
+	var apiKeyUpdate *string
+	var appSecretUpdate *string
 	switch field {
 	case "api_key":
 		if existing.Parameters.APIKey != "" {
 			existing.Parameters.APIKey = ""
+			apiKeyUpdate = &existing.Parameters.APIKey
 			changed = true
 		}
 	case "app_secret":
 		if existing.Parameters.AppSecret != "" {
 			existing.Parameters.AppSecret = ""
+			appSecretUpdate = &existing.Parameters.AppSecret
 			changed = true
 		}
 	default:
@@ -341,10 +363,19 @@ func (s *modelService) ClearModelCredential(ctx context.Context, id, field strin
 	if !changed {
 		return nil
 	}
+	var managedByUpdate *string
 	if existing.IsBuiltin {
 		existing.ManagedBy = ""
+		managedByUpdate = &existing.ManagedBy
 	}
-	if err := s.repo.Update(ctx, existing); err != nil {
+	if err := s.repo.UpdateCredentials(
+		ctx,
+		existing.TenantID,
+		existing.ID,
+		apiKeyUpdate,
+		appSecretUpdate,
+		managedByUpdate,
+	); err != nil {
 		return err
 	}
 	logger.Infof(ctx, "Model credential cleared by user: id=%s field=%s", id, field)

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tencent/WeKnora/internal/utils"
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 )
 
 func TestHTTPDocumentReaderFailsClosedInReleaseMode(t *testing.T) {
@@ -16,8 +16,10 @@ func TestHTTPDocumentReaderFailsClosedInReleaseMode(t *testing.T) {
 }
 
 func TestHTTPDocumentReaderFailedReleaseReconnectKeepsPreviousAddress(t *testing.T) {
-	utils.SetSSRFWhitelistFromRaw("example.com,docreader.example.com")
-	t.Cleanup(func() { utils.SetSSRFWhitelistFromRaw("") })
+	fakedns.InstallDefault(t, map[string][]string{
+		"example.com":           {"8.8.8.8"},
+		"docreader.example.com": {"8.8.8.8"},
+	})
 	t.Setenv("GIN_MODE", "debug")
 	reader, err := NewHTTPDocumentReader("https://example.com")
 	if err != nil {
@@ -40,8 +42,7 @@ func TestHTTPDocumentReaderFailedReleaseReconnectKeepsPreviousAddress(t *testing
 }
 
 func TestHTTPDocumentReaderCloseClearsConnectionState(t *testing.T) {
-	utils.SetSSRFWhitelistFromRaw("example.com")
-	t.Cleanup(func() { utils.SetSSRFWhitelistFromRaw("") })
+	fakedns.InstallDefault(t, map[string][]string{"example.com": {"8.8.8.8"}})
 	t.Setenv("GIN_MODE", "debug")
 	reader, err := NewHTTPDocumentReader("https://example.com")
 	if err != nil {

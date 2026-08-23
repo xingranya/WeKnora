@@ -2195,6 +2195,10 @@ func (h *KnowledgeHandler) UpdateKnowledge(c *gin.Context) {
 	knowledge.ID = id
 
 	if err := h.kgService.UpdateKnowledge(effCtx, &knowledge); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -2240,6 +2244,10 @@ func (h *KnowledgeHandler) RegenerateKnowledgeSummary(c *gin.Context) {
 		}
 	}
 	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
@@ -2906,29 +2914,16 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 		Initiator:    types.TaskInitiatorFromContext(ctx),
 	}
 	langfuse.InjectTracing(ctx, &payload)
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		logger.Errorf(ctx, "MoveKnowledge: failed to marshal payload: %v", err)
-		c.Error(errors.NewInternalServerError("Failed to create task"))
+	if err := h.kgService.PersistKnowledgeMoveDispatch(ctx, payload); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+		} else {
+			c.Error(errors.NewInternalServerError("Failed to persist move task"))
+		}
 		return
 	}
 
-	// Enqueue move task
-	task := asynq.NewTask(types.TypeKnowledgeMove, payloadBytes,
-		asynq.TaskID(taskID), asynq.Queue(types.QueueMaintenance),
-		asynq.MaxRetry(3), asynq.Timeout(2*time.Hour))
-	info, err := h.asynqClient.Enqueue(task)
-	if err != nil {
-		logger.Errorf(ctx, "MoveKnowledge: failed to enqueue task: %v", err)
-		c.Error(errors.NewInternalServerError("Failed to enqueue task"))
-		return
-	}
-
-	logger.Infof(ctx, "MoveKnowledge: task enqueued: %s, asynq_id: %s, source: %s, target: %s, count: %d",
-		taskID, info.ID, secutils.SanitizeForLog(req.SourceKBID), secutils.SanitizeForLog(req.TargetKBID), len(req.KnowledgeIDs))
-
-	// Save initial progress
+	// 先写 pending 进度；即使 Redis/Lite 临时投递失败，持久 outbox 仍会恢复。
 	initialProgress := &types.KnowledgeMoveProgress{
 		TaskID:     taskID,
 		SourceKBID: req.SourceKBID,
@@ -2944,6 +2939,29 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 		logger.Warnf(ctx, "MoveKnowledge: failed to save initial progress: %v", err)
 	}
 
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		logger.Errorf(ctx, "MoveKnowledge: failed to marshal payload: %v", err)
+		c.Error(errors.NewInternalServerError("Failed to create task"))
+		return
+	}
+
+	// 临时队列错误不把已持久受理的请求回滚为失败；housekeeping 会按稳定 ID 重投。
+	task := asynq.NewTask(types.TypeKnowledgeMove, payloadBytes)
+	info, err := h.asynqClient.Enqueue(
+		task,
+		asynq.TaskID(taskID),
+		asynq.Queue(types.QueueMaintenance),
+		asynq.MaxRetry(3),
+		asynq.Timeout(2*time.Hour),
+	)
+	if err != nil {
+		logger.Warnf(ctx, "MoveKnowledge: initial enqueue deferred to durable recovery: %v", err)
+	} else if info != nil {
+		logger.Infof(ctx, "MoveKnowledge: task enqueued: %s, asynq_id: %s, source: %s, target: %s, count: %d",
+			taskID, info.ID, secutils.SanitizeForLog(req.SourceKBID), secutils.SanitizeForLog(req.TargetKBID), len(req.KnowledgeIDs))
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": MoveKnowledgeResponse{
@@ -2951,7 +2969,7 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 			SourceKBID:     req.SourceKBID,
 			TargetKBID:     req.TargetKBID,
 			KnowledgeCount: len(req.KnowledgeIDs),
-			Message:        "Knowledge move task started",
+			Message:        "Knowledge move task accepted",
 		},
 	})
 }

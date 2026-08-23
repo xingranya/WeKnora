@@ -46,7 +46,8 @@ const resolveManualKnowledgeStatus = (
     parseStatus === 'completed' ||
     parseStatus === 'pending' ||
     parseStatus === 'processing' ||
-    parseStatus === 'finalizing'
+    parseStatus === 'finalizing' ||
+    parseStatus === 'moving'
   ) {
     return 'publish'
   }

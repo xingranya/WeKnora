@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -17,10 +18,65 @@ type summaryKnowledgeBaseReader interface {
 	GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error)
 }
 
+type guardedKnowledgeSummaryRepository interface {
+	UpdateKnowledgeSummaryIfCurrent(
+		context.Context,
+		uint64,
+		string,
+		string,
+		string,
+		types.JSON,
+		types.JSON,
+		map[string]interface{},
+	) (bool, error)
+}
+
+func updateKnowledgeSummaryIfCurrent(
+	ctx context.Context,
+	repo interfaces.KnowledgeRepository,
+	knowledge *types.Knowledge,
+	revision summarySourceRevision,
+	values map[string]interface{},
+) (bool, error) {
+	guarded, ok := repo.(guardedKnowledgeSummaryRepository)
+	if !ok {
+		return false, errors.New("knowledge repository does not support guarded summary updates")
+	}
+	return guarded.UpdateKnowledgeSummaryIfCurrent(
+		ctx,
+		knowledge.TenantID,
+		knowledge.ID,
+		revision.KnowledgeBaseID,
+		revision.ParseStatus,
+		types.JSON(revision.Metadata),
+		types.JSON(revision.CustomMetadata),
+		values,
+	)
+}
+
 // ErrSummaryRefreshStale means the source chunks or metadata changed while a
 // summary refresh was running. The caller should discard the result and leave
 // the current summary_status untouched so a newer refresh can finish.
 var ErrSummaryRefreshStale = errors.New("summary refresh superseded")
+
+type summarySourceRevision struct {
+	KnowledgeBaseID string
+	ParseStatus     string
+	Metadata        string
+	CustomMetadata  string
+}
+
+func captureSummarySourceRevision(knowledge *types.Knowledge) summarySourceRevision {
+	if knowledge == nil {
+		return summarySourceRevision{}
+	}
+	return summarySourceRevision{
+		KnowledgeBaseID: knowledge.KnowledgeBaseID,
+		ParseStatus:     knowledge.ParseStatus,
+		Metadata:        string(knowledge.Metadata),
+		CustomMetadata:  string(knowledge.CustomMetadata),
+	}
+}
 
 // summarySourceChanged reports whether chunk bodies or document metadata changed
 // after a summary job captured its inputs. Database lookup failures are
@@ -32,14 +88,17 @@ func summarySourceChanged(
 	chunkRepo interfaces.ChunkRepository,
 	tenantID uint64,
 	knowledgeID string,
-	metadataVersion string,
+	revision summarySourceRevision,
 	sourceChunks []*types.Chunk,
 ) (bool, error) {
 	latestKnowledge, err := repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
 	if err != nil {
 		return false, err
 	}
-	if string(latestKnowledge.CustomMetadata) != metadataVersion {
+	if latestKnowledge.KnowledgeBaseID != revision.KnowledgeBaseID ||
+		latestKnowledge.ParseStatus != revision.ParseStatus ||
+		string(latestKnowledge.Metadata) != revision.Metadata ||
+		string(latestKnowledge.CustomMetadata) != revision.CustomMetadata {
 		return true, nil
 	}
 	for _, sourceChunk := range sourceChunks {
@@ -91,9 +150,24 @@ func enqueueSummaryRefresh(
 	if knowledge == nil || knowledge.SummaryStatus == "" || knowledge.SummaryStatus == types.SummaryStatusNone {
 		return nil
 	}
+	revision := captureSummarySourceRevision(knowledge)
+	if knowledge.ParseStatus == types.ParseStatusMoving ||
+		knowledge.ParseStatus == types.ParseStatusDeleting ||
+		knowledge.ParseStatus == types.ParseStatusCancelled {
+		return ErrSummaryRefreshStale
+	}
 	markFailed := func() {
 		if repo != nil {
-			_ = repo.UpdateKnowledgeColumn(ctx, knowledge.ID, "summary_status", types.SummaryStatusFailed)
+			_, _ = updateKnowledgeSummaryIfCurrent(
+				ctx,
+				repo,
+				knowledge,
+				revision,
+				map[string]interface{}{
+					"summary_status": types.SummaryStatusFailed,
+					"updated_at":     time.Now(),
+				},
+			)
 		}
 	}
 	if repo == nil || taskEnqueuer == nil || kbReader == nil {
@@ -129,7 +203,22 @@ func enqueueSummaryRefresh(
 	}
 	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes,
 		asynq.Queue(types.QueueSummary), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
-	_ = repo.UpdateKnowledgeColumn(ctx, knowledge.ID, "summary_status", types.SummaryStatusPending)
+	applied, err := updateKnowledgeSummaryIfCurrent(
+		ctx,
+		repo,
+		knowledge,
+		revision,
+		map[string]interface{}{
+			"summary_status": types.SummaryStatusPending,
+			"updated_at":     time.Now(),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return ErrSummaryRefreshStale
+	}
 	if _, err = taskEnqueuer.Enqueue(task); err != nil {
 		markFailed()
 		return err
@@ -146,6 +235,11 @@ func (s *knowledgeService) RequestKnowledgeSummaryRefresh(
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
 	if err != nil {
 		return err
+	}
+	if knowledge.ParseStatus == types.ParseStatusMoving ||
+		knowledge.ParseStatus == types.ParseStatusDeleting ||
+		knowledge.ParseStatus == types.ParseStatusCancelled {
+		return werrors.NewConflictError("知识正在移动、删除或取消中，无法刷新摘要")
 	}
 	return enqueueSummaryRefresh(ctx, s.repo, s.task, s.kbService, s.tracker(), knowledge)
 }

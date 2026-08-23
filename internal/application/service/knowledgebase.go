@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ type knowledgeBaseService struct {
 	tenantRepo      interfaces.TenantRepository
 	fileSvc         interfaces.FileService
 	storageResolver interfaces.StorageBackendResolver
+	resourceCatalog interfaces.ResourceCatalog
 	graphEngine     interfaces.RetrieveGraphRepository
 	asynqClient     interfaces.TaskEnqueuer
 	taskInspector   interfaces.TaskInspector
@@ -48,6 +50,97 @@ type knowledgeBaseService struct {
 	syncLogRepo     interfaces.SyncLogRepository
 	dsScheduler     *datasource.Scheduler
 	audit           interfaces.AuditLogService
+}
+
+func knowledgeInFlightParseStatuses() []string {
+	return []string{
+		types.ParseStatusPending,
+		types.ParseStatusProcessing,
+		types.ParseStatusFinalizing,
+		types.ParseStatusMoving,
+	}
+}
+
+type knowledgeListAndQuotaDeleter interface {
+	DeleteKnowledgeListAndAdjustStorage(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeBaseID string,
+		ids []string,
+	) error
+}
+
+type knowledgeListDeleteClaimer interface {
+	ClaimKnowledgeListForKBDelete(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeBaseID string,
+		ids []string,
+	) ([]*types.Knowledge, error)
+}
+
+type deletedKnowledgeBaseLookup interface {
+	GetKnowledgeBaseByIDAndTenantUnscoped(
+		ctx context.Context,
+		id string,
+		tenantID uint64,
+	) (*types.KnowledgeBase, error)
+}
+
+type deletedKnowledgeBaseRecoveryLookup interface {
+	ListDeletedKnowledgeBasesWithActiveKnowledge(
+		ctx context.Context,
+		limit int,
+	) ([]*types.KnowledgeBase, error)
+}
+
+type deletedKnowledgeBaseCleanupDataSourceLookup interface {
+	ListKnowledgeBaseCleanupDataSourceIDs(
+		ctx context.Context,
+		knowledgeBaseID string,
+	) ([]string, error)
+}
+
+func kbDeleteTaskID(knowledgeBaseID string) string {
+	return "kb-delete-" + knowledgeBaseID
+}
+
+func (s *knowledgeBaseService) recoverConflictingKBDeleteTask(
+	ctx context.Context,
+	knowledgeBaseID string,
+	task *asynq.Task,
+) error {
+	runtimeInspector, ok := s.taskInspector.(interfaces.RuntimeTaskInspector)
+	if !ok {
+		return nil
+	}
+	taskID := kbDeleteTaskID(knowledgeBaseID)
+	existing, supported, err := runtimeInspector.GetRuntimeTask(
+		ctx,
+		types.QueueMaintenance,
+		taskID,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect conflicting knowledge base delete task: %w", err)
+	}
+	if !supported || existing == nil {
+		return nil
+	}
+	if existing.State != types.RuntimeTaskArchived && existing.State != types.RuntimeTaskCompleted {
+		return nil
+	}
+	supported, err = runtimeInspector.ForceDeleteRuntimeTask(ctx, types.QueueMaintenance, taskID)
+	if err != nil {
+		return fmt.Errorf("remove terminal knowledge base delete task: %w", err)
+	}
+	if !supported {
+		return errors.New("runtime task deletion is unavailable")
+	}
+	_, err = s.asynqClient.Enqueue(task, asynq.TaskID(taskID))
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return nil
+	}
+	return err
 }
 
 // NewKnowledgeBaseService creates a new knowledge base service
@@ -62,6 +155,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 	tenantRepo interfaces.TenantRepository,
 	fileSvc interfaces.FileService,
 	storageResolver interfaces.StorageBackendResolver,
+	resourceCatalog interfaces.ResourceCatalog,
 	graphEngine interfaces.RetrieveGraphRepository,
 	asynqClient interfaces.TaskEnqueuer,
 	taskInspector interfaces.TaskInspector,
@@ -83,6 +177,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 		tenantRepo:      tenantRepo,
 		fileSvc:         fileSvc,
 		storageResolver: storageResolver,
+		resourceCatalog: resourceCatalog,
 		graphEngine:     graphEngine,
 		asynqClient:     asynqClient,
 		taskInspector:   taskInspector,
@@ -385,7 +480,7 @@ func (s *knowledgeBaseService) ListKnowledgeBases(ctx context.Context) ([]*types
 			ctx,
 			tenantID,
 			kb.ID,
-			[]string{"pending", "processing"},
+			knowledgeInFlightParseStatuses(),
 		)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to check processing status for knowledge base %s: %v", kb.ID, err)
@@ -426,7 +521,7 @@ func (s *knowledgeBaseService) ListKnowledgeBasesByTenantID(ctx context.Context,
 				kb.ChunkCount = cnt
 			}
 		}
-		if processingCount, err := s.kgRepo.CountKnowledgeByStatus(ctx, tenantID, kb.ID, []string{"pending", "processing"}); err == nil {
+		if processingCount, err := s.kgRepo.CountKnowledgeByStatus(ctx, tenantID, kb.ID, knowledgeInFlightParseStatuses()); err == nil {
 			kb.IsProcessing = processingCount > 0
 			kb.ProcessingCount = processingCount
 		}
@@ -460,7 +555,7 @@ func (s *knowledgeBaseService) FillKnowledgeBaseCounts(ctx context.Context, kb *
 			kb.ChunkCount = cnt
 		}
 	}
-	if processingCount, err := s.kgRepo.CountKnowledgeByStatus(ctx, tenantID, kb.ID, []string{"pending", "processing"}); err == nil {
+	if processingCount, err := s.kgRepo.CountKnowledgeByStatus(ctx, tenantID, kb.ID, knowledgeInFlightParseStatuses()); err == nil {
 		kb.IsProcessing = processingCount > 0
 		kb.ProcessingCount = processingCount
 	}
@@ -718,8 +813,10 @@ func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id strin
 		return err
 	}
 	var vectorStoreIDSnapshot *string
+	var storageBackendIDSnapshot *string
 	if kb != nil {
 		vectorStoreIDSnapshot = kb.VectorStoreID
+		storageBackendIDSnapshot = kb.StorageBackendID
 	}
 
 	// Step 1: Delete the knowledge base record first (mark as deleted)
@@ -776,29 +873,130 @@ func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id strin
 		KnowledgeBaseID:  id,
 		DataSourceIDs:    dataSourceIDs,
 		EffectiveEngines: tenantInfo.GetEffectiveEngines(),
-		VectorStoreID:    vectorStoreIDSnapshot, // snapshot taken before soft-delete
+		VectorStoreID:    vectorStoreIDSnapshot,    // snapshot taken before soft-delete
+		StorageBackendID: storageBackendIDSnapshot, // 软删除前快照
 	}
 	langfuse.InjectTracing(ctx, &payload)
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to marshal KB delete payload: %v", err)
-		// Don't fail the request, the KB record is already deleted
-		return nil
+		logger.Errorf(ctx, "Failed to marshal KB delete payload; durable recovery will retry: %v", err)
+		return fmt.Errorf("knowledge base was deleted but cleanup task payload could not be created: %w", err)
 	}
 
 	task := asynq.NewTask(types.TypeKBDelete, payloadBytes,
 		asynq.Queue(types.QueueMaintenance), asynq.MaxRetry(3), asynq.Timeout(2*time.Hour))
-	info, err := s.asynqClient.Enqueue(task)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to enqueue KB delete task: %v", err)
-		// Don't fail the request, the KB record is already deleted
+	info, err := s.asynqClient.Enqueue(task, asynq.TaskID(kbDeleteTaskID(id)))
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		logger.Infof(ctx, "KB delete task already exists, knowledge base ID: %s", id)
 		return nil
+	}
+	if err != nil {
+		logger.Errorf(ctx, "Failed to enqueue KB delete task; durable recovery will retry: %v", err)
+		return fmt.Errorf("knowledge base was deleted but cleanup task enqueue failed: %w", err)
 	}
 
 	logger.Infof(ctx, "KB delete task enqueued: %s, knowledge base ID: %s", info.ID, id)
 	logger.Infof(ctx, "Knowledge base deleted successfully, ID: %s", id)
 	return nil
+}
+
+// RecoverPendingKBDeletes 重新提交已软删除但仍有知识、目录或附属资源的清理任务。
+// 数据库残留是持久化恢复依据，因此 Redis 短暂不可用不会永久丢失任务。
+func (s *knowledgeBaseService) RecoverPendingKBDeletes(ctx context.Context, limit int) error {
+	lookup, ok := s.repo.(deletedKnowledgeBaseRecoveryLookup)
+	if !ok {
+		return errors.New("knowledge base repository does not support delete recovery")
+	}
+	if s.asynqClient == nil || s.tenantRepo == nil {
+		return errors.New("knowledge base delete recovery dependencies are unavailable")
+	}
+	knowledgeBases, err := lookup.ListDeletedKnowledgeBasesWithActiveKnowledge(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("list pending knowledge base deletes: %w", err)
+	}
+	var recoveryErr error
+	for _, knowledgeBase := range knowledgeBases {
+		if knowledgeBase == nil {
+			continue
+		}
+		tenant, tenantErr := s.tenantRepo.GetTenantByID(ctx, knowledgeBase.TenantID)
+		if tenantErr != nil || tenant == nil {
+			if tenantErr == nil {
+				tenantErr = errors.New("tenant not found")
+			}
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+				"load tenant %d for KB delete recovery: %w",
+				knowledgeBase.TenantID,
+				tenantErr,
+			))
+			continue
+		}
+		var dataSourceIDs []string
+		if dataSourceLookup, ok := s.repo.(deletedKnowledgeBaseCleanupDataSourceLookup); ok {
+			var dataSourceErr error
+			dataSourceIDs, dataSourceErr = dataSourceLookup.ListKnowledgeBaseCleanupDataSourceIDs(
+				ctx,
+				knowledgeBase.ID,
+			)
+			if dataSourceErr != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+					"list data sources for KB delete recovery %s: %w",
+					knowledgeBase.ID,
+					dataSourceErr,
+				))
+				continue
+			}
+		}
+		payload := types.KBDeletePayload{
+			TenantID:         knowledgeBase.TenantID,
+			KnowledgeBaseID:  knowledgeBase.ID,
+			DataSourceIDs:    dataSourceIDs,
+			EffectiveEngines: tenant.GetEffectiveEngines(),
+			VectorStoreID:    knowledgeBase.VectorStoreID,
+			StorageBackendID: knowledgeBase.StorageBackendID,
+		}
+		payloadBytes, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+				"marshal KB delete recovery payload for %s: %w",
+				knowledgeBase.ID,
+				marshalErr,
+			))
+			continue
+		}
+		task := asynq.NewTask(
+			types.TypeKBDelete,
+			payloadBytes,
+			asynq.Queue(types.QueueMaintenance),
+			asynq.MaxRetry(3),
+			asynq.Timeout(2*time.Hour),
+		)
+		_, enqueueErr := s.asynqClient.Enqueue(task, asynq.TaskID(kbDeleteTaskID(knowledgeBase.ID)))
+		if enqueueErr == nil {
+			continue
+		}
+		if errors.Is(enqueueErr, asynq.ErrTaskIDConflict) {
+			if conflictErr := s.recoverConflictingKBDeleteTask(
+				ctx,
+				knowledgeBase.ID,
+				task,
+			); conflictErr != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+					"recover conflicting KB delete task for %s: %w",
+					knowledgeBase.ID,
+					conflictErr,
+				))
+			}
+			continue
+		}
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf(
+			"enqueue KB delete recovery for %s: %w",
+			knowledgeBase.ID,
+			enqueueErr,
+		))
+	}
+	return recoveryErr
 }
 
 // ProcessKBDelete handles async knowledge base deletion task
@@ -816,6 +1014,19 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 
 	// Set tenant context for downstream services
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	lookup, ok := s.repo.(deletedKnowledgeBaseLookup)
+	if ok {
+		deletedKB, err := lookup.GetKnowledgeBaseByIDAndTenantUnscoped(ctx, kbID, tenantID)
+		if err != nil {
+			return fmt.Errorf("validate knowledge base delete task scope: %w", err)
+		}
+		if deletedKB == nil || deletedKB.TenantID != tenantID || deletedKB.ID != kbID {
+			return errors.Join(
+				asynq.SkipRetry,
+				fmt.Errorf("knowledge base delete task tenant mismatch: tenant=%d kb=%s", tenantID, kbID),
+			)
+		}
+	}
 	defer func() {
 		// Workers may enqueue downstream work while the delete task performs
 		// heavy storage cleanup. A detached, bounded final scrub runs on every
@@ -826,6 +1037,20 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	}()
 
 	logger.Infof(ctx, "Processing KB delete task for knowledge base: %s", kbID)
+	if s.shareRepo != nil {
+		if err := s.shareRepo.DeleteByKnowledgeBaseID(ctx, kbID); err != nil {
+			return fmt.Errorf("delete knowledge base shares: %w", err)
+		}
+	}
+	dataSourceIDs, err := s.cleanupDataSourcesForKnowledgeBase(
+		ctx,
+		kbID,
+		payload.DataSourceIDs,
+	)
+	if err != nil {
+		return fmt.Errorf("delete knowledge base data sources: %w", err)
+	}
+	payload.DataSourceIDs = dataSourceIDs
 
 	// Step 1: Get all knowledge entries in this knowledge base
 	logger.Infof(ctx, "Fetching all knowledge entries in knowledge base, ID: %s", kbID)
@@ -841,6 +1066,21 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	for _, knowledge := range knowledgeList {
 		knowledgeIDs = append(knowledgeIDs, knowledge.ID)
 	}
+	if len(knowledgeIDs) > 0 {
+		claimer, ok := s.kgRepo.(knowledgeListDeleteClaimer)
+		if !ok {
+			return errors.New("knowledge repository does not support delete claims")
+		}
+		claimed, err := claimer.ClaimKnowledgeListForKBDelete(ctx, tenantID, kbID, knowledgeIDs)
+		if err != nil {
+			return fmt.Errorf("claim knowledge list for knowledge base cleanup: %w", err)
+		}
+		knowledgeList = claimed
+		knowledgeIDs = knowledgeIDs[:0]
+		for _, knowledge := range knowledgeList {
+			knowledgeIDs = append(knowledgeIDs, knowledge.ID)
+		}
+	}
 
 	// Repeat the best-effort queue scrub with document IDs. Some batch tasks
 	// only carry knowledge_id(s), and active work from the first pass may have
@@ -850,14 +1090,64 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	// Step 2: Delete all knowledge entries and their resources
 	if len(knowledgeList) > 0 {
 		logger.Infof(ctx, "Deleting all knowledge entries and their resources")
+		cleanupFileSvc := s.fileSvc
+		storageBackendID := ""
+		storageProvider := ""
+		if payload.StorageBackendID != nil {
+			storageBackendID = strings.TrimSpace(*payload.StorageBackendID)
+		}
+		if storageBackendID == "" {
+			if lookup, ok := s.repo.(deletedKnowledgeBaseLookup); ok {
+				deletedKB, err := lookup.GetKnowledgeBaseByIDAndTenantUnscoped(ctx, kbID, tenantID)
+				if err != nil {
+					return fmt.Errorf("load deleted knowledge base storage snapshot: %w", err)
+				}
+				if deletedKB != nil {
+					if deletedKB.StorageBackendID != nil {
+						storageBackendID = strings.TrimSpace(*deletedKB.StorageBackendID)
+					}
+					storageProvider = deletedKB.GetStorageProvider()
+				}
+			}
+		}
+		// 删除 chunk 前必须先收集图片引用；失败时保留原始行并交给队列重试。
+		chunkImageInfos, err := s.chunkRepo.ListImageInfoByKnowledgeIDs(ctx, tenantID, knowledgeIDs)
+		if err != nil {
+			return fmt.Errorf("collect image URLs for knowledge base cleanup: %w", err)
+		}
+		imageInfoStrs := make([]string, 0, len(chunkImageInfos))
+		for _, chunkImageInfo := range chunkImageInfos {
+			imageInfoStrs = append(imageInfoStrs, chunkImageInfo.ImageInfo)
+		}
+		imageURLs := collectImageURLs(ctx, imageInfoStrs)
+		needsDefaultStorage := func(filePath string) bool {
+			if strings.TrimSpace(filePath) == "" {
+				return false
+			}
+			if _, ok := types.ParseResourcePath(filePath); ok {
+				return false
+			}
+			_, _, scoped := types.ParseStorageBackendPath(filePath)
+			return !scoped
+		}
+		requiresDefaultStorage := false
+		for _, knowledge := range knowledgeList {
+			requiresDefaultStorage = requiresDefaultStorage || needsDefaultStorage(knowledge.FilePath)
+		}
+		for _, imageURL := range imageURLs {
+			requiresDefaultStorage = requiresDefaultStorage || needsDefaultStorage(imageURL)
+		}
+		if requiresDefaultStorage &&
+			(storageBackendID != "" || strings.TrimSpace(storageProvider) != "") {
+			resolved, err := s.resolveKBDeleteStorageService(ctx, tenantID, storageBackendID, storageProvider)
+			if err != nil {
+				return err
+			}
+			cleanupFileSvc = resolved
+		}
 
-		// Delete embeddings from vector store.
-		// Resolve the engine via the factory, using the VectorStoreID captured
-		// at enqueue time (may be nil → falls back to payload.EffectiveEngines).
-		// If the payload references a store no longer owned/registered
-		// (e.g. tampered queue entry or a store that was deleted while the
-		// task sat in the queue), the factory returns a sentinel and we
-		// SkipRetry to avoid burning retries on an unrecoverable situation.
+		// 向量存储已不存在或不属于当前租户时，不访问该存储，但继续清理
+		// 当前租户自己的文件、chunk、图和数据库行。
 		logger.Infof(ctx, "Deleting embeddings from vector store")
 		retrieveEngine, err := retriever.CreateRetrieveEngineFromPayload(
 			ctx,
@@ -867,19 +1157,15 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 			payload.EffectiveEngines,
 			payload.VectorStoreID,
 		)
-		if errors.Is(err, retriever.ErrVectorStoreForbidden) ||
-			errors.Is(err, retriever.ErrVectorStoreNotFound) {
-			logger.Errorf(ctx, "KB delete task aborted: %v (tenant=%d, kb=%s)", err, payload.TenantID, payload.KnowledgeBaseID)
-			return asynq.SkipRetry
-		}
-		if err != nil {
-			// Transient failures — store temporarily unavailable, request
-			// cancellation during resolution, or other retryable errors —
-			// must not fall through and report success while embeddings remain.
+		if errors.Is(err, retriever.ErrVectorStoreForbidden) || errors.Is(err, retriever.ErrVectorStoreNotFound) {
+			logger.Warnf(ctx, "Skipping unavailable vector store during KB cleanup: %v (tenant=%d, kb=%s)",
+				err, payload.TenantID, payload.KnowledgeBaseID)
+			retrieveEngine = nil
+		} else if err != nil {
 			logger.Errorf(ctx, "KB delete task deferred: %v (tenant=%d, kb=%s)", err, payload.TenantID, payload.KnowledgeBaseID)
 			return err
-		} else {
-			// Group knowledge by embedding model and type
+		}
+		if retrieveEngine != nil {
 			type groupKey struct {
 				EmbeddingModelID string
 				Type             string
@@ -891,55 +1177,41 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 			}
 
 			for key, knowledgeGroup := range embeddingGroups {
-				embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
-				if err != nil {
-					logger.Warnf(ctx, "Failed to get embedding model %s: %v", key.EmbeddingModelID, err)
+				if strings.TrimSpace(key.EmbeddingModelID) == "" {
 					continue
 				}
+				embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
+				if err != nil {
+					return fmt.Errorf("load embedding model %s for knowledge base cleanup: %w", key.EmbeddingModelID, err)
+				}
 				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeGroup, embeddingModel.GetDimensions(), key.Type); err != nil {
-					logger.Warnf(ctx, "Failed to delete embeddings for model %s: %v", key.EmbeddingModelID, err)
+					return fmt.Errorf("delete embeddings for model %s: %w", key.EmbeddingModelID, err)
 				}
 			}
 		}
 
-		// Collect image URLs before chunks are deleted
-		chunkImageInfos, imgErr := s.chunkRepo.ListImageInfoByKnowledgeIDs(ctx, tenantID, knowledgeIDs)
-		if imgErr != nil {
-			logger.Warnf(ctx, "Failed to collect image URLs for KB delete: %v", imgErr)
+		// 先删物理资源再删 chunk。若存储瞬时失败，chunk 中的图片引用仍可供重试。
+		logger.Infof(ctx, "Deleting physical files and extracted images")
+		for _, knowledge := range knowledgeList {
+			if knowledge.FilePath != "" {
+				if err := s.deleteKBStoredFile(ctx, cleanupFileSvc, true, knowledge.FilePath); err != nil {
+					return fmt.Errorf("delete source file for knowledge %s: %w", knowledge.ID, err)
+				}
+			}
 		}
-		var imageInfoStrs []string
-		for _, ci := range chunkImageInfos {
-			imageInfoStrs = append(imageInfoStrs, ci.ImageInfo)
+		for _, imageURL := range imageURLs {
+			if err := s.deleteKBStoredFile(ctx, cleanupFileSvc, true, imageURL); err != nil {
+				return fmt.Errorf("delete extracted image %s: %w", imageURL, err)
+			}
 		}
-		imageURLs := collectImageURLs(ctx, imageInfoStrs)
 
-		// Delete all chunks
 		logger.Infof(ctx, "Deleting all chunks in knowledge base")
 		for _, knowledgeID := range knowledgeIDs {
 			if err := s.chunkRepo.DeleteChunksByKnowledgeID(ctx, tenantID, knowledgeID); err != nil {
-				logger.Warnf(ctx, "Failed to delete chunks for knowledge %s: %v", knowledgeID, err)
+				return fmt.Errorf("delete chunks for knowledge %s: %w", knowledgeID, err)
 			}
 		}
 
-		// Delete physical files, extracted images, and adjust storage
-		logger.Infof(ctx, "Deleting physical files and extracted images")
-		storageAdjust := int64(0)
-		for _, knowledge := range knowledgeList {
-			if knowledge.FilePath != "" {
-				if err := s.fileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-					logger.Warnf(ctx, "Failed to delete file %s: %v", knowledge.FilePath, err)
-				}
-			}
-			storageAdjust -= knowledge.QuotaStorageBytes()
-		}
-		deleteExtractedImages(ctx, s.fileSvc, imageURLs)
-		if storageAdjust != 0 {
-			if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantID, storageAdjust); err != nil {
-				logger.Warnf(ctx, "Failed to adjust tenant storage: %v", err)
-			}
-		}
-
-		// Delete knowledge graph data
 		logger.Infof(ctx, "Deleting knowledge graph data")
 		namespaces := make([]types.NameSpace, 0, len(knowledgeList))
 		for _, knowledge := range knowledgeList {
@@ -950,22 +1222,127 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 		}
 		if s.graphEngine != nil && len(namespaces) > 0 {
 			if err := s.graphEngine.DelGraph(ctx, namespaces); err != nil {
-				logger.Warnf(ctx, "Failed to delete knowledge graph: %v", err)
+				return fmt.Errorf("delete knowledge graph: %w", err)
 			}
 		}
 
-		// Delete all knowledge entries from database
-		logger.Infof(ctx, "Deleting knowledge entries from database")
-		if err := s.kgRepo.DeleteKnowledgeList(ctx, tenantID, knowledgeIDs); err != nil {
-			logger.ErrorWithFields(ctx, err, map[string]interface{}{
-				"knowledge_base_id": kbID,
-			})
-			return err
+		for _, knowledgeID := range knowledgeIDs {
+			if err := s.kgRepo.DeleteKnowledgeTagRelations(ctx, knowledgeID); err != nil {
+				return fmt.Errorf("delete tag relations for knowledge %s: %w", knowledgeID, err)
+			}
 		}
+	}
+
+	// 知识软删除、空间配额扣减和显式目录删除必须处于同一事务。
+	// 即使知识库没有文档，也要清理用户创建的空目录。
+	logger.Infof(ctx, "Finalizing knowledge records, quota and folders in database")
+	transactionalDeleter, ok := s.kgRepo.(knowledgeListAndQuotaDeleter)
+	if !ok {
+		return errors.New("knowledge repository does not support transactional quota cleanup")
+	}
+	if err := transactionalDeleter.DeleteKnowledgeListAndAdjustStorage(ctx, tenantID, kbID, knowledgeIDs); err != nil {
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+			"knowledge_base_id": kbID,
+		})
+		return err
 	}
 
 	logger.Infof(ctx, "KB delete task completed successfully, knowledge base ID: %s", kbID)
 	return nil
+}
+
+func (s *knowledgeBaseService) resolveKBDeleteStorageService(
+	ctx context.Context,
+	tenantID uint64,
+	backendID string,
+	provider string,
+) (interfaces.FileService, error) {
+	if s.storageResolver == nil || s.tenantRepo == nil {
+		return nil, errors.New("storage backend resolver is unavailable for knowledge base cleanup")
+	}
+	tenant, err := s.tenantRepo.GetTenantByID(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("load tenant for knowledge base cleanup: %w", err)
+	}
+	if tenant == nil {
+		return nil, errors.New("tenant is unavailable for knowledge base cleanup")
+	}
+	baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
+	resolved, _, err := s.storageResolver.ResolveFileService(
+		ctx,
+		tenant,
+		strings.TrimSpace(backendID),
+		strings.TrimSpace(provider),
+		baseDir,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve storage backend for knowledge base cleanup: %w", err)
+	}
+	if resolved == nil {
+		return nil, errors.New("resolved storage backend is unavailable for knowledge base cleanup")
+	}
+	return resolved, nil
+}
+
+func (s *knowledgeBaseService) deleteKBStoredFile(
+	ctx context.Context,
+	preferred interfaces.FileService,
+	resolvePathBackend bool,
+	filePath string,
+) error {
+	if strings.TrimSpace(filePath) == "" {
+		return nil
+	}
+	fileSvc := preferred
+	if resolvePathBackend {
+		if _, isResource := types.ParseResourcePath(filePath); isResource {
+			if s.resourceCatalog == nil {
+				return fileSvc.DeleteFile(ctx, filePath)
+			}
+			resource, err := s.resourceCatalog.Resolve(ctx, filePath)
+			if errors.Is(err, interfaces.ErrResourceNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("resolve resource for knowledge base cleanup: %w", err)
+			}
+			if resource == nil {
+				return nil
+			}
+			if resource.TenantID != types.MustTenantIDFromContext(ctx) {
+				return fmt.Errorf(
+					"resource tenant mismatch during knowledge base cleanup: resource_tenant=%d task_tenant=%d",
+					resource.TenantID,
+					types.MustTenantIDFromContext(ctx),
+				)
+			}
+			resolved, err := s.resolveKBDeleteStorageService(
+				ctx,
+				resource.TenantID,
+				resource.StorageBackendID,
+				resource.Provider,
+			)
+			if err != nil {
+				return err
+			}
+			fileSvc = resolved
+		} else if backendID, innerPath, ok := types.ParseStorageBackendPath(filePath); ok {
+			resolved, err := s.resolveKBDeleteStorageService(
+				ctx,
+				types.MustTenantIDFromContext(ctx),
+				backendID,
+				types.ParseProviderScheme(innerPath),
+			)
+			if err != nil {
+				return err
+			}
+			fileSvc = resolved
+		}
+	}
+	if fileSvc == nil {
+		return errors.New("file service is unavailable for knowledge base cleanup")
+	}
+	return fileSvc.DeleteFile(ctx, filePath)
 }
 
 // cancelTasksForKnowledgeBase removes queue work for a deleted KB when the
@@ -1011,38 +1388,77 @@ func (s *knowledgeBaseService) cleanupTasksForKnowledgeBase(
 	s.cancelTasksForKnowledgeBase(ctx, kbID, knowledgeIDs, dataSourceIDs)
 }
 
-// deleteDataSourcesForKnowledgeBase mirrors DataSourceService.DeleteDataSource for
-// every data source attached to the KB. Errors on individual sources are logged
-// but do not fail KB deletion — the KB record is already soft-deleted.
-func (s *knowledgeBaseService) deleteDataSourcesForKnowledgeBase(ctx context.Context, kbID string) []string {
-	if s.dsRepo == nil {
-		return nil
+func (s *knowledgeBaseService) cleanupDataSourcesForKnowledgeBase(
+	ctx context.Context,
+	kbID string,
+	knownIDs []string,
+) ([]string, error) {
+	dataSourceIDs := make([]string, 0, len(knownIDs))
+	seen := make(map[string]struct{}, len(knownIDs))
+	appendID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		dataSourceIDs = append(dataSourceIDs, id)
+	}
+	for _, id := range knownIDs {
+		appendID(id)
 	}
 
-	dataSources, err := s.dsRepo.FindByKnowledgeBase(ctx, kbID)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to list data sources for deleted KB %s: %v", kbID, err)
-		return nil
-	}
-	dataSourceIDs := make([]string, 0, len(dataSources))
-	for _, ds := range dataSources {
-		if ds == nil || ds.ID == "" {
-			continue
-		}
-		dataSourceIDs = append(dataSourceIDs, ds.ID)
-		if err := s.dsRepo.Delete(ctx, ds.ID); err != nil {
-			logger.Warnf(ctx, "Failed to delete data source %s for KB %s: %v", ds.ID, kbID, err)
-			continue
-		}
-		if s.dsScheduler != nil {
-			s.dsScheduler.Remove(ds.ID)
-		}
-		if s.syncLogRepo != nil {
-			if err := s.syncLogRepo.CancelPendingByDataSource(ctx, ds.ID); err != nil {
-				logger.Warnf(ctx, "Failed to cancel pending sync logs for ds=%s (kb=%s): %v", ds.ID, kbID, err)
+	var cleanupErr error
+	var activeDataSources []*types.DataSource
+	if s.dsRepo != nil {
+		dataSources, err := s.dsRepo.FindByKnowledgeBase(ctx, kbID)
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("list data sources: %w", err))
+		} else {
+			activeDataSources = dataSources
+			for _, dataSource := range dataSources {
+				if dataSource != nil {
+					appendID(dataSource.ID)
+				}
 			}
 		}
-		logger.Infof(ctx, "Data source deleted with knowledge base: ds=%s kb=%s", ds.ID, kbID)
+	}
+
+	for _, dataSource := range activeDataSources {
+		if dataSource == nil || strings.TrimSpace(dataSource.ID) == "" {
+			continue
+		}
+		if err := s.dsRepo.Delete(ctx, dataSource.ID); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("delete data source %s: %w", dataSource.ID, err),
+			)
+		}
+	}
+	for _, dataSourceID := range dataSourceIDs {
+		if s.dsScheduler != nil {
+			s.dsScheduler.Remove(dataSourceID)
+		}
+		if s.syncLogRepo != nil {
+			if err := s.syncLogRepo.CancelPendingByDataSource(ctx, dataSourceID); err != nil {
+				cleanupErr = errors.Join(
+					cleanupErr,
+					fmt.Errorf("cancel pending sync logs for %s: %w", dataSourceID, err),
+				)
+			}
+		}
+	}
+	return dataSourceIDs, cleanupErr
+}
+
+// deleteDataSourcesForKnowledgeBase 执行请求路径的即时清理。
+// 异步删除任务会严格重试这里记录的任何失败，因此该快速路径只记录告警。
+func (s *knowledgeBaseService) deleteDataSourcesForKnowledgeBase(ctx context.Context, kbID string) []string {
+	dataSourceIDs, err := s.cleanupDataSourcesForKnowledgeBase(ctx, kbID, nil)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to delete data sources for deleted KB %s: %v", kbID, err)
 	}
 	return dataSourceIDs
 }

@@ -2,10 +2,35 @@ package file
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 )
+
+type ossBucketClientStub struct {
+	exists   bool
+	checkErr error
+	putErr   error
+	putCalls int
+}
+
+func (s *ossBucketClientStub) IsBucketExist(context.Context, string, ...func(*oss.Options)) (bool, error) {
+	return s.exists, s.checkErr
+}
+
+func (s *ossBucketClientStub) PutBucket(
+	context.Context,
+	*oss.PutBucketRequest,
+	...func(*oss.Options),
+) (*oss.PutBucketResult, error) {
+	s.putCalls++
+	return &oss.PutBucketResult{}, s.putErr
+}
 
 func TestParseOssFilePath(t *testing.T) {
 	tests := []struct {
@@ -99,6 +124,10 @@ func TestParseOssFilePath(t *testing.T) {
 }
 
 func TestNewOSSClient(t *testing.T) {
+	fakedns.InstallDefault(t, map[string][]string{
+		"oss-cn-hangzhou.aliyuncs.com": {"8.8.8.8"},
+		"example.com":                  {"8.8.8.8"},
+	})
 	tests := []struct {
 		name      string
 		endpoint  string
@@ -170,40 +199,30 @@ func TestCheckOssConnectivity_InvalidEndpoint(t *testing.T) {
 }
 
 func TestOssEnsureBucket_NonExistent(t *testing.T) {
-	client, err := newOSSClient(
-		"https://oss-cn-hangzhou.aliyuncs.com",
-		"cn-hangzhou",
-		"test-invalid-key",
-		"test-invalid-secret",
-	)
-	if err != nil {
-		t.Fatalf("newOSSClient() error: %v", err)
+	client := &ossBucketClientStub{checkErr: errors.New("连接失败")}
+	err := ossEnsureBucket(client, "unreachable-bucket")
+	if err == nil || !strings.Contains(err.Error(), "failed to check OSS bucket") {
+		t.Fatalf("ossEnsureBucket() error = %v", err)
 	}
-
-	// Bucket that definitely doesn't exist - should return error
-	err = ossEnsureBucket(client, "this-bucket-definitely-does-not-exist-12345")
-	if err == nil {
-		t.Error("ossEnsureBucket with non-existent bucket should return an error")
+	if client.putCalls != 0 {
+		t.Fatalf("PutBucket calls = %d, want 0", client.putCalls)
 	}
 }
 
 func TestOssEnsureBucket_CreateFails(t *testing.T) {
-	client, err := newOSSClient(
-		"https://oss-cn-hangzhou.aliyuncs.com",
-		"cn-hangzhou",
-		"test-invalid-key",
-		"test-invalid-secret",
-	)
-	if err != nil {
-		t.Fatalf("newOSSClient() error: %v", err)
+	client := &ossBucketClientStub{putErr: errors.New("拒绝创建")}
+	err := ossEnsureBucket(client, "missing-bucket")
+	if err == nil || !strings.Contains(err.Error(), "failed to create OSS bucket") {
+		t.Fatalf("ossEnsureBucket() error = %v", err)
 	}
+	if client.putCalls != 1 {
+		t.Fatalf("PutBucket calls = %d, want 1", client.putCalls)
+	}
+}
 
-	// Use a bucket that does not exist so IsBucketExist returns false and the
-	// create path is exercised; with invalid credentials PutBucket then fails.
-	// A common name like "test-bucket" already exists globally on OSS, which
-	// would short-circuit at IsBucketExist and make this assertion flaky.
-	err = ossEnsureBucket(client, "weknora-nonexistent-bucket-create-fails-12345")
-	if err == nil {
-		t.Error("ossEnsureBucket with invalid credentials should return an error")
+func TestOssEnsureBucketAcceptsConcurrentCreateConflict(t *testing.T) {
+	client := &ossBucketClientStub{putErr: &oss.ServiceError{StatusCode: http.StatusConflict}}
+	if err := ossEnsureBucket(client, "concurrently-created"); err != nil {
+		t.Fatalf("ossEnsureBucket() error = %v", err)
 	}
 }

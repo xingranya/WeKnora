@@ -79,9 +79,12 @@ func (s *stubAgentRepoForModelDelete) ListNamesBySandboxConfigID(context.Context
 }
 
 type stubModelRepoForDelete struct {
-	model  *types.Model
-	delete func(id string) error
-	update func(model *types.Model) error
+	model               *types.Model
+	delete              func(id string) error
+	update              func(model *types.Model) error
+	updateConfiguration func(model *types.Model) error
+	updateCredentials   func(tenantID uint64, id string, apiKey, appSecret, managedBy *string) error
+	updateStatus        func(tenantID uint64, id string, status types.ModelStatus) error
 }
 
 func (s *stubModelRepoForDelete) Create(context.Context, *types.Model) error { return nil }
@@ -97,6 +100,51 @@ func (s *stubModelRepoForDelete) List(context.Context, uint64, types.ModelType, 
 func (s *stubModelRepoForDelete) Update(_ context.Context, model *types.Model) error {
 	if s.update != nil {
 		return s.update(model)
+	}
+	return nil
+}
+func (s *stubModelRepoForDelete) UpdateConfiguration(_ context.Context, model *types.Model) error {
+	if s.updateConfiguration != nil {
+		return s.updateConfiguration(model)
+	}
+	return s.Update(context.Background(), model)
+}
+func (s *stubModelRepoForDelete) UpdateCredentials(
+	_ context.Context,
+	tenantID uint64,
+	id string,
+	apiKey *string,
+	appSecret *string,
+	managedBy *string,
+) error {
+	if s.updateCredentials != nil {
+		return s.updateCredentials(tenantID, id, apiKey, appSecret, managedBy)
+	}
+	if s.model != nil {
+		if apiKey != nil {
+			s.model.Parameters.APIKey = *apiKey
+		}
+		if appSecret != nil {
+			s.model.Parameters.AppSecret = *appSecret
+		}
+		if managedBy != nil {
+			s.model.ManagedBy = *managedBy
+		}
+		return s.Update(context.Background(), s.model)
+	}
+	return nil
+}
+func (s *stubModelRepoForDelete) UpdateStatus(
+	_ context.Context,
+	tenantID uint64,
+	id string,
+	status types.ModelStatus,
+) error {
+	if s.updateStatus != nil {
+		return s.updateStatus(tenantID, id, status)
+	}
+	if s.model != nil {
+		s.model.Status = status
 	}
 	return nil
 }

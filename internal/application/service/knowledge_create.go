@@ -728,7 +728,10 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	task := asynq.NewTask(
 		types.TypeDocumentProcess,
 		payloadBytes,
-		documentProcessTaskOptions(s.config)...,
+		documentProcessTaskOptions(
+			s.config,
+			asynq.TaskID("document-process-"+knowledge.ID),
+		)...,
 	)
 	info, err := s.task.Enqueue(task)
 	if err != nil {
@@ -951,7 +954,13 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 	// Process passages
 	if syncMode {
 		logger.Info(ctx, "Processing passage synchronously")
-		s.processDocumentFromPassage(ctx, kb, knowledge, safePassages)
+		if err := s.processDocumentFromPassage(ctx, kb, knowledge, safePassages); err != nil {
+			recordKBActivity(ctx, s.audit, knowledge.TenantID, kbID, types.AuditActionKnowledgeCreated,
+				"knowledge", knowledge.ID, types.AuditOutcomeFailed, map[string]any{
+					"title": knowledge.Title, "source_type": "passage", "processing_status": types.ParseStatusFailed,
+				})
+			return knowledge, err
+		}
 		recordKBActivity(ctx, s.audit, knowledge.TenantID, kbID, types.AuditActionKnowledgeCreated,
 			"knowledge", knowledge.ID, types.AuditOutcomeSuccess, map[string]any{
 				"title": knowledge.Title, "source_type": "passage", "processing_status": knowledge.ParseStatus,
@@ -1023,6 +1032,16 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 		logger.Infof(ctx, "Knowledge from passage created successfully, ID: %s", knowledge.ID)
 	}
 	return knowledge, nil
+}
+
+type manualKnowledgePatcher interface {
+	PatchManualKnowledge(
+		context.Context,
+		uint64,
+		string,
+		map[string]interface{},
+		types.JSON,
+	) (applied bool, status string, err error)
 }
 
 // UpdateManualKnowledge updates manual Markdown knowledge content.
@@ -1098,13 +1117,51 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	existing.EnableStatus = "disabled"
 	existing.UpdatedAt = time.Now()
 	existing.EmbeddingModelID = kb.EmbeddingModelID
+	existing.ErrorMessage = ""
+	existing.PendingSubtasksCount = 0
+	persistManualPatch := func() error {
+		patcher, ok := s.repo.(manualKnowledgePatcher)
+		if !ok {
+			return errors.New("knowledge repository does not support guarded manual patches")
+		}
+		applied, currentStatus, patchErr := patcher.PatchManualKnowledge(
+			ctx,
+			tenantID,
+			existing.ID,
+			map[string]interface{}{
+				"title":                  existing.Title,
+				"file_name":              existing.FileName,
+				"file_type":              existing.FileType,
+				"type":                   existing.Type,
+				"source":                 existing.Source,
+				"enable_status":          existing.EnableStatus,
+				"embedding_model_id":     existing.EmbeddingModelID,
+				"parse_status":           existing.ParseStatus,
+				"description":            existing.Description,
+				"processed_at":           existing.ProcessedAt,
+				"error_message":          existing.ErrorMessage,
+				"pending_subtasks_count": existing.PendingSubtasksCount,
+				"updated_at":             existing.UpdatedAt,
+			},
+			existing.Metadata,
+		)
+		if patchErr != nil {
+			return patchErr
+		}
+		if !applied {
+			return werrors.NewConflictError(
+				fmt.Sprintf("知识当前处于 %s 状态，无法编辑", currentStatus),
+			)
+		}
+		return nil
+	}
 
 	if status == types.ManualKnowledgeStatusDraft {
 		existing.ParseStatus = types.ManualKnowledgeStatusDraft
 		existing.Description = ""
 		existing.ProcessedAt = nil
 
-		if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
+		if err := persistManualPatch(); err != nil {
 			logger.Errorf(ctx, "Failed to persist manual draft: %v", err)
 			return nil, err
 		}
@@ -1124,7 +1181,7 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 		return nil, err
 	}
 
-	if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
+	if err := persistManualPatch(); err != nil {
 		logger.Errorf(ctx, "Failed to persist manual knowledge before indexing: %v", err)
 		return nil, err
 	}
@@ -1133,10 +1190,8 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	taskID, err := s.enqueueManualProcessing(ctx, existing, cleanContent, true)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue manual processing task: %v", err)
-		// Non-fatal: mark as failed so user can retry
-		existing.ParseStatus = "failed"
-		existing.ErrorMessage = "Failed to enqueue processing task"
-		s.repo.UpdateKnowledge(ctx, existing)
+		// Non-fatal: 通过 guarded failure 写入，不能覆盖并发删除或取消。
+		s.markKnowledgeEnqueueFailed(ctx, existing)
 		recordKBActivity(ctx, s.audit, tenantID, existing.KnowledgeBaseID, types.AuditActionKnowledgeUpdated,
 			"knowledge", existing.ID, types.AuditOutcomeFailed, map[string]any{
 				"title": existing.Title, "status": status,
@@ -1152,9 +1207,17 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	return existing, nil
 }
 
+// manualProcessingEnqueueConfig 为需要跨进程恢复的手工解析任务提供稳定 ID，
+// 并允许调用方在默认队列参数之后追加 Asynq 选项。
+type manualProcessingEnqueueConfig struct {
+	TaskID  string
+	Options []asynq.Option
+}
+
 // enqueueManualProcessing enqueues a manual:process Asynq task for async cleanup + re-indexing.
 func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 	knowledge *types.Knowledge, content string, needCleanup bool,
+	configs ...manualProcessingEnqueueConfig,
 ) (string, error) {
 	requestID, _ := types.RequestIDFromContext(ctx)
 	payload := types.ManualProcessPayload{
@@ -1171,11 +1234,44 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 		return "", fmt.Errorf("failed to marshal manual process payload: %w", err)
 	}
 
-	task := asynq.NewTask(types.TypeManualProcess, payloadBytes,
-		asynq.Queue(types.QueueDefault), asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
-	info, err := s.task.Enqueue(task)
+	options := []asynq.Option{
+		asynq.Queue(types.QueueDefault),
+		asynq.MaxRetry(3),
+		asynq.Timeout(30 * time.Minute),
+	}
+	deterministicTaskID := ""
+	for _, config := range configs {
+		options = append(options, config.Options...)
+		if config.TaskID != "" {
+			deterministicTaskID = config.TaskID
+		}
+	}
+	if deterministicTaskID != "" {
+		// TaskID 最后追加，确保额外选项不能意外覆盖持久幂等键。
+		options = append(options, asynq.TaskID(deterministicTaskID))
+	}
+	if s.task == nil {
+		return "", errors.New("manual process queue is not configured")
+	}
+	task := asynq.NewTask(types.TypeManualProcess, payloadBytes)
+	info, err := s.task.Enqueue(task, options...)
 	if err != nil {
+		if deterministicTaskID != "" &&
+			(errors.Is(err, asynq.ErrTaskIDConflict) || errors.Is(err, asynq.ErrDuplicateTask)) {
+			logger.Infof(ctx,
+				"Manual process task already exists: knowledge_id=%s, asynq_id=%s",
+				knowledge.ID, deterministicTaskID,
+			)
+			return deterministicTaskID, nil
+		}
 		return "", fmt.Errorf("failed to enqueue manual process task: %w", err)
+	}
+	if deterministicTaskID != "" {
+		logger.Infof(ctx, "Enqueued manual process task: knowledge_id=%s, asynq_id=%s", knowledge.ID, deterministicTaskID)
+		return deterministicTaskID, nil
+	}
+	if info == nil {
+		return "", errors.New("manual process queue returned no task info")
 	}
 	logger.Infof(ctx, "Enqueued manual process task: knowledge_id=%s, asynq_id=%s", knowledge.ID, info.ID)
 	return info.ID, nil
@@ -1188,9 +1284,7 @@ func (s *knowledgeService) markKnowledgeEnqueueFailed(ctx context.Context, knowl
 	if knowledge == nil {
 		return
 	}
-	knowledge.ParseStatus = "failed"
-	knowledge.ErrorMessage = "Failed to enqueue processing task"
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
+	if err := s.failChunkProcessing(ctx, knowledge, errors.New("Failed to enqueue processing task")); err != nil {
 		logger.Errorf(ctx, "Failed to mark knowledge as failed after enqueue error: %v", err)
 	}
 }
@@ -1225,10 +1319,10 @@ func sanitizeManualDownloadFilename(title string) string {
 
 func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	kb *types.KnowledgeBase, knowledge *types.Knowledge, content string, doSync bool,
-) {
+) error {
 	clean := strings.TrimSpace(content)
 	if clean == "" {
-		return
+		return nil
 	}
 
 	// Resolve embedded data:base64 images and remote http(s) images → storage, replace URLs.
@@ -1321,10 +1415,14 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	}
 
 	if doSync {
-		s.processChunks(ctx, kb, knowledge, parsed, opts)
-		return
+		return s.processChunks(ctx, kb, knowledge, parsed, opts)
 	}
 
 	newCtx := logger.CloneContext(ctx)
-	go s.processChunks(newCtx, kb, knowledge, parsed, opts)
+	go func() {
+		if err := s.processChunks(newCtx, kb, knowledge, parsed, opts); err != nil {
+			logger.Errorf(newCtx, "Manual knowledge processing failed: %v", err)
+		}
+	}()
+	return nil
 }

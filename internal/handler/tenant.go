@@ -1118,6 +1118,7 @@ func validateAPIPrincipalExternalUserID(id string) error {
 // @Param        id   path      int  true  "空间ID"
 // @Success      200  {object}  map[string]interface{}  "删除成功"
 // @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Failure      409  {object}  errors.AppError         "空间仍有知识库或待清理资源"
 // @Security     Bearer
 // @Router       /tenants/{id} [delete]
 func (h *TenantHandler) DeleteTenant(c *gin.Context) {

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -110,7 +111,7 @@ func TestSSRFSafeURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ok, reason := isSSRFSafeURL(tt.rawURL)
+			ok, reason := isSSRFSafeURLWithLookup(tt.rawURL, publicTestLookupIP)
 			if ok != tt.wantOK {
 				t.Fatalf("isSSRFSafeURL(%q) ok = %v, want %v, reason = %q", tt.rawURL, ok, tt.wantOK, reason)
 			}
@@ -124,14 +125,83 @@ func TestSSRFSafeURL(t *testing.T) {
 func TestSSRFSafeURL_AllowPublicDomain(t *testing.T) {
 	t.Parallel()
 
-	ok, reason := isSSRFSafeURL("https://example.com/path")
+	ok, reason := isSSRFSafeURLWithLookup("https://example.com/path", publicTestLookupIP)
 	if !ok {
-		// This path depends on runtime DNS/network. If DNS is unavailable, skip to keep CI stable.
-		if strings.Contains(reason, "DNS resolution failed") {
-			t.Skipf("skip due to DNS unavailable in test environment: %s", reason)
-		}
 		t.Fatalf("expected public domain to be allowed, got ok=%v reason=%q", ok, reason)
 	}
+}
+
+func TestSSRFSafeURL_RejectsRestrictedResolvedAddresses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		host    string
+		address string
+	}{
+		{name: "benchmark network", host: "benchmark.test", address: "198.18.0.8"},
+		{name: "private network", host: "private.test", address: "10.0.0.8"},
+		{name: "loopback", host: "loopback.test", address: "127.0.0.1"},
+		{name: "documentation network", host: "documentation.test", address: "203.0.113.8"},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupIP := func(string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP(test.address)}, nil
+			}
+			if ok, reason := isSSRFSafeURLWithLookup("https://"+test.host, lookupIP); ok {
+				t.Fatalf("isSSRFSafeURL(%q) = true, want false (reason=%q)", test.host, reason)
+			}
+		})
+	}
+}
+
+func TestSSRFSafeURL_ResolverErrorAndEmptyResultFailClosed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("resolver error", func(t *testing.T) {
+		lookupIP := func(string) ([]net.IP, error) {
+			return nil, fmt.Errorf("固定的测试解析失败")
+		}
+		if ok, _ := isSSRFSafeURLWithLookup("https://resolver-error.test", lookupIP); ok {
+			t.Fatal("解析失败时必须拒绝 URL")
+		}
+	})
+
+	t.Run("empty result", func(t *testing.T) {
+		lookupIP := func(string) ([]net.IP, error) { return nil, nil }
+		if ok, _ := isSSRFSafeURLWithLookup("https://empty-result.test", lookupIP); ok {
+			t.Fatal("解析结果为空时必须拒绝 URL")
+		}
+	})
+}
+
+func TestSSRFSafeURLRejectsEveryRestrictedPortIncludingLeadingZeros(t *testing.T) {
+	t.Parallel()
+
+	for port := range restrictedPorts {
+		port := port
+		t.Run(port, func(t *testing.T) {
+			t.Parallel()
+			for _, candidate := range []string{port, "0" + port} {
+				rawURL := "https://example.com:" + candidate
+				ok, reason := isSSRFSafeURLWithLookup(rawURL, publicTestLookupIP)
+				if ok || !strings.Contains(reason, "port "+port+" is blocked") {
+					t.Fatalf("isSSRFSafeURL(%q) = (%v, %q)，期望拒绝规范端口 %s", rawURL, ok, reason, port)
+				}
+			}
+		})
+	}
+}
+
+func publicTestLookupIP(host string) ([]net.IP, error) {
+	if host != "example.com" {
+		return nil, fmt.Errorf("测试未登记主机 %q", host)
+	}
+	return []net.IP{net.ParseIP("8.8.8.8")}, nil
 }
 
 // TestValidateURLForSSRF_IPv6Whitelist verifies that whitelisted IPv6 addresses

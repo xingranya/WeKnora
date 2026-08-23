@@ -248,6 +248,16 @@ func TestAutoTagHandleSkipsCancelledKnowledge(t *testing.T) {
 	assert.Empty(t, fixture.repo.added)
 }
 
+func TestAutoTagHandleRejectsMovingKnowledge(t *testing.T) {
+	fixture := newAutoTagFixture(t, `{"matches":[{"index":1,"confidence":0.9}]}`)
+	fixture.repo.knowledge.ParseStatus = types.ParseStatusMoving
+
+	err := fixture.handle(t)
+	require.ErrorIs(t, err, types.ErrKnowledgeMoveInProgress)
+	assert.Empty(t, fixture.repo.added)
+	assert.Empty(t, fixture.chatModel.messages)
+}
+
 // An oversized tag set is classified against a stable prefix rather than
 // abandoning the task, which used to disable the feature outright.
 func TestAutoTagHandleClassifiesPrefixWhenCandidatesExceedCap(t *testing.T) {

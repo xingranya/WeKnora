@@ -110,6 +110,7 @@ const onMenuVisibleChange = (visible: boolean, item: KnowledgeCard) => {
 const CANCELABLE_PARSE_STATUSES = new Set(['pending', 'processing', 'finalizing']);
 const isParseInFlight = (status?: string): boolean =>
   CANCELABLE_PARSE_STATUSES.has(String(status ?? ''));
+const isMoving = (status?: string): boolean => status === 'moving';
 
 const isTraceMenuVisible = (item: KnowledgeCard): boolean => {
   if (!item?.id) return false;
@@ -118,6 +119,7 @@ const isTraceMenuVisible = (item: KnowledgeCard): boolean => {
 };
 
 const inFlightCardStatusText = (item: KnowledgeCard): string => {
+  if (isMoving(item.parse_status)) return t('knowledgeBase.statusMoving');
   if (item.parse_status === 'finalizing') {
     if (item.summary_status === 'pending' || item.summary_status === 'processing') {
       return t('knowledgeBase.generatingSummary');
@@ -479,7 +481,11 @@ const handleAction = (action: 'download' | 'edit' | 'view-trace' | 'reparse' | '
         </div>
 
         <!-- Parse status display -->
-        <div v-if="isParseInFlight(item.parse_status)" class="card-analyze card-analyze-trace">
+        <div v-if="isMoving(item.parse_status)" class="card-analyze">
+          <t-icon name="swap" class="card-analyze-loading"></t-icon>
+          <span class="card-analyze-txt">{{ inFlightCardStatusText(item) }}</span>
+        </div>
+        <div v-else-if="isParseInFlight(item.parse_status)" class="card-analyze card-analyze-trace">
           <t-icon name="loading" class="card-analyze-loading"></t-icon>
           <span
             class="card-analyze-txt card-analyze-trace-link"
@@ -627,7 +633,10 @@ const handleAction = (action: 'download' | 'edit' | 'view-trace' | 'reparse' | '
     >
       <template v-if="hoveredCardItem">
         <div class="card-popover-title">{{ hoveredCardItem.file_name }}</div>
-        <div v-if="isParseInFlight(hoveredCardItem.parse_status)" class="card-popover-status parsing">
+        <div v-if="isMoving(hoveredCardItem.parse_status)" class="card-popover-status parsing">
+          {{ $t('knowledgeBase.statusMoving') }}
+        </div>
+        <div v-else-if="isParseInFlight(hoveredCardItem.parse_status)" class="card-popover-status parsing">
           <KnowledgeProcessingTimeline
             :knowledge-id="hoveredCardItem.id"
             :parse-status="hoveredCardItem.parse_status"

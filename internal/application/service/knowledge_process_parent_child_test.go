@@ -28,6 +28,21 @@ func (r *parentChildKnowledgeRepo) UpdateKnowledge(
 	return nil
 }
 
+func (r *parentChildKnowledgeRepo) ReserveSourceFileQuota(
+	context.Context, uint64, string, int64,
+) (bool, int64, error) {
+	return true, 0, nil
+}
+
+func (r *parentChildKnowledgeRepo) FinalizeIndexedKnowledge(
+	_ context.Context, final *types.Knowledge,
+) (bool, int64, error) {
+	previous := r.knowledge.StorageSize
+	copy := *final
+	r.knowledge = &copy
+	return true, final.StorageSize - previous, nil
+}
+
 type parentChildChunkService struct {
 	interfaces.ChunkService
 	created []*types.Chunk

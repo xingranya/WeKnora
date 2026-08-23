@@ -117,8 +117,9 @@ func outboundSSRFCacheKey(rawURL string) (string, bool) {
 
 func invalidateSSRFOutboundValidationCache() {
 	ssrfOutboundCacheGen.Add(1)
-	ssrfOutboundCache = sync.Map{}
-	ssrfOutboundValidateGroup = singleflight.Group{}
+	// Clear 可与并发的 Load/Store 安全交错；缓存键还包含递增的 generation，
+	// 因此失效前正在执行的 singleflight 调用也不会污染新一代缓存。
+	ssrfOutboundCache.Clear()
 }
 
 // ResetSSRFOutboundValidationCacheForTest clears the outbound validation cache.

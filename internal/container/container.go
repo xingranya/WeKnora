@@ -442,6 +442,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	} else {
 		must(container.Invoke(router.RegisterSyncHandlers))
 	}
+	// move outbox 与 Wiki pending rows 都只能在对应 handler 就绪后重投。
+	must(container.Invoke(recoverPendingKnowledgeMoves))
 	// Wiki operation rows are durable, while their wake-up triggers may be
 	// lost across a process restart (always in Lite mode, and in Redis mode if
 	// persistence succeeded immediately before trigger enqueue failed). Re-arm
@@ -1536,8 +1538,76 @@ func initDocReaderClient(cfg *config.Config) (interfaces.DocumentReader, error) 
 		}
 		return docparser.NewHTTPDocumentReader(addr)
 	default:
-		return docparser.NewGRPCDocumentReader(addr)
+		if addr == "" {
+			return docparser.NewGRPCDocumentReader("")
+		}
+		attempts := boundedPositiveEnvInt("DOCREADER_GRPC_STARTUP_RETRIES", 6, 1, 60)
+		intervalSeconds := boundedPositiveEnvInt("DOCREADER_GRPC_STARTUP_RETRY_INTERVAL_SEC", 2, 1, 30)
+		return connectDocumentReaderWithRetry(
+			addr,
+			attempts,
+			time.Duration(intervalSeconds)*time.Second,
+			func(target string) (interfaces.DocumentReader, error) {
+				return docparser.NewGRPCDocumentReader(target)
+			},
+			time.Sleep,
+		)
 	}
+}
+
+type documentReaderFactory func(string) (interfaces.DocumentReader, error)
+
+// connectDocumentReaderWithRetry 允许 DocReader 与 App 同时重建时短暂尚未就绪，
+// 但重试次数有明确上限，配置或认证错误最终仍会阻止应用带病启动。
+func connectDocumentReaderWithRetry(
+	addr string,
+	attempts int,
+	interval time.Duration,
+	factory documentReaderFactory,
+	wait func(time.Duration),
+) (interfaces.DocumentReader, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if factory == nil {
+		return nil, errors.New("docreader factory is required")
+	}
+	if wait == nil {
+		wait = time.Sleep
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		reader, err := factory(addr)
+		if err == nil {
+			if attempt > 1 {
+				logger.Infof(context.Background(), "Connected to DocReader after %d attempts", attempt)
+			}
+			return reader, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		logger.Warnf(
+			context.Background(),
+			"DocReader is not ready (attempt %d/%d): %v",
+			attempt,
+			attempts,
+			err,
+		)
+		wait(interval)
+	}
+	return nil, fmt.Errorf("failed to connect to DocReader after %d attempts: %w", attempts, lastErr)
+}
+
+func boundedPositiveEnvInt(name string, fallback, minimum, maximum int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return fallback
+	}
+	return value
 }
 
 // initOllamaService initializes the Ollama service client

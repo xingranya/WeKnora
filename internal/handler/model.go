@@ -524,15 +524,39 @@ func (h *ModelHandler) DebugModel(c *gin.Context) {
 	}
 }
 
-// UpdateModelRequest defines the structure for model update requests
-// Contains fields that can be updated for an existing model
+// UpdateEmbeddingParametersRequest 描述嵌入参数的部分更新。
+// 指针用于区分“未传字段”和“显式写入零值”。
+type UpdateEmbeddingParametersRequest struct {
+	Dimension                 *int  `json:"dimension"`
+	TruncatePromptTokens      *int  `json:"truncate_prompt_tokens"`
+	SupportsDimensionOverride *bool `json:"supports_dimension_override"`
+}
+
+// UpdateModelParametersRequest 描述模型参数的部分更新。
+// map 传空对象表示清空；未传或传 null 表示保持原值。
+type UpdateModelParametersRequest struct {
+	BaseURL             *string                           `json:"base_url"`
+	APIKey              *string                           `json:"api_key"`
+	InterfaceType       *string                           `json:"interface_type"`
+	EmbeddingParameters *UpdateEmbeddingParametersRequest `json:"embedding_parameters"`
+	ParameterSize       *string                           `json:"parameter_size"`
+	Provider            *string                           `json:"provider"`
+	ExtraConfig         *map[string]string                `json:"extra_config"`
+	CustomHeaders       *map[string]string                `json:"custom_headers"`
+	SupportsVision      *bool                             `json:"supports_vision"`
+	MaxConcurrency      *int                              `json:"max_concurrency"`
+	AppID               *string                           `json:"app_id"`
+	AppSecret           *string                           `json:"app_secret"`
+}
+
+// UpdateModelRequest 描述模型的 PATCH 式部分更新。
 type UpdateModelRequest struct {
-	Name        string                `json:"name"`
-	DisplayName *string               `json:"display_name"`
-	Description string                `json:"description"`
-	Parameters  types.ModelParameters `json:"parameters"`
-	Source      types.ModelSource     `json:"source"`
-	Type        types.ModelType       `json:"type"`
+	Name        *string                       `json:"name"`
+	DisplayName *string                       `json:"display_name"`
+	Description *string                       `json:"description"`
+	Parameters  *UpdateModelParametersRequest `json:"parameters"`
+	Source      *types.ModelSource            `json:"source"`
+	Type        *types.ModelType              `json:"type"`
 }
 
 // UpdateModel godoc
@@ -580,56 +604,93 @@ func (h *ModelHandler) UpdateModel(c *gin.Context) {
 		return
 	}
 
-	// Update model fields if they are provided in the request
-	if req.Name != "" {
-		model.Name = req.Name
+	// 仅更新请求中实际出现的字段，显式零值由各字段语义决定是否允许。
+	if req.Name != nil {
+		if strings.TrimSpace(*req.Name) == "" {
+			c.Error(errors.NewBadRequestError("Model name cannot be empty"))
+			return
+		}
+		model.Name = *req.Name
 	}
 	if req.DisplayName != nil {
 		model.DisplayName = secutils.SanitizeForLog(*req.DisplayName)
 	}
-	model.Description = req.Description
+	if req.Description != nil {
+		model.Description = *req.Description
+	}
 
-	// SSRF validation for updated model BaseURL
-	if req.Parameters.BaseURL != "" {
-		if err := secutils.ValidateURLForSSRF(req.Parameters.BaseURL); err != nil {
-			logger.Warnf(ctx, "SSRF validation failed for model BaseURL: %v", err)
-			c.Error(errors.NewBadRequestError(secutils.FormatSSRFError("Base URL", req.Parameters.BaseURL, err)))
-			return
+	if req.Parameters != nil {
+		patch := req.Parameters
+		if patch.BaseURL != nil {
+			if *patch.BaseURL != "" {
+				if err := secutils.ValidateURLForSSRF(*patch.BaseURL); err != nil {
+					logger.Warnf(ctx, "SSRF validation failed for model BaseURL: %v", err)
+					c.Error(errors.NewBadRequestError(secutils.FormatSSRFError("Base URL", *patch.BaseURL, err)))
+					return
+				}
+			}
+			model.Parameters.BaseURL = *patch.BaseURL
+		}
+		if patch.InterfaceType != nil {
+			model.Parameters.InterfaceType = *patch.InterfaceType
+		}
+		if patch.EmbeddingParameters != nil {
+			embeddingPatch := patch.EmbeddingParameters
+			if embeddingPatch.Dimension != nil {
+				model.Parameters.EmbeddingParameters.Dimension = *embeddingPatch.Dimension
+			}
+			if embeddingPatch.TruncatePromptTokens != nil {
+				model.Parameters.EmbeddingParameters.TruncatePromptTokens = *embeddingPatch.TruncatePromptTokens
+			}
+			if embeddingPatch.SupportsDimensionOverride != nil {
+				model.Parameters.EmbeddingParameters.SupportsDimensionOverride =
+					*embeddingPatch.SupportsDimensionOverride
+			}
+		}
+		if patch.Provider != nil {
+			model.Parameters.Provider = *patch.Provider
+		}
+		if patch.ExtraConfig != nil {
+			model.Parameters.ExtraConfig = *patch.ExtraConfig
+		}
+		if patch.CustomHeaders != nil {
+			model.Parameters.CustomHeaders = *patch.CustomHeaders
+		}
+		if patch.SupportsVision != nil {
+			model.Parameters.SupportsVision = *patch.SupportsVision
+		}
+		if patch.MaxConcurrency != nil {
+			model.Parameters.MaxConcurrency = *patch.MaxConcurrency
+		}
+		// ParameterSize 由后端模型探测维护，主更新接口不得覆盖。
+		if patch.AppID != nil {
+			model.Parameters.AppID = *patch.AppID
+		}
+		// 凭据只允许通过 /credentials 子资源修改，主更新始终保留原值。
+		if patch.APIKey != nil && *patch.APIKey != "" && *patch.APIKey != model.Parameters.APIKey {
+			logger.Warnf(ctx,
+				"deprecated: api_key in PUT /models/%s body is ignored; use PUT /credentials instead", id)
+		}
+		if patch.AppSecret != nil && *patch.AppSecret != "" && *patch.AppSecret != model.Parameters.AppSecret {
+			logger.Warnf(ctx,
+				"deprecated: app_secret in PUT /models/%s body is ignored; use PUT /credentials instead", id)
 		}
 	}
-	// Credentials (api_key, app_secret) NEVER flow through this endpoint —
-	// they live behind the /credentials subresource. Force-preserve them by
-	// snapshotting the stored values before copying request fields in, so
-	// that even a misbehaving caller that puts api_key in the body cannot
-	// clobber a stored credential. Log a warning to spot stale callers.
-	storedAPIKey := model.Parameters.APIKey
-	storedAppSecret := model.Parameters.AppSecret
-	if req.Parameters.APIKey != "" && req.Parameters.APIKey != storedAPIKey {
-		logger.Warnf(ctx,
-			"deprecated: api_key in PUT /models/%s body is ignored; use PUT /credentials instead", id)
-	}
-	if req.Parameters.AppSecret != "" && req.Parameters.AppSecret != storedAppSecret {
-		logger.Warnf(ctx,
-			"deprecated: app_secret in PUT /models/%s body is ignored; use PUT /credentials instead", id)
-	}
-	newParams := req.Parameters
-	newParams.APIKey = storedAPIKey
-	newParams.AppSecret = storedAppSecret
-	// Preserve backend-managed fields not sent by the frontend either.
-	newParams.ParameterSize = model.Parameters.ParameterSize
-	if newParams.InterfaceType == "" {
-		newParams.InterfaceType = model.Parameters.InterfaceType
-	}
-	if newParams.AppID == "" {
-		newParams.AppID = model.Parameters.AppID
-	}
-	if newParams.ExtraConfig == nil {
-		newParams.ExtraConfig = model.Parameters.ExtraConfig
-	}
-	model.Parameters = newParams
 
-	model.Source = req.Source
-	model.Type = req.Type
+	if req.Source != nil {
+		if *req.Source == "" {
+			c.Error(errors.NewBadRequestError("Model source cannot be empty"))
+			return
+		}
+		model.Source = *req.Source
+	}
+	if req.Type != nil {
+		if *req.Type == "" {
+			c.Error(errors.NewBadRequestError("Model type cannot be empty"))
+			return
+		}
+		model.Type = *req.Type
+	}
 
 	logger.Infof(ctx, "Updating model, ID: %s, Name: %s", id, model.Name)
 	if err := h.service.UpdateModel(ctx, model); err != nil {

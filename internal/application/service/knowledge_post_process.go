@@ -89,6 +89,21 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		ctx = context.WithValue(ctx, types.LanguageContextKey, payload.Language)
 	}
 
+	// 移动任务在短事务中持久声明 moving，其他文档任务必须等待声明释放。
+	// 此检查放在 trace/span 和任何 KB、Chunk、队列副作用之前，避免一次被抢占的
+	// 旧 post-process 投递被误记为成功并永久丢失。
+	knowledge, err := s.knowledgeRepo.GetKnowledgeByIDOnly(ctx, payload.KnowledgeID)
+	if err != nil {
+		return fmt.Errorf("get knowledge %s: %w", payload.KnowledgeID, err)
+	}
+	if knowledge == nil {
+		logger.Warnf(ctx, "[KnowledgePostProcess] Knowledge %s not found, aborting.", payload.KnowledgeID)
+		return nil
+	}
+	if knowledge.ParseStatus == types.ParseStatusMoving {
+		return fmt.Errorf("%w: knowledge %s", types.ErrKnowledgeMoveInProgress, payload.KnowledgeID)
+	}
+
 	// Resolve attempt: payload carries it from the upstream stage, but
 	// fall back to the latest known attempt for compatibility with
 	// in-flight tasks queued before this code shipped.
@@ -109,16 +124,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 
 	postSpan := s.tracker().BeginStage(ctx, payload.KnowledgeID, attempt, types.StagePostProcess, nil)
 
-	// 1. Fetch Knowledge and KB
-	knowledge, err := s.knowledgeRepo.GetKnowledgeByIDOnly(ctx, payload.KnowledgeID)
-	if err != nil {
-		return fmt.Errorf("get knowledge %s: %w", payload.KnowledgeID, err)
-	}
-	if knowledge == nil {
-		logger.Warnf(ctx, "[KnowledgePostProcess] Knowledge %s not found, aborting.", payload.KnowledgeID)
-		return nil
-	}
-
+	// 1. Fetch KB
 	// Skip post-processing entirely when the knowledge has been cancelled
 	// by the user or marked for deletion. We must NOT enqueue summary /
 	// question / graph / wiki child tasks for an aborted knowledge. We

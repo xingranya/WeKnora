@@ -30,7 +30,8 @@ test('historical attempt keeps its own root status', () => {
   }), 'done')
 })
 
-test('parse status maps completed and processing into timeline vocabulary', () => {
+test('parse status maps completed and active states into timeline vocabulary', () => {
   assert.equal(parseStatusToTimelineStatus('completed'), 'done')
   assert.equal(parseStatusToTimelineStatus('processing'), 'running')
+  assert.equal(parseStatusToTimelineStatus('moving'), 'running')
 })

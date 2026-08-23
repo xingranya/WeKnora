@@ -2,9 +2,13 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -13,7 +17,84 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-var ErrKnowledgeNotFound = errors.New("knowledge not found")
+var (
+	ErrKnowledgeNotFound       = errors.New("knowledge not found")
+	ErrKnowledgeMoveInProgress = types.ErrKnowledgeMoveInProgress
+)
+
+const knowledgeMoveClaimMetadataKey = "_weknora_move_claim"
+
+const knowledgeMoveDispatchOp = "dispatch"
+
+func truncateUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
+}
+
+type knowledgeMoveClaim struct {
+	TaskID                string `json:"task_id"`
+	SourceKnowledgeBaseID string `json:"source_knowledge_base_id"`
+	TargetKnowledgeBaseID string `json:"target_knowledge_base_id"`
+	Mode                  string `json:"mode"`
+	Stage                 string `json:"stage"`
+}
+
+const (
+	knowledgeMoveClaimStageActive    = "active"
+	knowledgeMoveClaimStageCompleted = "completed"
+	knowledgeMoveClaimStageFailed    = "failed"
+)
+
+func decodeKnowledgeMoveClaim(metadata types.JSON) (*knowledgeMoveClaim, error) {
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &values); err != nil {
+		return nil, fmt.Errorf("decode knowledge metadata: %w", err)
+	}
+	raw, ok := values[knowledgeMoveClaimMetadataKey]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var claim knowledgeMoveClaim
+	if err := json.Unmarshal(raw, &claim); err != nil {
+		return nil, fmt.Errorf("decode knowledge move claim: %w", err)
+	}
+	return &claim, nil
+}
+
+func encodeKnowledgeMoveClaim(metadata types.JSON, claim *knowledgeMoveClaim) (types.JSON, error) {
+	values := make(map[string]json.RawMessage)
+	if len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &values); err != nil {
+			return nil, fmt.Errorf("decode knowledge metadata: %w", err)
+		}
+	}
+	if values == nil {
+		values = make(map[string]json.RawMessage)
+	}
+	if claim == nil {
+		delete(values, knowledgeMoveClaimMetadataKey)
+	} else {
+		raw, err := json.Marshal(claim)
+		if err != nil {
+			return nil, fmt.Errorf("encode knowledge move claim: %w", err)
+		}
+		values[knowledgeMoveClaimMetadataKey] = raw
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("encode knowledge metadata: %w", err)
+	}
+	return types.JSON(encoded), nil
+}
 
 // likeEscapeChar is the SQL ESCAPE character paired with escapeLikeKeyword.
 const likeEscapeChar = `\`
@@ -460,14 +541,578 @@ func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledg
 	return r.db.Debug().WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledgeList).Error
 }
 
-// DeleteKnowledge deletes knowledge
+// DeleteKnowledge 仅软删除已由原子声明进入 deleting 的知识。
 func (r *knowledgeRepository) DeleteKnowledge(ctx context.Context, tenantID uint64, id string) error {
-	return r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).Delete(&types.Knowledge{}).Error
+	result := r.db.WithContext(ctx).
+		Where("tenant_id = ? AND id = ? AND parse_status = ?", tenantID, id, types.ParseStatusDeleting).
+		Delete(&types.Knowledge{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("knowledge delete claim is missing")
+	}
+	return nil
 }
 
-// DeleteKnowledge deletes knowledge
+// DeleteKnowledgeList 仅软删除已由原子声明进入 deleting 的知识集合。
 func (r *knowledgeRepository) DeleteKnowledgeList(ctx context.Context, tenantID uint64, ids []string) error {
-	return r.db.WithContext(ctx).Where("tenant_id = ? AND id in ?", tenantID, ids).Delete(&types.Knowledge{}).Error
+	if len(ids) == 0 {
+		return nil
+	}
+	uniqueIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	result := r.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND id IN ? AND parse_status = ?",
+			tenantID,
+			uniqueIDs,
+			types.ParseStatusDeleting,
+		).
+		Delete(&types.Knowledge{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != int64(len(uniqueIDs)) {
+		return fmt.Errorf(
+			"knowledge delete claim set changed: expected=%d deleted=%d",
+			len(uniqueIDs),
+			result.RowsAffected,
+		)
+	}
+	return nil
+}
+
+// DeleteKnowledgeListAndAdjustStorage 在同一事务中软删除知识并扣减实际配额。
+// knowledgeBaseID 非空时限定单一知识库并同步清理其文件夹；为空时允许一次
+// 跨知识库删除，但绝不清理文件夹。重试只处理仍有效的 deleting 行，因此不重复扣费。
+func (r *knowledgeRepository) DeleteKnowledgeListAndAdjustStorage(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	ids []string,
+) error {
+	uniqueIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 && knowledgeBaseID == "" {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var tenant types.Tenant
+		var knowledgeList []*types.Knowledge
+		if len(uniqueIDs) > 0 {
+			tenantQuery := tx.Where("id = ?", tenantID)
+			if tx.Dialector.Name() == "postgres" {
+				tenantQuery = tenantQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			if err := tenantQuery.First(&tenant).Error; err != nil {
+				return err
+			}
+
+			query := tx.Where(
+				"tenant_id = ? AND id IN ? AND parse_status = ?",
+				tenantID,
+				uniqueIDs,
+				types.ParseStatusDeleting,
+			)
+			if knowledgeBaseID != "" {
+				query = query.Where("knowledge_base_id = ?", knowledgeBaseID)
+			}
+			if tx.Dialector.Name() == "postgres" {
+				query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			if err := query.Find(&knowledgeList).Error; err != nil {
+				return err
+			}
+		}
+
+		storageBytes := int64(0)
+		activeIDs := make([]string, 0, len(knowledgeList))
+		for _, knowledge := range knowledgeList {
+			activeIDs = append(activeIDs, knowledge.ID)
+			quotaBytes := knowledge.QuotaStorageBytes()
+			if quotaBytes > math.MaxInt64-storageBytes {
+				storageBytes = math.MaxInt64
+			} else {
+				storageBytes += quotaBytes
+			}
+		}
+		if len(activeIDs) > 0 {
+			deleteQuery := tx.Where(
+				"tenant_id = ? AND id IN ? AND parse_status = ?",
+				tenantID,
+				activeIDs,
+				types.ParseStatusDeleting,
+			)
+			if knowledgeBaseID != "" {
+				deleteQuery = deleteQuery.Where("knowledge_base_id = ?", knowledgeBaseID)
+			}
+			result := deleteQuery.Delete(&types.Knowledge{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != int64(len(activeIDs)) {
+				return fmt.Errorf(
+					"knowledge delete claim set changed: expected=%d deleted=%d",
+					len(activeIDs),
+					result.RowsAffected,
+				)
+			}
+		}
+		if knowledgeBaseID != "" {
+			if err := tx.Where(
+				"tenant_id = ? AND knowledge_base_id = ?",
+				tenantID,
+				knowledgeBaseID,
+			).Delete(&types.KnowledgeFolder{}).Error; err != nil {
+				return err
+			}
+		}
+
+		if len(activeIDs) == 0 {
+			return nil
+		}
+		if storageBytes >= tenant.StorageUsed {
+			tenant.StorageUsed = 0
+		} else {
+			tenant.StorageUsed -= storageBytes
+		}
+		return tx.Model(&types.Tenant{}).Where("id = ?", tenantID).
+			Update("storage_used", tenant.StorageUsed).Error
+	})
+}
+
+// ClaimKnowledgeListForKBDelete 锁定并声明一批知识进入删除流程。
+// 集合或所属知识库发生变化时整批失败，避免清理已经移动到其他知识库的数据。
+func (r *knowledgeRepository) ClaimKnowledgeListForKBDelete(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	ids []string,
+) ([]*types.Knowledge, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	uniqueIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return nil, nil
+	}
+	var claimed []*types.Knowledge
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND knowledge_base_id = ? AND id IN ? AND "+
+					"(parse_status IS NULL OR parse_status <> ?)",
+				tenantID,
+				knowledgeBaseID,
+				uniqueIDs,
+				types.ParseStatusMoving,
+			).
+			Updates(map[string]interface{}{
+				"parse_status": types.ParseStatusDeleting,
+				"updated_at":   time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != int64(len(uniqueIDs)) {
+			return fmt.Errorf(
+				"%w: expected=%d claimed=%d",
+				ErrKnowledgeMoveInProgress,
+				len(uniqueIDs),
+				result.RowsAffected,
+			)
+		}
+		return tx.Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND id IN ? AND parse_status = ?",
+			tenantID,
+			knowledgeBaseID,
+			uniqueIDs,
+			types.ParseStatusDeleting,
+		).Find(&claimed).Error
+	})
+	return claimed, err
+}
+
+// ClaimKnowledgeForMove 在短事务中声明知识移动，不跨越任何外部存储调用持锁。
+// 同一任务可以幂等恢复；其他移动任务以及已经开始的删除都会被拒绝。
+func (r *knowledgeRepository) ClaimKnowledgeForMove(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	taskID string,
+	mode string,
+) (*types.Knowledge, bool, bool, error) {
+	if tenantID == 0 || knowledgeID == "" || sourceKnowledgeBaseID == "" ||
+		targetKnowledgeBaseID == "" || taskID == "" || mode == "" {
+		return nil, false, false, errors.New("knowledge move claim is incomplete")
+	}
+	var claimed *types.Knowledge
+	alreadyCompleted := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current types.Knowledge
+		query := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+		if tx.Dialector.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		existingClaim, err := decodeKnowledgeMoveClaim(current.Metadata)
+		if err != nil {
+			return err
+		}
+		if existingClaim != nil && existingClaim.TaskID == taskID &&
+			existingClaim.SourceKnowledgeBaseID == sourceKnowledgeBaseID &&
+			existingClaim.TargetKnowledgeBaseID == targetKnowledgeBaseID &&
+			existingClaim.Mode == mode {
+			switch existingClaim.Stage {
+			case knowledgeMoveClaimStageActive:
+				if current.ParseStatus == types.ParseStatusMoving &&
+					(current.KnowledgeBaseID == sourceKnowledgeBaseID ||
+						current.KnowledgeBaseID == targetKnowledgeBaseID) {
+					clone := current
+					claimed = &clone
+				}
+			case knowledgeMoveClaimStageCompleted:
+				if current.KnowledgeBaseID == targetKnowledgeBaseID {
+					clone := current
+					claimed = &clone
+					alreadyCompleted = true
+				}
+			}
+			return nil
+		}
+		if current.KnowledgeBaseID != sourceKnowledgeBaseID ||
+			current.ParseStatus != types.ParseStatusCompleted {
+			return nil
+		}
+		claim := &knowledgeMoveClaim{
+			TaskID:                taskID,
+			SourceKnowledgeBaseID: sourceKnowledgeBaseID,
+			TargetKnowledgeBaseID: targetKnowledgeBaseID,
+			Mode:                  mode,
+			Stage:                 knowledgeMoveClaimStageActive,
+		}
+		metadata, err := encodeKnowledgeMoveClaim(current.Metadata, claim)
+		if err != nil {
+			return err
+		}
+		updates := map[string]interface{}{
+			"parse_status": types.ParseStatusMoving,
+			"metadata":     metadata,
+			"updated_at":   time.Now(),
+		}
+		if current.SummaryStatus == types.SummaryStatusProcessing {
+			updates["summary_status"] = types.SummaryStatusFailed
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ?",
+				tenantID,
+				knowledgeID,
+				sourceKnowledgeBaseID,
+				types.ParseStatusCompleted,
+			).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		current.ParseStatus = types.ParseStatusMoving
+		if current.SummaryStatus == types.SummaryStatusProcessing {
+			current.SummaryStatus = types.SummaryStatusFailed
+		}
+		current.Metadata = metadata
+		current.UpdatedAt = time.Now()
+		claimed = &current
+		return nil
+	})
+	if err != nil {
+		return nil, false, false, err
+	}
+	return claimed, alreadyCompleted, claimed != nil, nil
+}
+
+func (r *knowledgeRepository) saveClaimedKnowledgeMove(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	taskID string,
+	stage string,
+) (bool, error) {
+	if knowledge == nil || knowledge.ID == "" || taskID == "" {
+		return false, errors.New("knowledge move update is incomplete")
+	}
+	updated := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current types.Knowledge
+		query := tx.Where("tenant_id = ? AND id = ?", knowledge.TenantID, knowledge.ID)
+		if tx.Dialector.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		claim, err := decodeKnowledgeMoveClaim(current.Metadata)
+		if err != nil {
+			return err
+		}
+		if claim == nil || claim.TaskID != taskID ||
+			claim.Stage != knowledgeMoveClaimStageActive ||
+			current.ParseStatus != types.ParseStatusMoving ||
+			knowledge.KnowledgeBaseID != claim.TargetKnowledgeBaseID {
+			return nil
+		}
+		claim.Stage = stage
+		metadata, err := encodeKnowledgeMoveClaim(current.Metadata, claim)
+		if err != nil {
+			return err
+		}
+		knowledge.Metadata = metadata
+		if stage == knowledgeMoveClaimStageActive {
+			knowledge.ParseStatus = types.ParseStatusMoving
+		} else if knowledge.ParseStatus == types.ParseStatusMoving {
+			return errors.New("completed knowledge move requires a terminal parse status")
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND parse_status = ?",
+				knowledge.TenantID,
+				knowledge.ID,
+				types.ParseStatusMoving,
+			).
+			Updates(map[string]interface{}{
+				"knowledge_base_id":  knowledge.KnowledgeBaseID,
+				"embedding_model_id": knowledge.EmbeddingModelID,
+				"parse_status":       knowledge.ParseStatus,
+				"enable_status":      knowledge.EnableStatus,
+				"description":        knowledge.Description,
+				"storage_size":       max(knowledge.StorageSize, 0),
+				"processed_at":       knowledge.ProcessedAt,
+				"metadata":           metadata,
+				"updated_at":         knowledge.UpdatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		updated = true
+		return nil
+	})
+	return updated, err
+}
+
+// StageClaimedKnowledgeMove 持久化移动中间态，并继续保留任务所有权。
+func (r *knowledgeRepository) StageClaimedKnowledgeMove(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	taskID string,
+) (bool, error) {
+	return r.saveClaimedKnowledgeMove(
+		ctx,
+		knowledge,
+		taskID,
+		knowledgeMoveClaimStageActive,
+	)
+}
+
+// CompleteClaimedKnowledgeMove 完成移动并保留已完成凭据，供同一队列任务幂等重放。
+func (r *knowledgeRepository) CompleteClaimedKnowledgeMove(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	taskID string,
+) (bool, error) {
+	return r.saveClaimedKnowledgeMove(
+		ctx,
+		knowledge,
+		taskID,
+		knowledgeMoveClaimStageCompleted,
+	)
+}
+
+// FailClaimedKnowledgeMove 只释放指定任务拥有的活动声明，竞争任务不能误清理。
+func (r *knowledgeRepository) FailClaimedKnowledgeMove(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	taskID string,
+	errorMessage string,
+) (bool, error) {
+	failed := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current types.Knowledge
+		query := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+		if tx.Dialector.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		claim, err := decodeKnowledgeMoveClaim(current.Metadata)
+		if err != nil {
+			return err
+		}
+		if claim == nil || claim.TaskID != taskID ||
+			claim.Stage != knowledgeMoveClaimStageActive ||
+			current.ParseStatus != types.ParseStatusMoving {
+			return nil
+		}
+		claim.Stage = knowledgeMoveClaimStageFailed
+		metadata, err := encodeKnowledgeMoveClaim(current.Metadata, claim)
+		if err != nil {
+			return err
+		}
+		errorMessage = truncateUTF8Bytes(errorMessage, 2000)
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ? AND parse_status = ?", tenantID, knowledgeID, types.ParseStatusMoving).
+			Updates(map[string]interface{}{
+				"parse_status":  types.ParseStatusFailed,
+				"error_message": errorMessage,
+				"metadata":      metadata,
+				"updated_at":    time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		failed = result.RowsAffected == 1
+		return nil
+	})
+	return failed, err
+}
+
+// ClaimKnowledgeMoveRecoveryOps 为丢失的 move 队列任务领取持久恢复意图。
+// claimed_at 既是跨实例互斥租约，也是崩溃后重新领取的超时依据。
+func (r *knowledgeRepository) ClaimKnowledgeMoveRecoveryOps(
+	ctx context.Context,
+	staleBefore time.Time,
+	limit int,
+) ([]*types.TaskPendingOp, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var claimed []*types.TaskPendingOp
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Where(
+			"task_type = ? AND scope = ? AND op = ? AND (claimed_at IS NULL OR claimed_at < ?)",
+			types.TypeKnowledgeMove,
+			types.TaskScopeKnowledgeBase,
+			knowledgeMoveDispatchOp,
+			staleBefore,
+		).Order("id ASC").Limit(limit)
+		if tx.Dialector.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+		}
+		if err := query.Find(&claimed).Error; err != nil {
+			return err
+		}
+		if len(claimed) == 0 {
+			return nil
+		}
+		ids := make([]int64, 0, len(claimed))
+		for _, op := range claimed {
+			ids = append(ids, op.ID)
+		}
+		now := time.Now()
+		if err := tx.Model(&types.TaskPendingOp{}).
+			Where("id IN ?", ids).
+			Update("claimed_at", now).Error; err != nil {
+			return err
+		}
+		for _, op := range claimed {
+			op.ClaimedAt = &now
+		}
+		return nil
+	})
+	return claimed, err
+}
+
+// ReleaseKnowledgeMoveRecoveryOps 释放本轮未能重新投递的恢复租约。
+func (r *knowledgeRepository) ReleaseKnowledgeMoveRecoveryOps(
+	ctx context.Context,
+	ids []int64,
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Model(&types.TaskPendingOp{}).
+		Where(
+			"id IN ? AND task_type = ? AND scope = ? AND op = ?",
+			ids,
+			types.TypeKnowledgeMove,
+			types.TaskScopeKnowledgeBase,
+			knowledgeMoveDispatchOp,
+		).
+		Update("claimed_at", nil).Error
+}
+
+// KnowledgeMoveDispatchExists 检查指定移动任务的持久 dispatch 是否仍存在。
+// context cancellation 的 worker 只能在 dispatch 已被知识库删除流程清理后
+// 释放 move claim；查询错误由服务层按 fail-safe 保留处理。
+func (r *knowledgeRepository) KnowledgeMoveDispatchExists(
+	ctx context.Context,
+	tenantID uint64,
+	sourceKnowledgeBaseID string,
+	taskID string,
+) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&types.TaskPendingOp{}).
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ?",
+			tenantID,
+			types.TypeKnowledgeMove,
+			types.TaskScopeKnowledgeBase,
+			sourceKnowledgeBaseID,
+			knowledgeMoveDispatchOp,
+			taskID,
+		).
+		Count(&count).Error
+	return count > 0, err
 }
 
 // GetKnowledgeBatch gets knowledge in batch
@@ -666,6 +1311,795 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
 		return nil
 	}
 	return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
+}
+
+// lockKnowledgeForLifecycle 按租户读取并锁定知识行。生命周期状态的判断与写入
+// 必须发生在同一事务中，不能依赖服务层早先读取的快照。
+func lockKnowledgeForLifecycle(
+	tx *gorm.DB,
+	tenantID uint64,
+	knowledgeID string,
+) (*types.Knowledge, bool, error) {
+	var current types.Knowledge
+	query := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+	if tx.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.First(&current).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &current, true, nil
+}
+
+// updateLockedKnowledgeLifecycleColumns 使用锁内读取到的状态作为 CAS 条件，
+// 只更新调用方拥有的列，避免陈旧结构体覆盖 metadata、移动声明或配额标记。
+func updateLockedKnowledgeLifecycleColumns(
+	tx *gorm.DB,
+	current *types.Knowledge,
+	values map[string]interface{},
+) (bool, error) {
+	if current == nil || len(values) == 0 {
+		return false, nil
+	}
+	result := tx.Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND parse_status = ?",
+			current.TenantID,
+			current.ID,
+			current.ParseStatus,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+func knowledgeLifecycleStatusBlocked(status string) bool {
+	switch status {
+	case types.ParseStatusMoving, types.ParseStatusDeleting, types.ParseStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// StartKnowledgeProcessing 原子地把可执行状态迁移为 processing。
+// completed/finalizing 属于其他已完成或收尾中的尝试，不允许旧队列任务重新开启。
+func (r *knowledgeRepository) StartKnowledgeProcessing(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	startedAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		switch status {
+		case "", types.ParseStatusPending, types.ParseStatusProcessing,
+			types.ParseStatusFailed, types.ManualKnowledgeStatusDraft:
+		default:
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, map[string]interface{}{
+			"parse_status":  types.ParseStatusProcessing,
+			"error_message": "",
+			"updated_at":    startedAt,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("knowledge processing transition lost its lifecycle state")
+		}
+		applied = true
+		status = types.ParseStatusProcessing
+		return nil
+	})
+	return applied, status, err
+}
+
+// ClaimKnowledgeReparse 在任何外部清理前声明一次可重建尝试。
+// 只有终态知识可进入该流程，moving/deleting 不能被陈旧 API 请求抢占。
+func (r *knowledgeRepository) ClaimKnowledgeReparse(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	claimedAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		switch status {
+		case types.ParseStatusCompleted, types.ParseStatusFailed, types.ParseStatusCancelled:
+		default:
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, map[string]interface{}{
+			"parse_status":  types.ParseStatusProcessing,
+			"error_message": "",
+			"updated_at":    claimedAt,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("knowledge reparse claim lost its lifecycle state")
+		}
+		applied = true
+		status = types.ParseStatusProcessing
+		return nil
+	})
+	return applied, status, err
+}
+
+// StageKnowledgeReparsePending 只允许当前 reparse 声明持有的 processing 行进入
+// pending，并一次写入重建所需列，避免 cleanup 后的全行 Save 覆盖删除或移动。
+func (r *knowledgeRepository) StageKnowledgeReparsePending(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	embeddingModelID string,
+	metadata types.JSON,
+	updatedAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		if status != types.ParseStatusProcessing {
+			return nil
+		}
+		mergedMetadata := current.Metadata
+		if len(metadata) > 0 {
+			var mergeErr error
+			mergedMetadata, mergeErr = mergeManualKnowledgePatchMetadata(current.Metadata, metadata)
+			if mergeErr != nil {
+				return mergeErr
+			}
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, map[string]interface{}{
+			"parse_status":           types.ParseStatusPending,
+			"enable_status":          "disabled",
+			"description":            "",
+			"processed_at":           nil,
+			"error_message":          "",
+			"embedding_model_id":     embeddingModelID,
+			"pending_subtasks_count": 0,
+			"metadata":               mergedMetadata,
+			"updated_at":             updatedAt,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("knowledge reparse staging lost its lifecycle state")
+		}
+		applied = true
+		status = types.ParseStatusPending
+		return nil
+	})
+	return applied, status, err
+}
+
+// CancelKnowledgeProcessing 仅允许可取消状态原子迁移为 cancelled。
+func (r *knowledgeRepository) CancelKnowledgeProcessing(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	cancelledAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		if status == types.ParseStatusCancelled {
+			return nil
+		}
+		switch status {
+		case types.ParseStatusPending, types.ParseStatusProcessing, types.ParseStatusFinalizing:
+		default:
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, map[string]interface{}{
+			"parse_status":           types.ParseStatusCancelled,
+			"error_message":          "用户已取消解析",
+			"pending_subtasks_count": 0,
+			"updated_at":             cancelledAt,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("knowledge cancellation lost its lifecycle state")
+		}
+		applied = true
+		status = types.ParseStatusCancelled
+		return nil
+	})
+	return applied, status, err
+}
+
+// PersistFileURLSource 原子写入下载对象事实，只允许当前 processing 尝试拥有该写入。
+func (r *knowledgeRepository) PersistFileURLSource(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	filePath string,
+	fileName string,
+	fileType string,
+	fileSize int64,
+	fileHash string,
+	updatedAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		if status != types.ParseStatusProcessing {
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, map[string]interface{}{
+			"file_path":  filePath,
+			"file_name":  fileName,
+			"file_type":  fileType,
+			"file_size":  max(fileSize, 0),
+			"file_hash":  fileHash,
+			"updated_at": updatedAt,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("file URL source persistence lost its lifecycle state")
+		}
+		applied = true
+		return nil
+	})
+	return applied, status, err
+}
+
+// KnowledgeHoldsFilePath 使用包含软删除行的当前事实判断对象是否仍归知识记录持有。
+// 补偿删除必须先调用该方法，避免误删并发成功任务写入的稳定路径。
+func (r *knowledgeRepository) KnowledgeHoldsFilePath(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	filePath string,
+) (bool, error) {
+	if filePath == "" {
+		return false, nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).Unscoped().Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND id = ? AND file_path = ?", tenantID, knowledgeID, filePath).
+		Count(&count).Error
+	return count > 0, err
+}
+
+var manualKnowledgePatchMetadataKeys = []string{
+	"content", "format", "status", "version", "updated_at", "process_overrides",
+}
+
+func mergeManualKnowledgePatchMetadata(current, patch types.JSON) (types.JSON, error) {
+	currentValues := make(map[string]interface{})
+	if len(current) > 0 {
+		if err := json.Unmarshal(current, &currentValues); err != nil {
+			return nil, fmt.Errorf("decode current manual metadata: %w", err)
+		}
+	}
+	patchValues := make(map[string]interface{})
+	if len(patch) > 0 {
+		if err := json.Unmarshal(patch, &patchValues); err != nil {
+			return nil, fmt.Errorf("decode manual metadata patch: %w", err)
+		}
+	}
+	for _, key := range manualKnowledgePatchMetadataKeys {
+		if value, ok := patchValues[key]; ok {
+			currentValues[key] = value
+		}
+	}
+	encoded, err := json.Marshal(currentValues)
+	if err != nil {
+		return nil, fmt.Errorf("encode merged manual metadata: %w", err)
+	}
+	return types.JSON(encoded), nil
+}
+
+// PatchKnowledgeUserFields 原子写入通用编辑接口允许的用户字段。
+func (r *knowledgeRepository) PatchKnowledgeUserFields(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	values map[string]interface{},
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		if knowledgeLifecycleStatusBlocked(status) {
+			return nil
+		}
+		allowed := make(map[string]interface{}, 4)
+		for _, key := range []string{"title", "description", "custom_metadata", "updated_at"} {
+			if value, ok := values[key]; ok {
+				allowed[key] = value
+			}
+		}
+		if len(allowed) == 0 {
+			applied = true
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, allowed)
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("knowledge user patch lost its lifecycle state")
+		}
+		applied = true
+		return nil
+	})
+	return applied, status, err
+}
+
+// PatchManualKnowledge 原子写入手工知识可编辑字段，并把手工元数据合并到
+// 锁内最新 metadata；移动声明等内部键永远不会被陈旧请求覆盖。
+func (r *knowledgeRepository) PatchManualKnowledge(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	values map[string]interface{},
+	metadata types.JSON,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			status = types.ParseStatusDeleting
+			return nil
+		}
+		status = current.ParseStatus
+		if knowledgeLifecycleStatusBlocked(status) {
+			return nil
+		}
+		mergedMetadata, mergeErr := mergeManualKnowledgePatchMetadata(current.Metadata, metadata)
+		if mergeErr != nil {
+			return mergeErr
+		}
+		allowed := make(map[string]interface{}, 16)
+		for _, key := range []string{
+			"title", "file_name", "file_type", "type", "source", "enable_status",
+			"embedding_model_id", "parse_status", "description", "processed_at",
+			"error_message", "pending_subtasks_count", "updated_at",
+		} {
+			if value, ok := values[key]; ok {
+				allowed[key] = value
+			}
+		}
+		allowed["metadata"] = mergedMetadata
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, allowed)
+		if updateErr != nil {
+			return updateErr
+		}
+		if !updated {
+			return fmt.Errorf("manual knowledge patch lost its lifecycle state")
+		}
+		applied = true
+		return nil
+	})
+	return applied, status, err
+}
+
+// UpdateKnowledgeSummaryIfCurrent 只在知识仍属于同一租户、知识库、解析状态和
+// metadata 版本时写入摘要列。摘要刷新跨越 LLM 调用，必须用该版本栅栏丢弃旧结果。
+func (r *knowledgeRepository) UpdateKnowledgeSummaryIfCurrent(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	expectedParseStatus string,
+	expectedMetadata types.JSON,
+	expectedCustomMetadata types.JSON,
+	values map[string]interface{},
+) (bool, error) {
+	applied := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		current, found, lockErr := lockKnowledgeForLifecycle(tx, tenantID, knowledgeID)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found || current.KnowledgeBaseID != knowledgeBaseID ||
+			current.ParseStatus != expectedParseStatus ||
+			string(current.Metadata) != string(expectedMetadata) ||
+			string(current.CustomMetadata) != string(expectedCustomMetadata) ||
+			knowledgeLifecycleStatusBlocked(current.ParseStatus) {
+			return nil
+		}
+		allowed := make(map[string]interface{}, 4)
+		for _, key := range []string{"description", "summary_status", "error_message", "updated_at"} {
+			if value, ok := values[key]; ok {
+				allowed[key] = value
+			}
+		}
+		if len(allowed) == 0 {
+			applied = true
+			return nil
+		}
+		updated, updateErr := updateLockedKnowledgeLifecycleColumns(tx, current, allowed)
+		if updateErr != nil {
+			return updateErr
+		}
+		applied = updated
+		return nil
+	})
+	return applied, err
+}
+
+// FailKnowledgeProcessing 在行锁内写入解析失败，且绝不覆盖并发移动、删除或取消声明。
+// 返回当前持久状态，调用方据此区分应重试的 moving 与应正常停止的删除/取消。
+func (r *knowledgeRepository) FailKnowledgeProcessing(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	errorMessage string,
+	failedAt time.Time,
+) (applied bool, status string, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current types.Knowledge
+		query := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+		if tx.Dialector.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				status = types.ParseStatusDeleting
+				return nil
+			}
+			return err
+		}
+		status = current.ParseStatus
+		switch status {
+		case types.ParseStatusMoving, types.ParseStatusDeleting, types.ParseStatusCancelled:
+			return nil
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ? AND parse_status = ?", tenantID, knowledgeID, status).
+			Updates(map[string]interface{}{
+				"parse_status":  types.ParseStatusFailed,
+				"error_message": errorMessage,
+				"updated_at":    failedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("knowledge processing failure update affected %d rows", result.RowsAffected)
+		}
+		applied = true
+		status = types.ParseStatusFailed
+		return nil
+	})
+	return applied, status, err
+}
+
+// lockTenantAndKnowledgeForStorage 按 tenant → knowledge 的固定顺序读取并锁定
+// 配额事务涉及的两行。PostgreSQL 使用 FOR UPDATE；SQLite 由单写事务提供
+// 等价串行化。知识已被删除时返回 found=false，调用方按预期终止处理。
+func lockTenantAndKnowledgeForStorage(
+	tx *gorm.DB, tenantID uint64, knowledgeID string,
+) (tenant *types.Tenant, knowledge *types.Knowledge, found bool, err error) {
+	tenant = &types.Tenant{}
+	tenantQuery := tx.Where("id = ?", tenantID)
+	if tx.Dialector.Name() == "postgres" {
+		tenantQuery = tenantQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := tenantQuery.First(tenant).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, false, ErrTenantNotFound
+		}
+		return nil, nil, false, err
+	}
+
+	knowledge = &types.Knowledge{}
+	knowledgeQuery := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+	if tx.Dialector.Name() == "postgres" {
+		knowledgeQuery = knowledgeQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := knowledgeQuery.First(knowledge).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tenant, nil, false, nil
+		}
+		return nil, nil, false, err
+	}
+	return tenant, knowledge, true, nil
+}
+
+// knowledgeStorageMutationAllowed 保证计费事务不会覆盖删除、取消或移动声明。
+// moving 必须普通重试；deleting/cancelled/missing 则由调用方正常短路。
+func knowledgeStorageMutationAllowed(knowledge *types.Knowledge) (bool, error) {
+	if knowledge == nil {
+		return false, nil
+	}
+	switch knowledge.ParseStatus {
+	case types.ParseStatusMoving:
+		return false, types.ErrKnowledgeMoveInProgress
+	case types.ParseStatusDeleting, types.ParseStatusCancelled:
+		return false, nil
+	default:
+		return true, nil
+	}
+}
+
+// applyKnowledgeStorageDelta 计算事务内的新空间用量并复查配额。
+// 正增量禁止溢出或超过 quota；负增量最多把历史漂移值收敛到 0。
+func applyKnowledgeStorageDelta(storageUsed, storageQuota, delta int64) (int64, error) {
+	storageUsed = max(storageUsed, 0)
+	if delta > 0 {
+		if delta > math.MaxInt64-storageUsed {
+			return 0, fmt.Errorf("tenant storage usage overflow")
+		}
+		if storageQuota > 0 &&
+			(storageUsed >= storageQuota || delta > storageQuota-storageUsed) {
+			return 0, types.NewStorageQuotaExceededError()
+		}
+		return storageUsed + delta, nil
+	}
+	if delta < 0 {
+		if delta == math.MinInt64 || -delta >= storageUsed {
+			return 0, nil
+		}
+		return storageUsed + delta, nil
+	}
+	return storageUsed, nil
+}
+
+// ReserveSourceFileQuota 在同一事务内更新 tenant.storage_used 与
+// knowledge.source_file_quota_bytes。重试始终基于数据库当前 marker 计算
+// delta；即使上一次 COMMIT 成功但响应丢失，下一次也会得到 delta=0。
+func (r *knowledgeRepository) ReserveSourceFileQuota(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	targetBytes int64,
+) (applied bool, delta int64, err error) {
+	targetBytes = max(targetBytes, 0)
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		tenant, knowledge, found, lockErr := lockTenantAndKnowledgeForStorage(
+			tx, tenantID, knowledgeID,
+		)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			return nil
+		}
+		allowed, guardErr := knowledgeStorageMutationAllowed(knowledge)
+		if guardErr != nil {
+			return guardErr
+		}
+		if !allowed {
+			return nil
+		}
+
+		currentBytes := knowledge.SourceFileQuotaBytes()
+		delta = targetBytes - currentBytes
+		if delta == 0 {
+			applied = true
+			return nil
+		}
+		newStorageUsed, quotaErr := applyKnowledgeStorageDelta(
+			tenant.StorageUsed, tenant.StorageQuota, delta,
+		)
+		if quotaErr != nil {
+			return quotaErr
+		}
+		if err := tx.Model(&types.Tenant{}).
+			Where("id = ?", tenant.ID).
+			Update("storage_used", newStorageUsed).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ?", tenantID, knowledgeID).
+			Updates(map[string]interface{}{
+				"source_file_quota_bytes": targetBytes,
+				"updated_at":              time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source file quota marker update affected %d rows", result.RowsAffected)
+		}
+		applied = true
+		return nil
+	})
+	return applied, delta, err
+}
+
+// ResetIndexedKnowledgeStorage 在同一事务中把索引占用归零并扣减租户用量。
+// moveTaskID 为空时只允许普通重建状态；非空时必须仍由对应 active move claim
+// 持有 moving 状态。重试始终以数据库 storage_size 计算差额，因此只扣一次。
+func (r *knowledgeRepository) ResetIndexedKnowledgeStorage(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	moveTaskID string,
+) (applied bool, delta int64, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		tenant, knowledge, found, lockErr := lockTenantAndKnowledgeForStorage(
+			tx, tenantID, knowledgeID,
+		)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			return nil
+		}
+
+		if moveTaskID != "" {
+			claim, claimErr := decodeKnowledgeMoveClaim(knowledge.Metadata)
+			if claimErr != nil {
+				return claimErr
+			}
+			if knowledge.ParseStatus != types.ParseStatusMoving || claim == nil ||
+				claim.TaskID != moveTaskID || claim.Stage != knowledgeMoveClaimStageActive {
+				return types.ErrKnowledgeMoveInProgress
+			}
+		} else {
+			switch knowledge.ParseStatus {
+			case types.ParseStatusMoving:
+				return types.ErrKnowledgeMoveInProgress
+			case types.ParseStatusDeleting, types.ParseStatusCancelled:
+				return nil
+			}
+		}
+
+		currentBytes := max(knowledge.StorageSize, 0)
+		delta = -currentBytes
+		newStorageUsed, quotaErr := applyKnowledgeStorageDelta(
+			tenant.StorageUsed,
+			tenant.StorageQuota,
+			delta,
+		)
+		if quotaErr != nil {
+			return quotaErr
+		}
+		if delta != 0 {
+			if err := tx.Model(&types.Tenant{}).
+				Where("id = ?", tenant.ID).
+				Update("storage_used", newStorageUsed).Error; err != nil {
+				return err
+			}
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ? AND parse_status = ?", tenantID, knowledgeID, knowledge.ParseStatus).
+			Updates(map[string]interface{}{
+				"storage_size": int64(0),
+				"updated_at":   time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("indexed storage reset affected %d rows", result.RowsAffected)
+		}
+		applied = true
+		return nil
+	})
+	return applied, delta, err
+}
+
+// FinalizeIndexedKnowledge 在同一事务内结算索引配额并写入解析最终状态。
+// 只更新解析所有权字段，不触碰 metadata、move claim 或
+// pending_subtasks_count，避免破坏移动状态机和原子子任务计数。
+func (r *knowledgeRepository) FinalizeIndexedKnowledge(
+	ctx context.Context,
+	final *types.Knowledge,
+) (applied bool, delta int64, err error) {
+	if final == nil || final.ID == "" || final.TenantID == 0 {
+		return false, 0, errors.New("indexed knowledge final state is incomplete")
+	}
+	targetStorageSize := max(final.StorageSize, 0)
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		tenant, current, found, lockErr := lockTenantAndKnowledgeForStorage(
+			tx, final.TenantID, final.ID,
+		)
+		if lockErr != nil {
+			return lockErr
+		}
+		if !found {
+			return nil
+		}
+		allowed, guardErr := knowledgeStorageMutationAllowed(current)
+		if guardErr != nil {
+			return guardErr
+		}
+		if !allowed {
+			return nil
+		}
+		if current.KnowledgeBaseID != final.KnowledgeBaseID {
+			return types.ErrKnowledgeMoveInProgress
+		}
+
+		delta = targetStorageSize - max(current.StorageSize, 0)
+		newStorageUsed, quotaErr := applyKnowledgeStorageDelta(
+			tenant.StorageUsed, tenant.StorageQuota, delta,
+		)
+		if quotaErr != nil {
+			return quotaErr
+		}
+		if delta != 0 {
+			if err := tx.Model(&types.Tenant{}).
+				Where("id = ?", tenant.ID).
+				Update("storage_used", newStorageUsed).Error; err != nil {
+				return err
+			}
+		}
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ?", final.TenantID, final.ID).
+			Updates(map[string]interface{}{
+				"parse_status":   final.ParseStatus,
+				"summary_status": final.SummaryStatus,
+				"enable_status":  final.EnableStatus,
+				"storage_size":   targetStorageSize,
+				"processed_at":   final.ProcessedAt,
+				"updated_at":     final.UpdatedAt,
+				"error_message":  final.ErrorMessage,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("indexed knowledge finalization affected %d rows", result.RowsAffected)
+		}
+		applied = true
+		return nil
+	})
+	return applied, delta, err
 }
 
 // UpdateActiveDeletingKnowledgeColumns only touches rows that are still visible

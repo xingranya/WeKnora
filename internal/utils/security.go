@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -341,6 +342,19 @@ var restrictedPorts = map[string]bool{
 	"4001":  true, // etcd (old)
 }
 
+// normalizeNetworkPort 将端口规范为无前导零的十进制字符串。
+// 空字符串表示协议默认端口；显式端口必须处于 1..65535。
+func normalizeNetworkPort(port string) (string, error) {
+	if port == "" {
+		return "", nil
+	}
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 {
+		return "", fmt.Errorf("port %q must be a decimal number between 1 and 65535", port)
+	}
+	return strconv.FormatUint(value, 10), nil
+}
+
 // mustParseCIDR parses a CIDR string and panics on error
 func mustParseCIDR(s string) *net.IPNet {
 	_, ipNet, err := net.ParseCIDR(s)
@@ -472,8 +486,15 @@ func isIPLikeHostname(hostname string) bool {
 // - Cloud metadata endpoints
 // - Reserved hostnames (localhost, *.local, etc.)
 func isSSRFSafeURL(rawURL string) (bool, string) {
+	return isSSRFSafeURLWithLookup(rawURL, net.LookupIP)
+}
+
+func isSSRFSafeURLWithLookup(rawURL string, lookupIP func(string) ([]net.IP, error)) (bool, string) {
 	if rawURL == "" {
 		return false, "URL is empty"
+	}
+	if lookupIP == nil {
+		return false, "DNS resolver is not configured"
 	}
 
 	// Check URL length
@@ -532,9 +553,12 @@ func isSSRFSafeURL(rawURL string) (bool, string) {
 
 	// Perform DNS resolution to check the resolved IP
 	// This prevents DNS rebinding attacks where a domain resolves to internal IPs
-	ips, err := net.LookupIP(hostname)
+	ips, err := lookupIP(hostname)
 	if err != nil {
 		return false, fmt.Sprintf("DNS resolution failed for hostname %s: cannot verify if it resolves to safe IP", hostname)
+	}
+	if len(ips) == 0 {
+		return false, fmt.Sprintf("DNS resolution returned no addresses for hostname %s", hostname)
 	}
 
 	// Check if any resolved IP is restricted
@@ -545,7 +569,10 @@ func isSSRFSafeURL(rawURL string) (bool, string) {
 	}
 
 	// Check for suspicious port numbers
-	port := parsed.Port()
+	port, err := normalizeNetworkPort(parsed.Port())
+	if err != nil {
+		return false, fmt.Sprintf("invalid port: %v", err)
+	}
 	if restrictedPorts[port] {
 		return false, fmt.Sprintf("port %s is blocked for security reasons", port)
 	}
@@ -990,8 +1017,12 @@ func SSRFSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 		}
 		return dialer.DialContext(ctx, network, addr)
 	}
-	if restrictedPorts[port] {
-		return nil, fmt.Errorf("connection blocked: port %s is restricted", port)
+	normalizedPort, err := normalizeNetworkPort(port)
+	if err != nil {
+		return nil, fmt.Errorf("connection blocked: invalid port %q: %w", port, err)
+	}
+	if restrictedPorts[normalizedPort] {
+		return nil, fmt.Errorf("connection blocked: port %s is restricted", normalizedPort)
 	}
 
 	// Check if the host is a restricted hostname
@@ -1034,7 +1065,7 @@ func SSRFSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 	}
 	var lastErr error
 	for _, ipAddr := range ips {
-		pinnedAddr := net.JoinHostPort(ipAddr.IP.String(), port)
+		pinnedAddr := net.JoinHostPort(ipAddr.IP.String(), normalizedPort)
 		conn, dialErr := dialer.DialContext(ctx, network, pinnedAddr)
 		if dialErr == nil {
 			return conn, nil

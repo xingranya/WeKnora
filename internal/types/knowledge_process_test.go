@@ -3,6 +3,7 @@ package types
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +48,31 @@ func TestSetProcessOverridesPreservesOtherMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, gotOverrides)
 	require.False(t, *gotOverrides.EnableMultimodel)
+}
+
+func TestSetManualMetadataPreservesInternalMetadata(t *testing.T) {
+	k := &Knowledge{Metadata: JSON(`{
+		"_weknora_move_claim":{"task_id":"move-1","stage":"active"},
+		"process_overrides":{"parser_engine":"mineru"}
+	}`)}
+	require.NoError(t, k.SetManualMetadata(NewManualKnowledgeMetadata("正文", ManualKnowledgeStatusPublish, 2)))
+
+	metadata, err := k.Metadata.Map()
+	require.NoError(t, err)
+	require.Contains(t, metadata, "_weknora_move_claim")
+	require.Contains(t, metadata, metadataKeyProcessOverrides)
+	assert.Equal(t, "正文", metadata["content"])
+	assert.Equal(t, float64(2), metadata["version"])
+
+	require.NoError(t, k.SetManualMetadata(nil))
+	metadata, err = k.Metadata.Map()
+	require.NoError(t, err)
+	require.Contains(t, metadata, "_weknora_move_claim")
+	require.Contains(t, metadata, metadataKeyProcessOverrides)
+	assert.NotContains(t, metadata, "content")
+	manual, err := k.ManualMetadata()
+	require.NoError(t, err)
+	assert.Nil(t, manual)
 }
 
 func TestSourceFileQuotaBytesPreservesStorageSizeSemantics(t *testing.T) {

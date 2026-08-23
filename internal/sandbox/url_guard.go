@@ -72,6 +72,13 @@ func SafeDialControlForPolicy(policy OutboundURLPolicy) func(string, string, sys
 // Callers must ALSO install DialControl on the dialer they use; Validate alone
 // cannot close the DNS-rebinding window.
 func (p OutboundURLPolicy) Validate(raw string) error {
+	return p.validateWithLookup(raw, net.LookupIP)
+}
+
+func (p OutboundURLPolicy) validateWithLookup(raw string, lookupIP func(string) ([]net.IP, error)) error {
+	if lookupIP == nil {
+		return fmt.Errorf("%w: DNS resolver is required", ErrUnsafeOutboundURL)
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return fmt.Errorf("%w: empty URL", ErrUnsafeOutboundURL)
@@ -110,9 +117,12 @@ func (p OutboundURLPolicy) Validate(raw string) error {
 	if ip := net.ParseIP(host); ip != nil {
 		return p.checkIP(ip)
 	}
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIP(host)
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %q: %v", ErrUnsafeOutboundURL, host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("%w: cannot resolve %q: no addresses returned", ErrUnsafeOutboundURL, host)
 	}
 	for _, ip := range addrs {
 		if err := p.checkIP(ip); err != nil {
@@ -151,7 +161,8 @@ func (p OutboundURLPolicy) checkIP(ip net.IP) error {
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() ||
-		ip.IsMulticast() {
+		ip.IsMulticast() ||
+		isBenchmarkNetwork(ip) {
 		return fmt.Errorf("%w: address %s is never routable to a sandbox", ErrUnsafeOutboundURL, ip)
 	}
 	if ip.IsLoopback() || ip.IsPrivate() || isCarrierGradeNAT(ip) {
@@ -173,4 +184,14 @@ func isCarrierGradeNAT(ip net.IP) bool {
 		return false
 	}
 	return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
+}
+
+// isBenchmarkNetwork 判断地址是否属于 RFC 2544 的网络设备基准测试网段。
+// 该网段可能被本地代理或隔离网络用于 DNS 接管，不能视为公网目标。
+func isBenchmarkNetwork(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	return v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
 }

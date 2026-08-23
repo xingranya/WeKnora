@@ -51,7 +51,7 @@ func TestSummarySourceChangedDetectsMetadataDrift(t *testing.T) {
 		context.Background(),
 		&summaryStaleKnowledgeRepo{knowledge: &types.Knowledge{CustomMetadata: types.JSON(`{"region":"Shanghai"}`)}},
 		&summaryStaleChunkRepo{},
-		1, "knowledge-1", `{"region":"Beijing"}`, nil,
+		1, "knowledge-1", summarySourceRevision{CustomMetadata: `{"region":"Beijing"}`}, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -69,7 +69,8 @@ func TestSummarySourceChangedDetectsChunkRevisionDrift(t *testing.T) {
 		&summaryStaleChunkRepo{chunks: map[string]*types.Chunk{
 			"chunk-1": {ID: "chunk-1", ContentRevision: 2, IsEnabled: true},
 		}},
-		1, "knowledge-1", `{}`, []*types.Chunk{{ID: "chunk-1", ContentRevision: 1, IsEnabled: true}},
+		1, "knowledge-1", summarySourceRevision{CustomMetadata: `{}`},
+		[]*types.Chunk{{ID: "chunk-1", ContentRevision: 1, IsEnabled: true}},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -86,7 +87,7 @@ func TestSummarySourceChangedReturnsLookupErrors(t *testing.T) {
 		context.Background(),
 		&summaryStaleKnowledgeRepo{err: lookupErr},
 		&summaryStaleChunkRepo{},
-		1, "knowledge-1", `{}`, nil,
+		1, "knowledge-1", summarySourceRevision{CustomMetadata: `{}`}, nil,
 	)
 	if !errors.Is(err, lookupErr) {
 		t.Fatalf("expected lookup error, got %v", err)
@@ -96,7 +97,7 @@ func TestSummarySourceChangedReturnsLookupErrors(t *testing.T) {
 		context.Background(),
 		&summaryStaleKnowledgeRepo{knowledge: &types.Knowledge{CustomMetadata: types.JSON(`{}`)}},
 		&summaryStaleChunkRepo{err: lookupErr},
-		1, "knowledge-1", `{}`, []*types.Chunk{{ID: "chunk-1"}},
+		1, "knowledge-1", summarySourceRevision{CustomMetadata: `{}`}, []*types.Chunk{{ID: "chunk-1"}},
 	)
 	if !errors.Is(err, lookupErr) {
 		t.Fatalf("expected chunk lookup error, got %v", err)
@@ -111,7 +112,7 @@ func TestSummarySourceChangedAcceptsCurrentSnapshot(t *testing.T) {
 		&summaryStaleChunkRepo{chunks: map[string]*types.Chunk{
 			"chunk-1": {ID: "chunk-1", ContentRevision: 3, IsEnabled: true},
 		}},
-		1, "knowledge-1", `{"region":"Shanghai"}`,
+		1, "knowledge-1", summarySourceRevision{CustomMetadata: `{"region":"Shanghai"}`},
 		[]*types.Chunk{{ID: "chunk-1", ContentRevision: 3, IsEnabled: true}},
 	)
 	if err != nil {

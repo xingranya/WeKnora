@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -40,6 +41,62 @@ func (r *reparseFailureKnowledgeRepo) UpdateKnowledgeColumn(
 	_ interface{},
 ) error {
 	return nil
+}
+
+func (r *reparseFailureKnowledgeRepo) ClaimKnowledgeReparse(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	_ time.Time,
+) (bool, string, error) {
+	status := r.knowledge.ParseStatus
+	switch status {
+	case types.ParseStatusCompleted, types.ParseStatusFailed, types.ParseStatusCancelled:
+		r.knowledge.ParseStatus = types.ParseStatusProcessing
+		return true, types.ParseStatusProcessing, nil
+	default:
+		return false, status, nil
+	}
+}
+
+func (r *reparseFailureKnowledgeRepo) StageKnowledgeReparsePending(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	embeddingModelID string,
+	metadata types.JSON,
+	updatedAt time.Time,
+) (bool, string, error) {
+	if r.knowledge.ParseStatus != types.ParseStatusProcessing &&
+		r.knowledge.ParseStatus != types.ParseStatusPending {
+		return false, r.knowledge.ParseStatus, nil
+	}
+	r.updateCalls++
+	r.knowledge.ParseStatus = types.ParseStatusPending
+	r.knowledge.EnableStatus = "disabled"
+	r.knowledge.EmbeddingModelID = embeddingModelID
+	r.knowledge.Metadata = metadata
+	r.knowledge.UpdatedAt = updatedAt
+	return true, types.ParseStatusPending, nil
+}
+
+func (r *reparseFailureKnowledgeRepo) CancelKnowledgeProcessing(
+	context.Context, uint64, string, time.Time,
+) (bool, string, error) {
+	return false, r.knowledge.ParseStatus, nil
+}
+
+func (r *reparseFailureKnowledgeRepo) FailKnowledgeProcessing(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	errorMessage string,
+	_ time.Time,
+) (bool, string, error) {
+	r.updateCalls++
+	r.knowledge.ParseStatus = types.ParseStatusFailed
+	r.knowledge.ErrorMessage = errorMessage
+	return true, types.ParseStatusFailed, nil
 }
 
 type reparseFailureKBService struct {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
@@ -351,6 +352,7 @@ var _ = time.Now
 func TestDownloadFile_RejectsLoopbackURL(t *testing.T) {
 	secutils.ResetSSRFWhitelistForTest()
 	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+	fakedns.InstallDefault(t, map[string][]string{"api.notion.com": {"8.8.8.8"}})
 
 	client, err := newClient("test-token", "https://api.notion.com")
 	if err != nil {

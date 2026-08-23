@@ -453,6 +453,9 @@ type KBDeletePayload struct {
 	// soft-delete) so the async worker can resolve the right store. nil means
 	// the KB had no binding — falls back to EffectiveEngines.
 	VectorStoreID *string `json:"vector_store_id,omitempty"`
+	// StorageBackendID 是入队前快照的存储实例。后台任务必须继续使用
+	// 同一实例删除 resource:// 源文件和解析产物，不能回退到进程默认存储。
+	StorageBackendID *string `json:"storage_backend_id,omitempty"`
 }
 
 // KnowledgeListDeletePayload represents the batch knowledge delete task payload

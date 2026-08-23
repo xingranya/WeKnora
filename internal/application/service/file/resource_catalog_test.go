@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"errors"
 	"io"
 	"mime/multipart"
 	"strings"
@@ -17,6 +18,7 @@ type catalogStub struct {
 	resource      *types.StoredResource
 	ref           string
 	registerCalls int
+	resolveErr    error
 }
 
 func (c *catalogStub) Register(
@@ -42,6 +44,9 @@ func (c *catalogStub) Resolve(_ context.Context, _ string) (*types.StoredResourc
 }
 
 func (c *catalogStub) ResolvePath(_ context.Context, value string) (string, *types.StoredResource, error) {
+	if c.resolveErr != nil {
+		return "", nil, c.resolveErr
+	}
 	if value == c.ref {
 		return c.resource.PhysicalPath, c.resource, nil
 	}
@@ -58,9 +63,10 @@ func (c *catalogStub) ResolveAccessGrant(context.Context, string) (*types.Stored
 }
 
 type physicalFileStub struct {
-	savedPath string
-	readPath  string
-	writePath string
+	savedPath   string
+	readPath    string
+	writePath   string
+	deleteCalls int
 }
 
 func (s *physicalFileStub) CheckConnectivity(context.Context) error { return nil }
@@ -77,7 +83,10 @@ func (s *physicalFileStub) GetFile(_ context.Context, path string) (io.ReadClose
 	return io.NopCloser(strings.NewReader("body")), nil
 }
 func (s *physicalFileStub) GetFileURL(context.Context, string) (string, error) { return "", nil }
-func (s *physicalFileStub) DeleteFile(context.Context, string) error           { return nil }
+func (s *physicalFileStub) DeleteFile(context.Context, string) error {
+	s.deleteCalls++
+	return nil
+}
 func (s *physicalFileStub) CopyFile(context.Context, string, uint64, string) (string, error) {
 	return "", nil
 }
@@ -148,4 +157,16 @@ func TestPreparedResourceRegistersOnlyAfterPhysicalWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "resource://AbCdEfGhIjKlMnOpQrStUv", ref)
 	require.Equal(t, 1, catalog.registerCalls)
+}
+
+func TestResourceCatalogDeleteIsIdempotentAfterResourceWasDeleted(t *testing.T) {
+	inner := &physicalFileStub{}
+	catalog := &catalogStub{resolveErr: interfaces.ErrResourceNotFound}
+	svc := NewResourceCatalogFileService(inner, catalog)
+
+	err := svc.DeleteFile(context.Background(), "resource://AbCdEfGhIjKlMnOpQrStUv")
+
+	require.NoError(t, err)
+	require.Zero(t, inner.deleteCalls)
+	require.True(t, errors.Is(catalog.resolveErr, interfaces.ErrResourceNotFound))
 }

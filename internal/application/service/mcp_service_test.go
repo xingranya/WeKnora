@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/mcp"
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -180,11 +181,11 @@ func TestUpdateMCPService_RespectsScalarFieldPresence(t *testing.T) {
 }
 
 func TestUpdateMCPService_AppliesNonScalarUpdateWithoutName(t *testing.T) {
+	fakedns.InstallDefault(t, map[string][]string{"example.com": {"8.8.8.8"}})
 	ctx := context.Background()
 	svc, repo := newTestService()
 	id := seedService(t, repo, "stored-api", "stored-token")
-	// Use resolvable example.com paths: subdomains like before.example.com fail
-	// SSRF DNS checks because they do not resolve to a public IP.
+	// 使用固定测试解析结果，避免测试依赖系统 DNS 或网络代理模式。
 	beforeURL := "https://example.com/before"
 	repo.store[id].Description = "before"
 	repo.store[id].URL = &beforeURL

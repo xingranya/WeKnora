@@ -2,10 +2,14 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+// ErrResourceNotFound 表示资源句柄不存在或已经进入删除状态。
+var ErrResourceNotFound = errors.New("resource not found")
 
 // ResourceCleaner owns process-lifetime cleanup callbacks (database clients,
 // worker pools, etc.). It is unrelated to persisted StoredResource records.

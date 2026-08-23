@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -178,8 +179,9 @@ func (s *tenantService) DeleteTenant(ctx context.Context, id uint64) error {
 	// Get tenant information for logging
 	tenant, err := s.repo.GetTenantByID(ctx, id)
 	if err != nil {
-		if err.Error() == "record not found" {
+		if errors.Is(err, repository.ErrTenantNotFound) {
 			logger.Warnf(ctx, "Tenant to be deleted does not exist, ID: %d", id)
+			return werrors.NewTenantNotFoundError()
 		} else {
 			logger.ErrorWithFields(ctx, err, map[string]interface{}{
 				"tenant_id": id,
@@ -192,6 +194,14 @@ func (s *tenantService) DeleteTenant(ctx context.Context, id uint64) error {
 
 	err = s.repo.DeleteTenant(ctx, id)
 	if err != nil {
+		if errors.Is(err, repository.ErrTenantHasKnowledgeBase) {
+			return werrors.NewConflictError(
+				"空间中仍有知识库或待清理资源，请先删除所有知识库并等待清理完成后重试",
+			)
+		}
+		if errors.Is(err, repository.ErrTenantNotFound) {
+			return werrors.NewTenantNotFoundError()
+		}
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"tenant_id": id,
 		})

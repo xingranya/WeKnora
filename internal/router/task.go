@@ -339,6 +339,7 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 // document-related asynq payload. Kept narrow so we don't accidentally
 // depend on the full payload schema and survive future field churn.
 type deadLetterKnowledgePayload struct {
+	TenantID    uint64 `json:"tenant_id,omitempty"`
 	KnowledgeID string `json:"knowledge_id,omitempty"`
 	// Attempt threads through DocumentProcess / ManualProcess /
 	// KnowledgePostProcess payloads (added when span tracking shipped)
@@ -346,6 +347,16 @@ type deadLetterKnowledgePayload struct {
 	// matching root span as failed. Older in-flight payloads without
 	// this field decode as 0 and the tracker call no-ops.
 	Attempt int `json:"attempt,omitempty"`
+}
+
+type deadLetterKnowledgeFailureRepository interface {
+	FailKnowledgeProcessing(
+		context.Context,
+		uint64,
+		string,
+		string,
+		time.Time,
+	) (applied bool, status string, err error)
 }
 
 // taskTypesAffectingKnowledgeStatus enumerates the asynq task types whose
@@ -406,19 +417,40 @@ func newDeadLetterKnowledgeFailer(ks interfaces.KnowledgeService, tracker servic
 		if err := json.Unmarshal(t.Payload(), &probe); err != nil || probe.KnowledgeID == "" {
 			return
 		}
+		if probe.TenantID == 0 {
+			knowledge, lookupErr := repo.GetKnowledgeByIDOnly(ctx, probe.KnowledgeID)
+			if lookupErr != nil || knowledge == nil {
+				return
+			}
+			probe.TenantID = knowledge.TenantID
+		}
 		errMsg := "task " + t.Type() + " exhausted retries: " + taskErr.Error()
 		// 8KB is the same cap the dead-letter row uses for last_error.
 		if len(errMsg) > 8192 {
 			errMsg = errMsg[:8192]
 		}
-		// Single UPDATE so we never end up with parse_status=failed but
-		// stale error_message (or vice versa) when the second write
-		// fails.
-		if err := repo.UpdateKnowledgeColumns(ctx, probe.KnowledgeID, map[string]interface{}{
-			"parse_status":  types.ParseStatusFailed,
-			"error_message": errMsg,
-		}); err != nil {
+		failureRepo, ok := repo.(deadLetterKnowledgeFailureRepository)
+		if !ok {
+			logger.Warnf(ctx, "dead-letter callback: knowledge repository lacks guarded failure support")
+			return
+		}
+		applied, status, err := failureRepo.FailKnowledgeProcessing(
+			ctx,
+			probe.TenantID,
+			probe.KnowledgeID,
+			errMsg,
+			time.Now(),
+		)
+		if err != nil {
 			logger.Warnf(ctx, "dead-letter callback: failed to mark knowledge %s as failed: %v", probe.KnowledgeID, err)
+			return
+		}
+		if !applied {
+			logger.Infof(ctx,
+				"dead-letter callback: skipped knowledge %s because lifecycle state is %s",
+				probe.KnowledgeID,
+				status,
+			)
 			return
 		}
 		// Close the matching root span so the timeline stops showing

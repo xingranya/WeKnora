@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -11,6 +12,9 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// ErrKnowledgeMoveInProgress 表示知识正由持久移动声明占用，队列任务应普通重试。
+var ErrKnowledgeMoveInProgress = errors.New("knowledge move is in progress")
 
 const (
 	// KnowledgeTypeManual represents the manual knowledge type
@@ -61,6 +65,9 @@ const (
 	ParseStatusCompleted = "completed"
 	// ParseStatusFailed indicates the knowledge processing failed
 	ParseStatusFailed = "failed"
+	// ParseStatusMoving 表示知识已被一个持久移动声明占用。
+	// 删除流程必须等待该声明完成或失败，不能覆盖移动中的资源归属。
+	ParseStatusMoving = "moving"
 	// ParseStatusDeleting indicates the knowledge is being deleted (used to prevent async task conflicts)
 	ParseStatusDeleting = "deleting"
 	// ParseStatusCancelled indicates parsing was cancelled by the user.
@@ -264,6 +271,8 @@ type ManualKnowledgeMetadata struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+var manualKnowledgeMetadataKeys = []string{"content", "format", "status", "version", "updated_at"}
+
 // ManualKnowledgePayload represents the payload for manual knowledge operations.
 type ManualKnowledgePayload struct {
 	Title         string                     `json:"title"`
@@ -323,6 +332,20 @@ func (k *Knowledge) ManualMetadata() (*ManualKnowledgeMetadata, error) {
 	if len(k.Metadata) == 0 {
 		return nil, nil
 	}
+	metadataMap, err := k.Metadata.Map()
+	if err != nil {
+		return nil, err
+	}
+	hasManualMetadata := false
+	for _, key := range manualKnowledgeMetadataKeys {
+		if _, ok := metadataMap[key]; ok {
+			hasManualMetadata = true
+			break
+		}
+	}
+	if !hasManualMetadata {
+		return nil, nil
+	}
 	var metadata ManualKnowledgeMetadata
 	if err := json.Unmarshal(k.Metadata, &metadata); err != nil {
 		return nil, err
@@ -338,15 +361,36 @@ func (k *Knowledge) ManualMetadata() (*ManualKnowledgeMetadata, error) {
 
 // SetManualMetadata sets manual knowledge metadata onto the knowledge instance.
 func (k *Knowledge) SetManualMetadata(meta *ManualKnowledgeMetadata) error {
-	if meta == nil {
-		k.Metadata = nil
-		return nil
-	}
-	jsonValue, err := meta.ToJSON()
+	metadataMap, err := k.Metadata.Map()
 	if err != nil {
 		return err
 	}
-	k.Metadata = jsonValue
+	if meta == nil {
+		for _, key := range manualKnowledgeMetadataKeys {
+			delete(metadataMap, key)
+		}
+	} else {
+		jsonValue, err := meta.ToJSON()
+		if err != nil {
+			return err
+		}
+		var manualMap map[string]interface{}
+		if err := json.Unmarshal(jsonValue, &manualMap); err != nil {
+			return err
+		}
+		for _, key := range manualKnowledgeMetadataKeys {
+			if value, ok := manualMap[key]; ok {
+				metadataMap[key] = value
+			} else {
+				delete(metadataMap, key)
+			}
+		}
+	}
+	jsonValue, err := json.Marshal(metadataMap)
+	if err != nil {
+		return err
+	}
+	k.Metadata = JSON(jsonValue)
 	return nil
 }
 

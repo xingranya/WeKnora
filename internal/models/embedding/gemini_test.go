@@ -7,10 +7,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
-func TestGeminiEmbedderBatchEmbedUsesNativeAPI(t *testing.T) {
+func allowEmbeddingLoopbackForTest(t *testing.T) {
+	t.Helper()
 	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	secutils.ResetSSRFWhitelistForTest()
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+}
+
+func TestGeminiEmbedderBatchEmbedUsesNativeAPI(t *testing.T) {
+	allowEmbeddingLoopbackForTest(t)
 
 	var gotPath string
 	var gotAPIKey string
@@ -68,7 +77,7 @@ func TestGeminiEmbedderBatchEmbedUsesNativeAPI(t *testing.T) {
 }
 
 func TestGeminiEmbedderBatchEmbedSendsOutputDimensionalityWhenOverrideEnabled(t *testing.T) {
-	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	allowEmbeddingLoopbackForTest(t)
 
 	var gotReq geminiBatchEmbedRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +105,7 @@ func TestGeminiEmbedderBatchEmbedSendsOutputDimensionalityWhenOverrideEnabled(t 
 }
 
 func TestGeminiEmbedderReturnsAPIErrorBody(t *testing.T) {
-	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	allowEmbeddingLoopbackForTest(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)

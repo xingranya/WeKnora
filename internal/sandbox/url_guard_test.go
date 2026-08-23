@@ -2,9 +2,26 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 )
+
+func deterministicLookupIP(host string) ([]net.IP, error) {
+	switch host {
+	case "public.sandbox.test", "parallel.sandbox.test":
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	case "private.sandbox.test":
+		return []net.IP{net.ParseIP("10.0.0.8")}, nil
+	case "benchmark.sandbox.test":
+		return []net.IP{net.ParseIP("198.18.0.8")}, nil
+	case "unresolvable.sandbox.test":
+		return nil, fmt.Errorf("固定的测试解析失败")
+	default:
+		return nil, fmt.Errorf("测试未登记主机 %q", host)
+	}
+}
 
 // denyPrivate is the secure default policy.
 var denyPrivate = OutboundURLPolicy{AllowPrivate: false}
@@ -89,11 +106,8 @@ func TestPolicyAllowsPublicLiteralAddresses(t *testing.T) {
 }
 
 func TestPolicyAllowsPublicHostname(t *testing.T) {
-	const host = "api.e2b.dev"
-	if _, err := net.LookupIP(host); err != nil {
-		t.Skipf("no DNS available in this environment: %v", err)
-	}
-	if err := denyPrivate.Validate("https://" + host); err != nil {
+	const host = "public.sandbox.test"
+	if err := denyPrivate.validateWithLookup("https://"+host, deterministicLookupIP); err != nil {
 		t.Fatalf("denyPrivate.Validate(%q) = %v, want nil", host, err)
 	}
 }
@@ -101,16 +115,66 @@ func TestPolicyAllowsPublicHostname(t *testing.T) {
 func TestPolicyValidateRejectsUnresolvableHost(t *testing.T) {
 	// Fail closed: if we cannot verify where a host points, we refuse it. This
 	// also gives the admin an early "that hostname does not exist" signal.
-	err := denyPrivate.Validate("https://this-host-does-not-exist.invalid")
+	const host = "unresolvable.sandbox.test"
+	err := denyPrivate.validateWithLookup("https://"+host, deterministicLookupIP)
 	if err == nil {
 		t.Fatal("Validate on an unresolvable host = nil, want error")
+	}
+}
+
+func TestPolicyRejectsResolvedPrivateAndBenchmarkTargets(t *testing.T) {
+	for _, raw := range []string{
+		"https://private.sandbox.test",
+		"https://benchmark.sandbox.test",
+	} {
+		for label, policy := range map[string]OutboundURLPolicy{
+			"deny-private":  denyPrivate,
+			"allow-private": allowPrivate,
+		} {
+			err := policy.validateWithLookup(raw, deterministicLookupIP)
+			if raw == "https://private.sandbox.test" && label == "allow-private" {
+				if err != nil {
+					t.Fatalf("%s.Validate(%q) = %v, want nil", label, raw, err)
+				}
+				continue
+			}
+			if err == nil {
+				t.Fatalf("%s.Validate(%q) = nil, want error", label, raw)
+			}
+		}
+	}
+}
+
+func TestPolicyInjectedResolverSupportsConcurrentValidation(t *testing.T) {
+	const goroutineCount = 16
+	ready := sync.WaitGroup{}
+	ready.Add(goroutineCount)
+	start := make(chan struct{})
+	errorsFound := make(chan error, goroutineCount)
+
+	for range goroutineCount {
+		go func() {
+			ready.Done()
+			<-start
+			errorsFound <- denyPrivate.validateWithLookup(
+				"https://parallel.sandbox.test",
+				deterministicLookupIP,
+			)
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range goroutineCount {
+		if err := <-errorsFound; err != nil {
+			t.Fatalf("并行固定解析失败：%v", err)
+		}
 	}
 }
 
 func TestPolicyDialControlMirrorsValidation(t *testing.T) {
 	// The dialer must forbid exactly what validation forbids, otherwise a
 	// saved config would fail mysteriously at first use.
-	alwaysBlocked := []string{"169.254.169.254:80", "0.0.0.0:80"}
+	alwaysBlocked := []string{"169.254.169.254:80", "0.0.0.0:80", "198.18.0.8:443"}
 	privateOnly := []string{"127.0.0.1:8080", "10.1.2.3:443", "[::1]:8080"}
 
 	for _, address := range alwaysBlocked {

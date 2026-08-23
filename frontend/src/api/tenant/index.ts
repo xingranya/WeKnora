@@ -1,5 +1,6 @@
 import { del, get, post, put } from '@/utils/request'
 import i18n from '@/i18n'
+import { classifyTenantDeleteError } from './deleteTenantError'
 
 const t = (key: string) => i18n.global.t(key)
 
@@ -293,14 +294,22 @@ export async function updateTenant(
  */
 export async function deleteTenant(
   tenantId: number,
-): Promise<{ success: boolean; message?: string }> {
+): Promise<{
+  success: boolean
+  message?: string
+  blockedByResources?: boolean
+  code?: number
+  status?: number
+}> {
   try {
     const response = await del(`/api/v1/tenants/${tenantId}`)
     return response as unknown as { success: boolean; message?: string }
   } catch (error: any) {
+    const failure = classifyTenantDeleteError(error)
     return {
       success: false,
-      message: error.message || t('error.tenant.deleteFailed'),
+      ...failure,
+      message: failure.message || t('error.tenant.deleteFailed'),
     }
   }
 }

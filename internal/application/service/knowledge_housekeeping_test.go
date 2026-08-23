@@ -144,7 +144,27 @@ func newHousekeepingSvcWithInspector(db *gorm.DB, inspector interfaces.TaskInspe
 		// default of 2h+10min is just a constant scale factor.
 		DocumentProcessTimeout: 1 * time.Hour,
 	}}
-	return NewHousekeepingService(db, cfg, inspector, nil)
+	return NewHousekeepingService(db, cfg, inspector, nil, nil)
+}
+
+type housekeepingKBDeleteRecoverer struct {
+	interfaces.KnowledgeBaseService
+	calls []int
+	err   error
+}
+
+func (r *housekeepingKBDeleteRecoverer) RecoverPendingKBDeletes(_ context.Context, limit int) error {
+	r.calls = append(r.calls, limit)
+	return r.err
+}
+
+func TestHousekeepingRecoversPendingKnowledgeBaseDeletes(t *testing.T) {
+	recoverer := &housekeepingKBDeleteRecoverer{}
+	h := &HousekeepingService{kbService: recoverer}
+
+	h.recoverPendingKBDeletes(context.Background())
+
+	assert.Equal(t, []int{100}, recoverer.calls)
 }
 
 // TestHousekeeping_RecoversAbandoned exercises the happy path: a

@@ -383,6 +383,9 @@ function isParseInFlight(status?: string): boolean {
 
 function isTraceMenuVisible(item: KnowledgeCard): boolean {
   if (!item?.id) return false;
+  if (item.parse_status === 'moving') {
+    return traceAvailableById[item.id] === true;
+  }
   if (isParseInFlight(item.parse_status)) {
     return true;
   }
@@ -392,7 +395,7 @@ function isTraceMenuVisible(item: KnowledgeCard): boolean {
 async function probeTraceAvailable(item: KnowledgeCard) {
   const id = item.id;
   if (!id || traceProbeInflight.has(id)) return;
-  if (isParseInFlight(item.parse_status)) {
+  if (isParseInFlight(item.parse_status) && item.parse_status !== 'moving') {
     traceAvailableById[id] = true;
     return;
   }
@@ -594,6 +597,7 @@ const parseStatusOptions = computed(() => [
   { label: t('knowledgeBase.allParseStatuses'), value: '' },
   { label: t('knowledgeBase.parseStatusPending'), value: 'pending' },
   { label: t('knowledgeBase.parseStatusProcessing'), value: 'processing' },
+  { label: t('knowledgeBase.statusMoving'), value: 'moving' },
   { label: t('knowledgeBase.parseStatusCompleted'), value: 'completed' },
   { label: t('knowledgeBase.parseStatusFailed'), value: 'failed' },
   { label: t('knowledgeBase.parseStatusCancelled'), value: 'cancelled' },

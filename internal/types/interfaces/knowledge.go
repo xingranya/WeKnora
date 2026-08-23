@@ -218,6 +218,8 @@ type KnowledgeService interface {
 	ProcessKBClone(ctx context.Context, t *asynq.Task) error
 	// ProcessKnowledgeMove handles Asynq knowledge move tasks
 	ProcessKnowledgeMove(ctx context.Context, t *asynq.Task) error
+	// PersistKnowledgeMoveDispatch 持久化知识移动的 outbox 调度意图。
+	PersistKnowledgeMoveDispatch(ctx context.Context, payload types.KnowledgeMovePayload) error
 	// ProcessKnowledgeListDelete handles Asynq knowledge list delete tasks
 	ProcessKnowledgeListDelete(ctx context.Context, t *asynq.Task) error
 	// ProcessKnowledgeListReparse handles Asynq knowledge list reparse tasks
@@ -364,8 +366,8 @@ type KnowledgeRepository interface {
 	SearchKnowledgeInScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, int64, error)
 	// ListIDsByTagIDs returns all knowledge IDs that have any of the specified tag IDs (OR semantics).
 	ListIDsByTagIDs(ctx context.Context, tenantID uint64, kbID string, tagIDs []string) ([]string, error)
-	// SetKnowledgeTags replaces all tags for a single knowledge entry (deletes old, inserts new).
-	SetKnowledgeTags(ctx context.Context, knowledgeID string, tagIDs []string) error
+	// SetKnowledgeTags 在租户和知识库作用域内替换单条知识的全部标签。
+	SetKnowledgeTags(ctx context.Context, tenantID uint64, kbID, knowledgeID string, tagIDs []string) error
 	// AddKnowledgeTagRelations attaches tags without removing existing ones,
 	// after validating that the knowledge and every tag belong to the given
 	// tenant and knowledge base. Duplicate deliveries are idempotent.

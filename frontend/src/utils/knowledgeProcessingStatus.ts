@@ -13,6 +13,7 @@ export function parseStatusToTimelineStatus(status?: string): string {
     case 'completed':
       return 'done'
     case 'processing':
+    case 'moving':
       return 'running'
     default:
       return status || ''

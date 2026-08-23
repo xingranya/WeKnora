@@ -14,6 +14,7 @@ import (
 
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/sandbox"
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -337,6 +338,7 @@ func newTestConfigService(
 	agents stubAgentRepo,
 ) *TenantSandboxConfigService {
 	t.Helper()
+	fakedns.InstallDefault(t, map[string][]string{"api.e2b.app": {"8.8.8.8"}})
 	if client == nil {
 		client = &stubProviderClient{}
 	}
@@ -471,6 +473,7 @@ func TestQueryTemplatesDeduplicatesSameProviderTemplateID(t *testing.T) {
 }
 
 func TestQueryTemplatesResolvesMaskedStoredCredential(t *testing.T) {
+	fakedns.InstallDefault(t, map[string][]string{"api.e2b.app": {"8.8.8.8"}})
 	repo := &fakeConfigRepo{entity: &types.TenantSandboxConfigEntity{
 		ID: "cfg-a", TenantID: 7, SandboxType: "e2b",
 		Config: e2bCfg("stored-secret", "https://api.e2b.app", "e2b.app", "old", 300),

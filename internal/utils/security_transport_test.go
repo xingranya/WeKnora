@@ -35,9 +35,16 @@ func TestSSRFSafeClientValidatesInitialRequestAtFinalSink(t *testing.T) {
 }
 
 func TestSSRFSafeDialContextRejectsRestrictedPortAtFinalSink(t *testing.T) {
-	_, err := SSRFSafeDialContext(context.Background(), "tcp", "example.com:6379")
-	if err == nil || !strings.Contains(err.Error(), "port 6379") {
-		t.Fatalf("expected restricted-port error, got %v", err)
+	for port := range restrictedPorts {
+		port := port
+		t.Run(port, func(t *testing.T) {
+			for _, candidate := range []string{port, "0" + port} {
+				_, err := SSRFSafeDialContext(context.Background(), "tcp", "example.com:"+candidate)
+				if err == nil || !strings.Contains(err.Error(), "port "+port) {
+					t.Fatalf("端口 %q 应在最终拨号层按 %s 拒绝，实际错误：%v", candidate, port, err)
+				}
+			}
+		})
 	}
 }
 

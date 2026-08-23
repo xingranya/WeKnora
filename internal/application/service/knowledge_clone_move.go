@@ -24,6 +24,31 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type knowledgeMoveCoordinator interface {
+	ClaimKnowledgeForMove(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeID string,
+		sourceKnowledgeBaseID string,
+		targetKnowledgeBaseID string,
+		taskID string,
+		mode string,
+	) (*types.Knowledge, bool, bool, error)
+	StageClaimedKnowledgeMove(
+		ctx context.Context,
+		knowledge *types.Knowledge,
+		taskID string,
+	) (bool, error)
+	CompleteClaimedKnowledgeMove(ctx context.Context, knowledge *types.Knowledge, taskID string) (bool, error)
+	FailClaimedKnowledgeMove(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeID string,
+		taskID string,
+		errorMessage string,
+	) (bool, error)
+}
+
 // copyOwnedObject copies srcPath into a NEW object owned by the destination
 // tenant, returning the new provider:// (resource) path.
 //
@@ -474,10 +499,9 @@ func (s *knowledgeService) ProcessKBClone(ctx context.Context, t *asynq.Task) er
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	// Check if this is the last retry
-	retryCount, _ := asynq.GetRetryCount(ctx)
-	maxRetry, _ := asynq.GetMaxRetry(ctx)
-	isLastRetry := retryCount >= maxRetry
+	// 同时兼容 Redis Asynq 与 Lite executor，缺失元数据时不能误判最终轮。
+	retryCount, maxRetry, hasRetryMetadata := taskRetryMetadata(ctx)
+	isLastRetry := hasRetryMetadata && retryCount >= maxRetry
 
 	logger.Infof(ctx, "Processing KB clone task: %s, source: %s, target: %s, retry: %d/%d",
 		payload.TaskID, payload.SourceID, payload.TargetID, retryCount, maxRetry)
@@ -987,13 +1011,246 @@ func (s *knowledgeService) GetKBCloneProgress(ctx context.Context, taskID string
 const (
 	knowledgeMoveProgressKeyPrefix = "knowledge_move_progress:"
 	knowledgeMoveProgressTTL       = 24 * time.Hour
+	knowledgeMoveRecoveryLease     = 10 * time.Minute
+	knowledgeMoveDispatchOp        = "dispatch"
 )
+
+// PersistKnowledgeMoveDispatch 在软删除门禁事务中写入完整 move 调度意图。
+func (s *knowledgeService) PersistKnowledgeMoveDispatch(
+	ctx context.Context,
+	payload types.KnowledgeMovePayload,
+) error {
+	guarded, ok := s.taskPendingRepo.(interfaces.TaskPendingOpsKnowledgeBaseGuard)
+	if !ok {
+		return errors.New("task pending repository does not support guarded move dispatch")
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	accepted, err := guarded.EnqueueIfKnowledgeBaseActive(ctx, &types.TaskPendingOp{
+		TenantID: payload.TenantID,
+		TaskType: types.TypeKnowledgeMove,
+		Scope:    types.TaskScopeKnowledgeBase,
+		ScopeID:  payload.SourceKBID,
+		Op:       knowledgeMoveDispatchOp,
+		DedupKey: payload.TaskID,
+		Payload:  payloadBytes,
+	})
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		return werrors.NewConflictError("源知识库已不可写，无法创建移动任务")
+	}
+	return nil
+}
+
+func (s *knowledgeService) deleteKnowledgeMoveDispatch(
+	ctx context.Context,
+	payload types.KnowledgeMovePayload,
+) error {
+	if s.taskPendingRepo == nil {
+		return nil
+	}
+	return s.taskPendingRepo.DeleteByDedupKey(
+		ctx,
+		types.TypeKnowledgeMove,
+		types.TaskScopeKnowledgeBase,
+		payload.SourceKBID,
+		payload.TaskID,
+		knowledgeMoveDispatchOp,
+	)
+}
+
+type knowledgeMoveRecoveryRepository interface {
+	ClaimKnowledgeMoveRecoveryOps(
+		context.Context, time.Time, int,
+	) ([]*types.TaskPendingOp, error)
+	ReleaseKnowledgeMoveRecoveryOps(context.Context, []int64) error
+}
+
+type knowledgeMoveDispatchLookup interface {
+	KnowledgeMoveDispatchExists(context.Context, uint64, string, string) (bool, error)
+}
+
+// preserveCancelledKnowledgeMove 按持久 dispatch 判断 context cancellation
+// 是否只是可重试的执行中断。仓储能力缺失或查询失败时 fail-safe 保留。
+func (s *knowledgeService) preserveCancelledKnowledgeMove(
+	ctx context.Context,
+	payload types.KnowledgeMovePayload,
+) bool {
+	lookup, ok := s.repo.(knowledgeMoveDispatchLookup)
+	if !ok {
+		return true
+	}
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	exists, err := lookup.KnowledgeMoveDispatchExists(
+		lookupCtx,
+		payload.TenantID,
+		payload.SourceKBID,
+		payload.TaskID,
+	)
+	if err != nil {
+		logger.Warnf(ctx,
+			"ProcessKnowledgeMove: dispatch lookup failed during cancellation; preserving claim: %v",
+			err,
+		)
+		return true
+	}
+	return exists
+}
+
+// RecoverPendingKnowledgeMoves 从持久 outbox 重建丢失的 move 队列任务。
+// force 仅用于进程启动：Redis TaskID 或 Lite 进程内 TaskID 会阻止并发重复投递。
+func (s *knowledgeService) RecoverPendingKnowledgeMoves(
+	ctx context.Context,
+	limit int,
+	force bool,
+) error {
+	recoveryRepo, ok := s.repo.(knowledgeMoveRecoveryRepository)
+	if !ok {
+		return errors.New("knowledge repository does not support move recovery")
+	}
+	if s.task == nil {
+		return errors.New("knowledge move task enqueuer is unavailable")
+	}
+	staleBefore := time.Now().Add(-knowledgeMoveRecoveryLease)
+	if force {
+		staleBefore = time.Now().Add(time.Second)
+	}
+	ops, err := recoveryRepo.ClaimKnowledgeMoveRecoveryOps(ctx, staleBefore, limit)
+	if err != nil || len(ops) == 0 {
+		return err
+	}
+
+	type recoveryGroup struct {
+		payload types.KnowledgeMovePayload
+		opIDs   []int64
+		seen    map[string]struct{}
+	}
+	groups := make(map[string]*recoveryGroup)
+	var recoveryErr error
+	for _, op := range ops {
+		var payload types.KnowledgeMovePayload
+		if op == nil || json.Unmarshal(op.Payload, &payload) != nil ||
+			payload.TaskID == "" || len(payload.KnowledgeIDs) == 0 ||
+			op.TenantID != payload.TenantID || op.ScopeID != payload.SourceKBID ||
+			op.DedupKey != payload.TaskID {
+			if op != nil {
+				_ = recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, []int64{op.ID})
+			}
+			recoveryErr = errors.Join(recoveryErr, errors.New("invalid knowledge move recovery payload"))
+			continue
+		}
+		group := groups[payload.TaskID]
+		if group == nil {
+			group = &recoveryGroup{payload: payload, seen: make(map[string]struct{})}
+			group.payload.KnowledgeIDs = nil
+			groups[payload.TaskID] = group
+		}
+		if group.payload.TenantID != payload.TenantID ||
+			group.payload.SourceKBID != payload.SourceKBID ||
+			group.payload.TargetKBID != payload.TargetKBID ||
+			group.payload.Mode != payload.Mode {
+			_ = recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, []int64{op.ID})
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("inconsistent move recovery payload for task %s", payload.TaskID))
+			continue
+		}
+		for _, knowledgeID := range payload.KnowledgeIDs {
+			if _, exists := group.seen[knowledgeID]; !exists {
+				group.seen[knowledgeID] = struct{}{}
+				group.payload.KnowledgeIDs = append(group.payload.KnowledgeIDs, knowledgeID)
+			}
+		}
+		group.opIDs = append(group.opIDs, op.ID)
+	}
+
+	for taskID, group := range groups {
+		if inspector, ok := s.taskInspector.(interfaces.RuntimeTaskInspector); ok {
+			existing, supported, inspectErr := inspector.GetRuntimeTask(
+				ctx,
+				types.QueueMaintenance,
+				taskID,
+			)
+			if inspectErr != nil {
+				_ = recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, group.opIDs)
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf("inspect move task %s: %w", taskID, inspectErr))
+				continue
+			}
+			if supported && existing != nil {
+				switch existing.State {
+				case types.RuntimeTaskPending, types.RuntimeTaskActive,
+					types.RuntimeTaskScheduled, types.RuntimeTaskRetry:
+					continue
+				case types.RuntimeTaskArchived, types.RuntimeTaskCompleted:
+					deleted, deleteErr := inspector.ForceDeleteRuntimeTask(
+						ctx, types.QueueMaintenance, taskID,
+					)
+					if deleteErr != nil || !deleted {
+						_ = recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, group.opIDs)
+						if deleteErr == nil {
+							deleteErr = errors.New("runtime task deletion is unavailable")
+						}
+						recoveryErr = errors.Join(recoveryErr, fmt.Errorf("remove terminal move task %s: %w", taskID, deleteErr))
+						continue
+					}
+				}
+			}
+		}
+		_ = s.saveKnowledgeMoveProgress(ctx, &types.KnowledgeMoveProgress{
+			TaskID:     taskID,
+			SourceKBID: group.payload.SourceKBID,
+			TargetKBID: group.payload.TargetKBID,
+			Status:     types.KBCloneStatusPending,
+			Total:      len(group.payload.KnowledgeIDs),
+			Message:    "Task recovered, waiting to start...",
+			CreatedAt:  time.Now().Unix(),
+			UpdatedAt:  time.Now().Unix(),
+		})
+		payloadBytes, marshalErr := json.Marshal(group.payload)
+		if marshalErr != nil {
+			_ = recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, group.opIDs)
+			recoveryErr = errors.Join(recoveryErr, marshalErr)
+			continue
+		}
+		task := asynq.NewTask(types.TypeKnowledgeMove, payloadBytes)
+		_, enqueueErr := s.task.Enqueue(
+			task,
+			asynq.TaskID(taskID),
+			asynq.Queue(types.QueueMaintenance),
+			asynq.MaxRetry(3),
+			asynq.Timeout(2*time.Hour),
+		)
+		if enqueueErr == nil || errors.Is(enqueueErr, asynq.ErrTaskIDConflict) ||
+			errors.Is(enqueueErr, asynq.ErrDuplicateTask) {
+			continue
+		}
+		if releaseErr := recoveryRepo.ReleaseKnowledgeMoveRecoveryOps(ctx, group.opIDs); releaseErr != nil {
+			enqueueErr = errors.Join(enqueueErr, releaseErr)
+		}
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover move task %s: %w", taskID, enqueueErr))
+	}
+	return recoveryErr
+}
 
 func getKnowledgeMoveProgressKey(taskID string) string {
 	return knowledgeMoveProgressKeyPrefix + taskID
 }
 
 func (s *knowledgeService) saveKnowledgeMoveProgress(ctx context.Context, progress *types.KnowledgeMoveProgress) error {
+	if progress == nil || progress.TaskID == "" {
+		return errors.New("knowledge move progress requires a task ID")
+	}
+	if progress.UpdatedAt == 0 {
+		progress.UpdatedAt = time.Now().Unix()
+	}
+	if s.redisClient == nil {
+		copy := *progress
+		s.memMoveProgress.Store(progress.TaskID, &copy)
+		return nil
+	}
 	key := getKnowledgeMoveProgressKey(progress.TaskID)
 	data, err := json.Marshal(progress)
 	if err != nil {
@@ -1009,6 +1266,23 @@ func (s *knowledgeService) SaveKnowledgeMoveProgress(ctx context.Context, progre
 
 // GetKnowledgeMoveProgress retrieves the progress of a knowledge move task
 func (s *knowledgeService) GetKnowledgeMoveProgress(ctx context.Context, taskID string) (*types.KnowledgeMoveProgress, error) {
+	if s.redisClient == nil {
+		value, ok := s.memMoveProgress.Load(taskID)
+		if !ok {
+			return nil, werrors.NewNotFoundError("Knowledge move task not found")
+		}
+		progress, ok := value.(*types.KnowledgeMoveProgress)
+		if !ok || progress == nil {
+			s.memMoveProgress.Delete(taskID)
+			return nil, werrors.NewNotFoundError("Knowledge move task not found")
+		}
+		if progress.UpdatedAt > 0 && time.Since(time.Unix(progress.UpdatedAt, 0)) > knowledgeMoveProgressTTL {
+			s.memMoveProgress.Delete(taskID)
+			return nil, werrors.NewNotFoundError("Knowledge move task not found")
+		}
+		copy := *progress
+		return &copy, nil
+	}
 	key := getKnowledgeMoveProgressKey(taskID)
 	data, err := s.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
@@ -1026,7 +1300,7 @@ func (s *knowledgeService) GetKnowledgeMoveProgress(ctx context.Context, taskID 
 }
 
 // ProcessKnowledgeMove handles Asynq knowledge move tasks
-func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Task) error {
+func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Task) (retErr error) {
 	var payload types.KnowledgeMovePayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		return fmt.Errorf("failed to unmarshal knowledge move payload: %w", err)
@@ -1036,6 +1310,54 @@ func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Ta
 
 	// Add tenant ID to context
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	// 同时兼容 Redis Asynq 与 Lite executor；元数据缺失时不能误判最后一次。
+	retryCount, maxRetry, hasRetryMetadata := taskRetryMetadata(ctx)
+	isLastRetry := hasRetryMetadata && retryCount >= maxRetry
+	isCancellation := func(cause error) bool {
+		return cause != nil && (errors.Is(cause, context.Canceled) || ctx.Err() != nil)
+	}
+	shouldPreserveCancellation := func(cause error) bool {
+		if !isCancellation(cause) {
+			return false
+		}
+		return s.preserveCancelledKnowledgeMove(ctx, payload)
+	}
+	defer func() {
+		if shouldPreserveCancellation(retErr) {
+			return
+		}
+		terminal := retErr == nil || isLastRetry || errors.Is(retErr, asynq.SkipRetry) ||
+			errors.Is(retErr, context.Canceled) || ctx.Err() != nil
+		if !terminal {
+			return
+		}
+		if retErr != nil {
+			if coordinator, ok := s.repo.(knowledgeMoveCoordinator); ok {
+				failCtx := ctx
+				if ctx.Err() != nil {
+					failCtx = context.WithoutCancel(ctx)
+				}
+				for _, knowledgeID := range payload.KnowledgeIDs {
+					if _, failErr := coordinator.FailClaimedKnowledgeMove(
+						failCtx,
+						payload.TenantID,
+						knowledgeID,
+						payload.TaskID,
+						retErr.Error(),
+					); failErr != nil {
+						retErr = errors.Join(retErr, fmt.Errorf("release terminal move claim %s: %w", knowledgeID, failErr))
+					}
+				}
+			}
+		}
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			cleanupCtx = context.WithoutCancel(ctx)
+		}
+		if cleanupErr := s.deleteKnowledgeMoveDispatch(cleanupCtx, payload); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("delete knowledge move dispatch: %w", cleanupErr))
+		}
+	}()
 
 	// Get tenant info and add to context
 	tenantInfo, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
@@ -1045,17 +1367,13 @@ func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Ta
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	// Check if this is the last retry
-	retryCount, _ := asynq.GetRetryCount(ctx)
-	maxRetry, _ := asynq.GetMaxRetry(ctx)
-	isLastRetry := retryCount >= maxRetry
-
 	logger.Infof(ctx, "ProcessKnowledgeMove: task=%s, source=%s, target=%s, mode=%s, count=%d, retry=%d/%d",
 		payload.TaskID, payload.SourceKBID, payload.TargetKBID, payload.Mode, len(payload.KnowledgeIDs), retryCount, maxRetry)
 
 	// Helper function to handle errors - only mark as failed on last retry
 	handleError := func(progress *types.KnowledgeMoveProgress, err error, message string) {
-		if isLastRetry {
+		preserveCancellation := shouldPreserveCancellation(err)
+		if (isLastRetry || (isCancellation(err) && !preserveCancellation)) && !preserveCancellation {
 			progress.Status = types.KBCloneStatusFailed
 			progress.Error = err.Error()
 			progress.Message = message
@@ -1090,37 +1408,113 @@ func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Ta
 		UpdatedAt:  time.Now().Unix(),
 	}
 	_ = s.saveKnowledgeMoveProgress(ctx, progress)
+	moveCoordinator, ok := s.repo.(knowledgeMoveCoordinator)
+	if !ok {
+		return errors.New("knowledge repository does not support move coordination")
+	}
+	releaseMoveClaims := func(cause error) {
+		if errors.Is(cause, context.Canceled) || ctx.Err() != nil || !isLastRetry {
+			return
+		}
+		failCtx := ctx
+		if ctx.Err() != nil {
+			failCtx = context.WithoutCancel(ctx)
+		}
+		for _, knowledgeID := range payload.KnowledgeIDs {
+			if _, failErr := moveCoordinator.FailClaimedKnowledgeMove(
+				failCtx,
+				payload.TenantID,
+				knowledgeID,
+				payload.TaskID,
+				cause.Error(),
+			); failErr != nil {
+				logger.Warnf(ctx, "ProcessKnowledgeMove: failed to release claim for %s: %v", knowledgeID, failErr)
+			}
+		}
+	}
 
 	// Get source and target knowledge bases
 	sourceKB, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.SourceKBID)
 	if err != nil {
+		releaseMoveClaims(err)
 		handleError(progress, err, "Failed to get source knowledge base")
 		return err
 	}
 	targetKB, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.TargetKBID)
 	if err != nil {
+		releaseMoveClaims(err)
 		handleError(progress, err, "Failed to get target knowledge base")
 		return err
+	}
+	if sourceKB == nil || targetKB == nil ||
+		sourceKB.TenantID != payload.TenantID || targetKB.TenantID != payload.TenantID {
+		err := fmt.Errorf(
+			"knowledge move tenant mismatch: payload=%d source=%d target=%d",
+			payload.TenantID,
+			func() uint64 {
+				if sourceKB == nil {
+					return 0
+				}
+				return sourceKB.TenantID
+			}(),
+			func() uint64 {
+				if targetKB == nil {
+					return 0
+				}
+				return targetKB.TenantID
+			}(),
+		)
+		handleError(progress, err, "Knowledge base tenant mismatch")
+		return errors.Join(asynq.SkipRetry, err)
 	}
 
 	// Validate compatibility
 	if sourceKB.Type != targetKB.Type {
 		err := fmt.Errorf("type mismatch: source=%s, target=%s", sourceKB.Type, targetKB.Type)
+		releaseMoveClaims(err)
 		handleError(progress, err, "Source and target knowledge bases must be the same type")
 		return err
 	}
 	if sourceKB.EmbeddingModelID != targetKB.EmbeddingModelID {
 		err := fmt.Errorf("embedding model mismatch: source=%s, target=%s", sourceKB.EmbeddingModelID, targetKB.EmbeddingModelID)
+		releaseMoveClaims(err)
 		handleError(progress, err, "Source and target must use the same embedding model")
 		return err
 	}
 
 	// Process each knowledge item
+	var moveErrors error
 	for i, knowledgeID := range payload.KnowledgeIDs {
-		err := s.moveOneKnowledge(ctx, knowledgeID, sourceKB, targetKB, payload.Mode)
+		err := s.moveOneKnowledge(
+			ctx,
+			knowledgeID,
+			sourceKB,
+			targetKB,
+			payload.Mode,
+			payload.TaskID,
+		)
 		if err != nil {
 			logger.Errorf(ctx, "ProcessKnowledgeMove: failed to move knowledge %s: %v", knowledgeID, err)
 			progress.Failed++
+			moveErrors = errors.Join(moveErrors, fmt.Errorf("move knowledge %s: %w", knowledgeID, err))
+			if isLastRetry && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				failCtx := ctx
+				if ctx.Err() != nil {
+					failCtx = context.WithoutCancel(ctx)
+				}
+				if _, failErr := moveCoordinator.FailClaimedKnowledgeMove(
+					failCtx,
+					payload.TenantID,
+					knowledgeID,
+					payload.TaskID,
+					err.Error(),
+				); failErr != nil {
+					moveErrors = errors.Join(
+						moveErrors,
+						fmt.Errorf("release failed move claim for %s: %w", knowledgeID, failErr),
+					)
+				}
+			}
 		}
 		progress.Processed = i + 1
 		if progress.Total > 0 {
@@ -1130,31 +1524,33 @@ func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Ta
 		progress.UpdatedAt = time.Now().Unix()
 		_ = s.saveKnowledgeMoveProgress(ctx, progress)
 	}
+	if moveErrors != nil {
+		progress.Error = moveErrors.Error()
+		preserveCancellation := shouldPreserveCancellation(moveErrors)
+		if (isLastRetry || (isCancellation(moveErrors) && !preserveCancellation)) && !preserveCancellation {
+			progress.Status = types.KBCloneStatusFailed
+			progress.Message = fmt.Sprintf("Knowledge move failed: %d/%d items failed", progress.Failed, progress.Total)
+			handleError(progress, moveErrors, progress.Message)
+		} else {
+			progress.Status = types.KBCloneStatusProcessing
+			progress.Message = fmt.Sprintf("Knowledge move will retry: %d/%d items failed", progress.Failed, progress.Total)
+			progress.UpdatedAt = time.Now().Unix()
+			_ = s.saveKnowledgeMoveProgress(ctx, progress)
+		}
+		return fmt.Errorf("knowledge move task incomplete: %w", moveErrors)
+	}
 
 	// Mark as completed
-	if progress.Failed > 0 && progress.Failed == progress.Total {
-		progress.Status = types.KBCloneStatusFailed
-		progress.Message = fmt.Sprintf("Knowledge move failed: all %d items failed", progress.Total)
-	} else {
-		progress.Status = types.KBCloneStatusCompleted
-		progress.Message = fmt.Sprintf("Knowledge move completed: %d/%d succeeded", progress.Processed-progress.Failed, progress.Total)
-	}
+	progress.Status = types.KBCloneStatusCompleted
+	progress.Message = fmt.Sprintf("Knowledge move completed: %d/%d succeeded", progress.Processed, progress.Total)
 	progress.Progress = 100
 	progress.UpdatedAt = time.Now().Unix()
 	_ = s.saveKnowledgeMoveProgress(ctx, progress)
 
 	logger.Infof(ctx, "ProcessKnowledgeMove: task=%s completed, processed=%d, failed=%d", payload.TaskID, progress.Processed, progress.Failed)
-	outcome := types.AuditOutcomeSuccess
-	action := types.AuditActionKnowledgeMoveCompleted
-	if progress.Failed == progress.Total && progress.Total > 0 {
-		outcome = types.AuditOutcomeFailed
-		action = types.AuditActionKnowledgeMoveFailed
-	} else if progress.Failed > 0 {
-		outcome = types.AuditOutcomePartial
-	}
 	for _, kbID := range []string{payload.SourceKBID, payload.TargetKBID} {
-		recordKBActivity(ctx, s.audit, payload.TenantID, kbID, action,
-			"knowledge_move", payload.TaskID, outcome,
+		recordKBActivity(ctx, s.audit, payload.TenantID, kbID, types.AuditActionKnowledgeMoveCompleted,
+			"knowledge_move", payload.TaskID, types.AuditOutcomeSuccess,
 			map[string]any{"source_kb_id": payload.SourceKBID, "target_kb_id": payload.TargetKBID,
 				"task_id": payload.TaskID, "count": progress.Total, "failed": progress.Failed, "mode": payload.Mode})
 	}
@@ -1167,65 +1563,70 @@ func (s *knowledgeService) moveOneKnowledge(
 	knowledgeID string,
 	sourceKB, targetKB *types.KnowledgeBase,
 	mode string,
+	taskID string,
 ) error {
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-	// Get the knowledge item
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
-	if err != nil {
-		return fmt.Errorf("failed to get knowledge %s: %w", knowledgeID, err)
+	if sourceKB == nil || targetKB == nil || sourceKB.ID == "" || targetKB.ID == "" {
+		return errors.New("source and target knowledge bases are required")
+	}
+	if mode != "reuse_vectors" && mode != "reparse" {
+		return fmt.Errorf("unknown move mode: %s", mode)
 	}
 
-	// Only move completed items
-	if knowledge.ParseStatus != types.ParseStatusCompleted {
-		return fmt.Errorf("knowledge %s is not in completed status (current: %s)", knowledgeID, knowledge.ParseStatus)
-	}
-
-	// Reject a cross-store reuse_vectors move BEFORE mutating status, so a
-	// rejected move leaves the knowledge untouched (Completed) rather than
-	// stranded in Processing. reuse_vectors copies indices through the source
-	// store only; a cross-store copy would corrupt vector data. The handler
-	// rejects this synchronously — this is defense-in-depth for directly
-	// enqueued tasks. Cross-store moves must use reparse mode.
+	// 跨存储复用向量必须在声明及任何副作用前拒绝。
 	if mode == "reuse_vectors" && !sourceKB.SharesStoreWith(targetKB) {
 		return fmt.Errorf(
 			"reuse_vectors move across different vector stores is not supported "+
 				"(source KB %s, target KB %s); use reparse mode", sourceKB.ID, targetKB.ID)
 	}
 
-	// Mark as processing during move
-	knowledge.ParseStatus = types.ParseStatusProcessing
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-		return fmt.Errorf("failed to mark knowledge as processing: %w", err)
+	coordinator, ok := s.repo.(knowledgeMoveCoordinator)
+	if !ok {
+		return errors.New("knowledge repository does not support move coordination")
+	}
+	knowledge, alreadyCompleted, claimed, err := coordinator.ClaimKnowledgeForMove(
+		ctx,
+		tenantID,
+		knowledgeID,
+		sourceKB.ID,
+		targetKB.ID,
+		taskID,
+		mode,
+	)
+	if err != nil {
+		return fmt.Errorf("claim knowledge move: %w", err)
+	}
+	if !claimed || knowledge == nil {
+		return errors.New("knowledge move was not claimed because another move or deletion owns it")
+	}
+	if alreadyCompleted {
+		return nil
+	}
+	if knowledge.KnowledgeBaseID == targetKB.ID {
+		switch mode {
+		case "reuse_vectors":
+			return s.moveKnowledgeReuseVectors(ctx, knowledge, sourceKB, targetKB, taskID)
+		case "reparse":
+			return s.moveKnowledgeReparse(ctx, knowledge, sourceKB, targetKB, taskID)
+		}
+		return errors.New("knowledge move has an unsupported staged target mode")
+	}
+	if knowledge.KnowledgeBaseID != sourceKB.ID || knowledge.ParseStatus != types.ParseStatusMoving {
+		return errors.New("knowledge move claim returned an invalid source state")
 	}
 
-	// From the source KB's point of view the document is leaving for good, so it
-	// needs the same wiki reconciliation a delete performs: wiki_pages carry
-	// source_refs back to this knowledge and are what the folder tree and the
-	// wiki graph are built from, and nothing below touches them. This must run
-	// while KnowledgeBaseID still points at the source and before any chunk is
-	// removed, since the cleanup matches pages by chunk_refs.
+	// 源 Wiki 收敛必须在持久声明成功后、知识归属仍指向源库时执行。
 	if sourceKB.IsWikiEnabled() {
 		s.cleanupWikiOnKnowledgeDelete(ctx, knowledge)
 	}
 
 	switch mode {
 	case "reuse_vectors":
-		if err := s.moveKnowledgeReuseVectors(ctx, knowledge, sourceKB, targetKB); err != nil {
-			return err
-		}
-		// reparse re-ingests through KnowledgePostProcess once the new chunks
-		// land; reuse_vectors keeps the existing chunks and never re-enters that
-		// pipeline, so the target KB has to be told about the document here.
-		if targetKB.IsWikiEnabled() {
-			EnqueueWikiIngest(ctx, s.task, s.taskPendingRepo, tenantID, targetKB.ID, knowledge.ID)
-		}
-		return nil
+		return s.moveKnowledgeReuseVectors(ctx, knowledge, sourceKB, targetKB, taskID)
 	case "reparse":
-		return s.moveKnowledgeReparse(ctx, knowledge, sourceKB, targetKB)
-	default:
-		return fmt.Errorf("unknown move mode: %s", mode)
+		return s.moveKnowledgeReparse(ctx, knowledge, sourceKB, targetKB, taskID)
 	}
+	return nil
 }
 
 // moveKnowledgeReuseVectors moves knowledge by copying vector indices and updating DB references.
@@ -1233,85 +1634,110 @@ func (s *knowledgeService) moveKnowledgeReuseVectors(
 	ctx context.Context,
 	knowledge *types.Knowledge,
 	sourceKB, targetKB *types.KnowledgeBase,
+	taskID string,
 ) error {
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-	// reuse_vectors copies index entries directly between KBs, which only works
-	// inside the same VectorStore backend (CopyIndices is routed through the
-	// source store). A cross-store reuse_vectors move would write target-KB rows
-	// into the source store and then delete the source indices, corrupting data.
-	// The MoveKnowledge handler rejects this up front; this is defense-in-depth
-	// for any path that enqueues a move task directly. Cross-store moves must use
-	// reparse mode (moveKnowledgeReparse), which re-indexes into the target store.
 	if !sourceKB.SharesStoreWith(targetKB) {
 		return fmt.Errorf(
 			"reuse_vectors move across different vector stores is not supported "+
 				"(source KB %s, target KB %s); use reparse mode", sourceKB.ID, targetKB.ID)
 	}
 
-	// 1. Get old chunk IDs for vector index copy mapping
-	oldChunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, tenantID, knowledge.ID)
-	if err != nil {
-		return fmt.Errorf("failed to list chunks: %w", err)
+	moveCoordinator, ok := s.repo.(knowledgeMoveCoordinator)
+	if !ok {
+		return errors.New("knowledge repository does not support move coordination")
 	}
-
-	// Build identity mapping (same chunk IDs, just moving between KBs)
-	chunkIDMapping := make(map[string]string, len(oldChunks))
-	for _, c := range oldChunks {
-		chunkIDMapping[c.ID] = c.ID
-	}
-
-	// 2. Copy vector indices from source KB to target KB
-	if len(chunkIDMapping) > 0 && knowledge.EmbeddingModelID != "" {
-		// Same VectorStore backend is guaranteed by the SharesStoreWith guard at
-		// the top of this function, so routing CopyIndices through the source
-		// KB's binding also resolves the target's store.
-		var sourceStoreID *string
-		if sourceKB != nil {
-			sourceStoreID = sourceKB.VectorStoreID
-		}
-		retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
-			ctx, s.retrieveEngine, s.ownership, tenantID, sourceStoreID)
+	if knowledge.KnowledgeBaseID == sourceKB.ID {
+		oldChunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, tenantID, knowledge.ID)
 		if err != nil {
-			return fmt.Errorf("failed to init retrieve engine: %w", err)
+			return fmt.Errorf("failed to list chunks: %w", err)
 		}
-		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
+		chunkIDMapping := make(map[string]string, len(oldChunks))
+		for _, chunk := range oldChunks {
+			chunkIDMapping[chunk.ID] = chunk.ID
+		}
+
+		if len(chunkIDMapping) > 0 && knowledge.EmbeddingModelID != "" {
+			retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+				ctx,
+				s.retrieveEngine,
+				s.ownership,
+				tenantID,
+				sourceKB.VectorStoreID,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to init retrieve engine: %w", err)
+			}
+			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
+			if err != nil {
+				return fmt.Errorf("failed to get embedding model: %w", err)
+			}
+			knowledgeIDMapping := map[string]string{knowledge.ID: knowledge.ID}
+			if err := retrieveEngine.CopyIndices(
+				ctx,
+				sourceKB.ID,
+				targetKB.ID,
+				knowledgeIDMapping,
+				chunkIDMapping,
+				embeddingModel.GetDimensions(),
+				sourceKB.Type,
+			); err != nil {
+				return fmt.Errorf("failed to copy indices: %w", err)
+			}
+			if err := retrieveEngine.DeleteByKnowledgeIDList(
+				ctx,
+				[]string{knowledge.ID},
+				embeddingModel.GetDimensions(),
+				sourceKB.Type,
+			); err != nil {
+				return fmt.Errorf("failed to delete source indices: %w", err)
+			}
+		}
+
+		if err := s.chunkRepo.MoveChunksByKnowledgeID(ctx, tenantID, knowledge.ID, targetKB.ID); err != nil {
+			return fmt.Errorf("failed to move chunks: %w", err)
+		}
+		if err := s.repo.DeleteKnowledgeTagRelations(ctx, knowledge.ID); err != nil {
+			return fmt.Errorf("failed to clear knowledge tag relations: %w", err)
+		}
+		knowledge.KnowledgeBaseID = targetKB.ID
+		knowledge.ParseStatus = types.ParseStatusMoving
+		knowledge.UpdatedAt = time.Now()
+		staged, err := moveCoordinator.StageClaimedKnowledgeMove(ctx, knowledge, taskID)
 		if err != nil {
-			return fmt.Errorf("failed to get embedding model: %w", err)
+			return fmt.Errorf("stage reused-vector knowledge move: %w", err)
 		}
-
-		// Copy indices from source KB to target KB
-		knowledgeIDMapping := map[string]string{knowledge.ID: knowledge.ID}
-		if err := retrieveEngine.CopyIndices(ctx, sourceKB.ID, targetKB.ID,
-			knowledgeIDMapping, chunkIDMapping,
-			embeddingModel.GetDimensions(), sourceKB.Type,
-		); err != nil {
-			return fmt.Errorf("failed to copy indices: %w", err)
+		if !staged {
+			return errors.New("knowledge move claim was lost before reuse-vector staging")
 		}
-
-		// Delete indices from source KB
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID},
-			embeddingModel.GetDimensions(), sourceKB.Type,
-		); err != nil {
-			logger.Warnf(ctx, "moveKnowledgeReuseVectors: failed to delete old indices for knowledge %s: %v", knowledge.ID, err)
-			// Non-fatal: indices will be orphaned but won't affect correctness
-		}
+	} else if knowledge.KnowledgeBaseID != targetKB.ID || knowledge.ParseStatus != types.ParseStatusMoving {
+		return errors.New("reuse-vector move has an invalid staged state")
 	}
 
-	// 3. Update chunks' knowledge_base_id in DB
-	if err := s.chunkRepo.MoveChunksByKnowledgeID(ctx, tenantID, knowledge.ID, targetKB.ID); err != nil {
-		return fmt.Errorf("failed to move chunks: %w", err)
+	if targetKB.IsWikiEnabled() {
+		accepted, err := EnqueueWikiIngest(
+			ctx,
+			s.task,
+			s.taskPendingRepo,
+			tenantID,
+			targetKB.ID,
+			knowledge.ID,
+		)
+		if err != nil {
+			return fmt.Errorf("enqueue target wiki ingest: %w", err)
+		}
+		if !accepted {
+			return errors.New("target knowledge base rejected wiki ingest during move")
+		}
 	}
-
-	// 4. Update knowledge record (tags are KB-scoped; clear relations before moving)
-	if err := s.repo.DeleteKnowledgeTagRelations(ctx, knowledge.ID); err != nil {
-		return fmt.Errorf("failed to clear knowledge tag relations: %w", err)
-	}
-	knowledge.KnowledgeBaseID = targetKB.ID
 	knowledge.ParseStatus = types.ParseStatusCompleted
 	knowledge.UpdatedAt = time.Now()
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
+	updated, err := moveCoordinator.CompleteClaimedKnowledgeMove(ctx, knowledge, taskID)
+	if err != nil {
 		return fmt.Errorf("failed to update knowledge: %w", err)
+	}
+	if !updated {
+		return errors.New("knowledge move claim was lost before completion")
 	}
 
 	return nil
@@ -1321,81 +1747,132 @@ func (s *knowledgeService) moveKnowledgeReuseVectors(
 func (s *knowledgeService) moveKnowledgeReparse(
 	ctx context.Context,
 	knowledge *types.Knowledge,
-	_, targetKB *types.KnowledgeBase,
+	sourceKB, targetKB *types.KnowledgeBase,
+	taskID string,
 ) error {
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-	// 1. Clean up existing chunks and vector indices
-	if err := s.cleanupKnowledgeResources(ctx, knowledge); err != nil {
-		logger.Warnf(ctx, "moveKnowledgeReparse: cleanup partial error for knowledge %s: %v", knowledge.ID, err)
-		// Continue - partial cleanup is acceptable
+	moveCoordinator, ok := s.repo.(knowledgeMoveCoordinator)
+	if !ok {
+		return errors.New("knowledge repository does not support move coordination")
 	}
 
-	// 2. Update knowledge to belong to target KB (tags are KB-scoped; clear relations)
-	if err := s.repo.DeleteKnowledgeTagRelations(ctx, knowledge.ID); err != nil {
-		return fmt.Errorf("failed to clear knowledge tag relations: %w", err)
+	if knowledge.KnowledgeBaseID == sourceKB.ID {
+		if err := s.cleanupKnowledgeResources(ctx, knowledge, taskID); err != nil {
+			return fmt.Errorf("cleanup source knowledge resources: %w", err)
+		}
+		if err := s.repo.DeleteKnowledgeTagRelations(ctx, knowledge.ID); err != nil {
+			return fmt.Errorf("failed to clear knowledge tag relations: %w", err)
+		}
+		knowledge.KnowledgeBaseID = targetKB.ID
+		knowledge.EmbeddingModelID = targetKB.EmbeddingModelID
+		knowledge.ParseStatus = types.ParseStatusMoving
+		knowledge.EnableStatus = "disabled"
+		knowledge.Description = ""
+		knowledge.ProcessedAt = nil
+		knowledge.UpdatedAt = time.Now()
+		staged, err := moveCoordinator.StageClaimedKnowledgeMove(ctx, knowledge, taskID)
+		if err != nil {
+			return fmt.Errorf("stage knowledge move for reparse: %w", err)
+		}
+		if !staged {
+			return errors.New("knowledge move claim was lost before reparse staging")
+		}
 	}
-	knowledge.KnowledgeBaseID = targetKB.ID
-	knowledge.EmbeddingModelID = targetKB.EmbeddingModelID
-	knowledge.ParseStatus = types.ParseStatusPending
-	knowledge.EnableStatus = "disabled"
-	knowledge.Description = ""
-	knowledge.ProcessedAt = nil
-	knowledge.UpdatedAt = time.Now()
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-		return fmt.Errorf("failed to update knowledge: %w", err)
+	if knowledge.KnowledgeBaseID != targetKB.ID || knowledge.ParseStatus != types.ParseStatusMoving {
+		return errors.New("knowledge reparse move has an invalid staged state")
 	}
 
-	// 3. Enqueue document processing task with target KB's configuration
 	if knowledge.IsManual() {
 		meta, err := knowledge.ManualMetadata()
 		if err != nil || meta == nil {
 			return fmt.Errorf("failed to get manual metadata for reparse: %w", err)
 		}
-		s.triggerManualProcessing(ctx, targetKB, knowledge, meta.Content, false)
+		manualTaskID := fmt.Sprintf("knowledge-move-manual-%s-%s", taskID, knowledge.ID)
+		if _, err := s.enqueueManualProcessing(
+			ctx,
+			knowledge,
+			meta.Content,
+			false,
+			manualProcessingEnqueueConfig{
+				TaskID:  manualTaskID,
+				Options: []asynq.Option{asynq.ProcessIn(time.Second)},
+			},
+		); err != nil {
+			return fmt.Errorf("enqueue moved manual knowledge processing: %w", err)
+		}
+		knowledge.ParseStatus = types.ParseStatusPending
+		completed, err := moveCoordinator.CompleteClaimedKnowledgeMove(ctx, knowledge, taskID)
+		if err != nil {
+			return fmt.Errorf("complete manual knowledge move: %w", err)
+		}
+		if !completed {
+			return errors.New("manual knowledge move claim was lost before completion")
+		}
 		return nil
 	}
 
-	if knowledge.FilePath != "" {
-		enableMultimodel := targetKB.IsMultimodalEnabled()
-		enableQuestionGeneration := false
-		questionCount := 3
-		if targetKB.QuestionGenerationConfig != nil && targetKB.QuestionGenerationConfig.Enabled {
-			enableQuestionGeneration = true
-			if targetKB.QuestionGenerationConfig.QuestionCount > 0 {
-				questionCount = targetKB.QuestionGenerationConfig.QuestionCount
-			}
+	if knowledge.FilePath == "" {
+		return errors.New("moved knowledge has no source file for reparse")
+	}
+	enableMultimodel := targetKB.IsMultimodalEnabled()
+	enableQuestionGeneration := false
+	questionCount := 3
+	if targetKB.QuestionGenerationConfig != nil && targetKB.QuestionGenerationConfig.Enabled {
+		enableQuestionGeneration = true
+		if targetKB.QuestionGenerationConfig.QuestionCount > 0 {
+			questionCount = targetKB.QuestionGenerationConfig.QuestionCount
 		}
+	}
 
-		lang := types.LanguageFromContextOrDefault(ctx)
-		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
-			KnowledgeID:              knowledge.ID,
-			KnowledgeBaseID:          targetKB.ID,
-			FilePath:                 knowledge.FilePath,
-			FileName:                 knowledge.FileName,
-			FileType:                 getFileType(knowledge.FileName),
-			EnableMultimodel:         enableMultimodel,
-			EnableQuestionGeneration: enableQuestionGeneration,
-			QuestionCount:            questionCount,
-			Language:                 lang,
-		}
+	lang := types.LanguageFromContextOrDefault(ctx)
+	taskPayload := types.DocumentProcessPayload{
+		TenantID:                 tenantID,
+		KnowledgeID:              knowledge.ID,
+		KnowledgeBaseID:          targetKB.ID,
+		FilePath:                 knowledge.FilePath,
+		FileName:                 knowledge.FileName,
+		FileType:                 getFileType(knowledge.FileName),
+		EnableMultimodel:         enableMultimodel,
+		EnableQuestionGeneration: enableQuestionGeneration,
+		QuestionCount:            questionCount,
+		Language:                 lang,
+	}
 
-		langfuse.InjectTracing(ctx, &taskPayload)
-		payloadBytes, err := json.Marshal(taskPayload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal document process payload: %w", err)
-		}
+	langfuse.InjectTracing(ctx, &taskPayload)
+	payloadBytes, err := json.Marshal(taskPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal document process payload: %w", err)
+	}
 
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes,
-			documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...)
-		info, err := s.task.Enqueue(task)
-		if err != nil {
-			return fmt.Errorf("failed to enqueue document process task: %w", err)
-		}
+	if s.task == nil {
+		return errors.New("document process task enqueuer is unavailable")
+	}
+	reparseTaskID := fmt.Sprintf("knowledge-move-reparse-%s-%s", taskID, knowledge.ID)
+	enqueueOptions := documentProcessTaskOptions(
+		s.config,
+		asynq.TaskID(reparseTaskID),
+		asynq.ProcessIn(time.Second),
+	)
+	task := asynq.NewTask(
+		types.TypeDocumentProcess,
+		payloadBytes,
+	)
+	info, err := s.task.Enqueue(task, enqueueOptions...)
+	if err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) && !errors.Is(err, asynq.ErrDuplicateTask) {
+		return fmt.Errorf("failed to enqueue document process task: %w", err)
+	}
+	if err == nil {
 		logger.Infof(ctx, "moveKnowledgeReparse: enqueued reparse task id=%s for knowledge=%s", info.ID, knowledge.ID)
 	}
 
+	knowledge.ParseStatus = types.ParseStatusPending
+	completed, err := moveCoordinator.CompleteClaimedKnowledgeMove(ctx, knowledge, taskID)
+	if err != nil {
+		return fmt.Errorf("complete knowledge move after reparse enqueue: %w", err)
+	}
+	if !completed {
+		return errors.New("knowledge move claim was lost after reparse enqueue")
+	}
 	return nil
 }
 

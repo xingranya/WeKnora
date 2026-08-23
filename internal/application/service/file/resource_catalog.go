@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
@@ -234,6 +235,9 @@ func (s *resourceCatalogFileService) GetFileURL(ctx context.Context, filePath st
 func (s *resourceCatalogFileService) DeleteFile(ctx context.Context, filePath string) error {
 	physical, isResource, err := s.resolve(ctx, filePath)
 	if err != nil {
+		if _, ok := types.ParseResourcePath(filePath); ok && errors.Is(err, interfaces.ErrResourceNotFound) {
+			return nil
+		}
 		return err
 	}
 	if err := s.inner.DeleteFile(ctx, physical); err != nil && !errors.Is(err, os.ErrNotExist) {

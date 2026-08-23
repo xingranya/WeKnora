@@ -139,6 +139,11 @@ func (s *KnowledgeAutoTagService) Handle(ctx context.Context, task *asynq.Task) 
 	if knowledge == nil || knowledge.TenantID != payload.TenantID || knowledge.KnowledgeBaseID != payload.KnowledgeBaseID {
 		return skip("knowledge_not_in_scope", nil)
 	}
+	if knowledge.ParseStatus == types.ParseStatusMoving {
+		err := fmt.Errorf("%w: knowledge %s", types.ErrKnowledgeMoveInProgress, payload.KnowledgeID)
+		s.tracker().FailSpan(ctx, span, "AUTO_TAG_KNOWLEDGE_MOVING", err.Error(), err)
+		return err
+	}
 	if knowledge.ParseStatus == types.ParseStatusCancelled ||
 		knowledge.ParseStatus == types.ParseStatusDeleting ||
 		knowledge.ParseStatus == types.ParseStatusFailed {

@@ -7,10 +7,19 @@ import (
 	"io"
 	"net/http"
 	"testing"
+
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 )
 
+func registerAzureOpenAITestDNS(t *testing.T) {
+	t.Helper()
+	fakedns.InstallDefault(t, map[string][]string{
+		"example-resource.openai.azure.com": {"8.8.8.8"},
+	})
+}
+
 func TestAzureOpenAIEmbedderBatchEmbedSendsConfiguredDimensions(t *testing.T) {
-	t.Parallel()
+	registerAzureOpenAITestDNS(t)
 
 	var requestBody map[string]any
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -65,7 +74,7 @@ func TestAzureOpenAIEmbedderBatchEmbedSendsConfiguredDimensions(t *testing.T) {
 }
 
 func TestAzureOpenAIEmbedderBatchEmbedOmitsDimensionsByDefault(t *testing.T) {
-	t.Parallel()
+	registerAzureOpenAITestDNS(t)
 
 	var requestBody map[string]any
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -105,7 +114,7 @@ func TestAzureOpenAIEmbedderBatchEmbedOmitsDimensionsByDefault(t *testing.T) {
 }
 
 func TestAzureOpenAIEmbedderBatchEmbedSendsDimensionsWhenOverrideEnabledRegardlessOfAPIVersion(t *testing.T) {
-	t.Parallel()
+	registerAzureOpenAITestDNS(t)
 
 	var requestBody map[string]any
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {

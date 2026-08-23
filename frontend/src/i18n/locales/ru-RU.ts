@@ -3165,6 +3165,7 @@ export default {
       confirm: 'Delete workspace',
       nameMismatch: 'Workspace name does not match',
       success: 'Workspace deleted',
+      blockedByResources: 'This workspace still has knowledge bases or cleanup in progress. Delete every knowledge base and wait for cleanup to finish before deleting the workspace.',
       failed: 'Failed to delete workspace'
     },
     leaveDangerZone: {
@@ -6011,6 +6012,7 @@ export default {
     batchReparseSkippedInFlight: 'Пропущено документов, которые ещё обрабатываются: {count}',
     statusCompleted: 'Завершено',
     statusProcessing: 'Обработка',
+    statusMoving: 'Перемещение',
     statusFinalizing: 'Оптимизация',
     statusFailed: 'Ошибка',
     statusCancelled: 'Отменено',

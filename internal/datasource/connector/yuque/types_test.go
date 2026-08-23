@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -83,6 +84,11 @@ func TestV2Doc_Status_RejectsUnexpectedShapes(t *testing.T) {
 }
 
 func TestParseYuqueConfig(t *testing.T) {
+	fakedns.InstallDefault(t, map[string][]string{
+		"company.yuque.com": {"8.8.8.8"},
+		"www.yuque.com":     {"8.8.8.8"},
+	})
+
 	t.Run("valid full", func(t *testing.T) {
 		cfg, err := parseYuqueConfig(&types.DataSourceConfig{
 			Credentials: map[string]interface{}{

@@ -118,12 +118,83 @@ func (r *tenantRepository) UpdateTenant(ctx context.Context, tenant *types.Tenan
 	return r.db.WithContext(ctx).Model(&types.Tenant{}).Where("id = ?", tenant.ID).Updates(tenant).Error
 }
 
+// lockActiveTenant 在事务内锁定仍有效的空间行。
+// 知识库创建与空间删除必须先获取同一把行锁，避免删除检查与新建知识库之间产生竞态。
+func lockActiveTenant(tx *gorm.DB, id uint64) error {
+	var tenant types.Tenant
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Select("id").
+		Where("id = ?", id).
+		First(&tenant).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrTenantNotFound
+	}
+	return err
+}
+
+func tenantHasBlockingKnowledgeBaseResources(tx *gorm.DB, tenantID uint64) (bool, error) {
+	var blocked bool
+	// 活动知识库始终阻止删除；软删除知识库仅在异步清理仍有持久残留时阻止删除。
+	// 所有判断与成员/空间软删除处于同一事务，避免先删成员再发现资源冲突。
+	err := tx.Raw(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM knowledge_bases AS kb
+			WHERE kb.tenant_id = ?
+			  AND (
+				kb.deleted_at IS NULL
+				OR EXISTS (
+					SELECT 1 FROM knowledges AS k
+					WHERE k.knowledge_base_id = kb.id AND k.deleted_at IS NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM knowledge_folders AS f
+					WHERE f.knowledge_base_id = kb.id AND f.deleted_at IS NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM kb_shares AS s
+					WHERE s.knowledge_base_id = kb.id AND s.deleted_at IS NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM data_sources AS ds
+					WHERE ds.knowledge_base_id = kb.id
+					  AND (
+						ds.deleted_at IS NULL
+						OR EXISTS (
+							SELECT 1 FROM sync_logs AS sl
+							WHERE sl.data_source_id = ds.id
+							  AND sl.status IN ('running', 'pending')
+						)
+					  )
+				)
+				OR EXISTS (
+					SELECT 1 FROM task_pending_ops AS op
+					WHERE op.tenant_id = ?
+					  AND op.scope = 'knowledge_base'
+					  AND op.scope_id = kb.id
+				)
+			  )
+		)
+	`, tenantID, tenantID).Scan(&blocked).Error
+	return blocked, err
+}
+
 // DeleteTenant soft-deletes the tenant and every active membership row
 // for that tenant in one transaction. Without the membership purge,
 // /auth/me still lists the defunct tenant (name lookup fails → UI shows
 // "#<id>").
 func (r *tenantRepository) DeleteTenant(ctx context.Context, id uint64) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockActiveTenant(tx, id); err != nil {
+			return err
+		}
+		hasKnowledgeBase, err := tenantHasBlockingKnowledgeBaseResources(tx, id)
+		if err != nil {
+			return err
+		}
+		if hasKnowledgeBase {
+			return ErrTenantHasKnowledgeBase
+		}
 		if err := tx.Where("tenant_id = ?", id).Delete(&types.TenantMember{}).Error; err != nil {
 			return err
 		}

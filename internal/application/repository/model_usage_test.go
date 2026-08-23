@@ -32,6 +32,7 @@ func setupModelUsageTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupKBTestDB(t)
 	require.NoError(t, db.Exec(customAgentsTestDDL).Error)
+	require.NoError(t, db.AutoMigrate(&types.Knowledge{}))
 	return db
 }
 
@@ -66,6 +67,35 @@ func TestCountByModelID_KnowledgeBase(t *testing.T) {
 	count, err = repo.CountByModelID(ctx, 1, modelID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)
+}
+
+func TestCountByModelID保留待清理知识使用的嵌入模型(t *testing.T) {
+	ctx := context.Background()
+	db := setupModelUsageTestDB(t)
+	repo := NewKnowledgeBaseRepository(db)
+	modelID := "cleanup-embed-model"
+
+	kb := makeKB(nil)
+	kb.EmbeddingModelID = modelID
+	require.NoError(t, db.Create(kb).Error)
+	require.NoError(t, db.Create(&types.Knowledge{
+		ID:               "knowledge-awaiting-cleanup",
+		TenantID:         kb.TenantID,
+		KnowledgeBaseID:  kb.ID,
+		Type:             "file",
+		ParseStatus:      types.ParseStatusDeleting,
+		EmbeddingModelID: modelID,
+	}).Error)
+	require.NoError(t, db.Delete(kb).Error)
+
+	count, err := repo.CountByModelID(ctx, kb.TenantID, modelID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	require.NoError(t, db.Where("id = ?", "knowledge-awaiting-cleanup").Delete(&types.Knowledge{}).Error)
+	count, err = repo.CountByModelID(ctx, kb.TenantID, modelID)
+	require.NoError(t, err)
+	assert.Zero(t, count)
 }
 
 func TestCountByModelID_CustomAgent(t *testing.T) {

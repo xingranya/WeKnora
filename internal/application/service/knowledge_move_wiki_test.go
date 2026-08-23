@@ -18,7 +18,9 @@ import (
 
 type moveWikiKnowledgeRepo struct {
 	interfaces.KnowledgeRepository
-	knowledge *types.Knowledge
+	knowledge  *types.Knowledge
+	claimOwner string
+	allowClaim bool
 }
 
 func (r *moveWikiKnowledgeRepo) GetKnowledgeByID(
@@ -32,6 +34,81 @@ func (r *moveWikiKnowledgeRepo) UpdateKnowledge(_ context.Context, k *types.Know
 	clone := *k
 	r.knowledge = &clone
 	return nil
+}
+
+func (r *moveWikiKnowledgeRepo) ClaimKnowledgeForMove(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	taskID string,
+	_ string,
+) (*types.Knowledge, bool, bool, error) {
+	if !r.allowClaim || r.knowledge == nil {
+		return nil, false, false, nil
+	}
+	if r.claimOwner == taskID && r.knowledge.KnowledgeBaseID == targetKnowledgeBaseID &&
+		r.knowledge.ParseStatus != types.ParseStatusMoving {
+		clone := *r.knowledge
+		return &clone, true, true, nil
+	}
+	if r.claimOwner != "" && r.claimOwner != taskID {
+		return nil, false, false, nil
+	}
+	if r.knowledge.KnowledgeBaseID != sourceKnowledgeBaseID ||
+		(r.knowledge.ParseStatus != types.ParseStatusCompleted &&
+			r.knowledge.ParseStatus != types.ParseStatusMoving) {
+		return nil, false, false, nil
+	}
+	r.claimOwner = taskID
+	clone := *r.knowledge
+	clone.ParseStatus = types.ParseStatusMoving
+	r.knowledge = &clone
+	result := clone
+	return &result, false, true, nil
+}
+
+func (r *moveWikiKnowledgeRepo) StageClaimedKnowledgeMove(
+	_ context.Context,
+	k *types.Knowledge,
+	taskID string,
+) (bool, error) {
+	if r.claimOwner != taskID || r.knowledge.ParseStatus != types.ParseStatusMoving {
+		return false, nil
+	}
+	clone := *k
+	clone.ParseStatus = types.ParseStatusMoving
+	r.knowledge = &clone
+	return true, nil
+}
+
+func (r *moveWikiKnowledgeRepo) CompleteClaimedKnowledgeMove(
+	_ context.Context,
+	k *types.Knowledge,
+	taskID string,
+) (bool, error) {
+	if r.claimOwner != taskID || r.knowledge.ParseStatus != types.ParseStatusMoving {
+		return false, nil
+	}
+	clone := *k
+	r.knowledge = &clone
+	return true, nil
+}
+
+func (r *moveWikiKnowledgeRepo) FailClaimedKnowledgeMove(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	taskID string,
+	message string,
+) (bool, error) {
+	if r.claimOwner != taskID || r.knowledge.ParseStatus != types.ParseStatusMoving {
+		return false, nil
+	}
+	r.knowledge.ParseStatus = types.ParseStatusFailed
+	r.knowledge.ErrorMessage = message
+	return true, nil
 }
 
 func (r *moveWikiKnowledgeRepo) DeleteKnowledgeTagRelations(_ context.Context, _ string) error {
@@ -108,7 +185,7 @@ func newMoveWikiService(t *testing.T) (
 	pendingRepo := &moveWikiPendingRepo{}
 	chunkRepo := &moveWikiChunkRepo{}
 	svc := &knowledgeService{
-		repo: &moveWikiKnowledgeRepo{knowledge: &types.Knowledge{
+		repo: &moveWikiKnowledgeRepo{allowClaim: true, knowledge: &types.Knowledge{
 			ID:              "kn-1",
 			TenantID:        1,
 			Title:           "Doc",
@@ -127,22 +204,28 @@ func moveWikiCtx() context.Context {
 	return context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
 }
 
-func TestMoveOneKnowledgeRetractsWikiFromSourceKB(t *testing.T) {
-	// An unknown mode makes the move itself a no-op, which pins the cleanup as
-	// unconditional: it runs before the mode dispatch, while the knowledge still
-	// belongs to the source KB.
+func TestMoveOneKnowledgeRejectsUnknownModeBeforeWikiSideEffects(t *testing.T) {
 	svc, wikiRepo, pendingRepo, _ := newMoveWikiService(t)
 
 	err := svc.moveOneKnowledge(moveWikiCtx(), "kn-1",
-		wikiEnabledKB("kb-src"), wikiEnabledKB("kb-dst"), "bogus")
+		wikiEnabledKB("kb-src"), wikiEnabledKB("kb-dst"), "bogus", "move-invalid")
 
 	require.Error(t, err)
-	assert.Equal(t, []string{"kb-src"}, wikiRepo.listedKBs)
+	assert.Empty(t, wikiRepo.listedKBs)
+	assert.Empty(t, pendingRepo.ops)
+}
 
-	srcOps := opsFor(pendingRepo.ops, "kb-src")
-	require.Len(t, srcOps, 1)
-	assert.Equal(t, WikiOpRetract, srcOps[0].Op)
-	assert.Equal(t, "kn-1", srcOps[0].DedupKey)
+func TestMoveOneKnowledgeClaimFailureHasNoExternalSideEffects(t *testing.T) {
+	svc, wikiRepo, pendingRepo, chunkRepo := newMoveWikiService(t)
+	svc.repo.(*moveWikiKnowledgeRepo).allowClaim = false
+
+	err := svc.moveOneKnowledge(moveWikiCtx(), "kn-1",
+		wikiEnabledKB("kb-src"), wikiEnabledKB("kb-dst"), "reuse_vectors", "move-rejected")
+
+	require.Error(t, err)
+	assert.Empty(t, wikiRepo.listedKBs)
+	assert.Empty(t, pendingRepo.ops)
+	assert.Empty(t, chunkRepo.movedToKB)
 }
 
 func TestMoveOneKnowledgeReuseVectorsIngestsIntoTargetKB(t *testing.T) {
@@ -151,7 +234,7 @@ func TestMoveOneKnowledgeReuseVectorsIngestsIntoTargetKB(t *testing.T) {
 	svc, _, pendingRepo, chunkRepo := newMoveWikiService(t)
 
 	err := svc.moveOneKnowledge(moveWikiCtx(), "kn-1",
-		wikiEnabledKB("kb-src"), wikiEnabledKB("kb-dst"), "reuse_vectors")
+		wikiEnabledKB("kb-src"), wikiEnabledKB("kb-dst"), "reuse_vectors", "move-wiki")
 
 	require.NoError(t, err)
 	assert.Equal(t, "kb-dst", chunkRepo.movedToKB)
@@ -166,7 +249,8 @@ func TestMoveOneKnowledgeSkipsWikiWorkForNonWikiKBs(t *testing.T) {
 	svc, wikiRepo, pendingRepo, _ := newMoveWikiService(t)
 
 	err := svc.moveOneKnowledge(moveWikiCtx(), "kn-1",
-		&types.KnowledgeBase{ID: "kb-src"}, &types.KnowledgeBase{ID: "kb-dst"}, "reuse_vectors")
+		&types.KnowledgeBase{ID: "kb-src"}, &types.KnowledgeBase{ID: "kb-dst"},
+		"reuse_vectors", "move-no-wiki")
 
 	require.NoError(t, err)
 	assert.Empty(t, wikiRepo.listedKBs)

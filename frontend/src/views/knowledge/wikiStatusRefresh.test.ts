@@ -22,3 +22,13 @@ test('does not refresh wiki status for ordinary in-flight polling updates', () =
     false,
   )
 })
+
+test('keeps polling while a document is moving and refreshes when the move completes', () => {
+  assert.equal(
+    shouldRefreshWikiStatusAfterKnowledgePoll(
+      { parse_status: 'moving' },
+      { parse_status: 'completed' },
+    ),
+    true,
+  )
+})

@@ -24,7 +24,15 @@ func NewKnowledgeBaseRepository(db *gorm.DB) interfaces.KnowledgeBaseRepository 
 
 // CreateKnowledgeBase creates a new knowledge base
 func (r *knowledgeBaseRepository) CreateKnowledgeBase(ctx context.Context, kb *types.KnowledgeBase) error {
-	return r.db.WithContext(ctx).Create(kb).Error
+	if kb == nil || kb.TenantID == 0 {
+		return ErrTenantNotFound
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockActiveTenant(tx, kb.TenantID); err != nil {
+			return err
+		}
+		return tx.Create(kb).Error
+	})
 }
 
 // GetKnowledgeBaseByID gets a knowledge base by id (no tenant scope; caller must enforce isolation where needed)
@@ -43,6 +51,25 @@ func (r *knowledgeBaseRepository) GetKnowledgeBaseByID(ctx context.Context, id s
 func (r *knowledgeBaseRepository) GetKnowledgeBaseByIDAndTenant(ctx context.Context, id string, tenantID uint64) (*types.KnowledgeBase, error) {
 	var kb types.KnowledgeBase
 	if err := r.db.WithContext(ctx).Where("id = ? AND tenant_id = ?", id, tenantID).First(&kb).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrKnowledgeBaseNotFound
+		}
+		return nil, err
+	}
+	return &kb, nil
+}
+
+// GetKnowledgeBaseByIDAndTenantUnscoped 读取包含软删除行的知识库快照。
+// 仅供删除任务恢复旧 payload 的存储绑定，调用方仍必须携带租户范围。
+func (r *knowledgeBaseRepository) GetKnowledgeBaseByIDAndTenantUnscoped(
+	ctx context.Context,
+	id string,
+	tenantID uint64,
+) (*types.KnowledgeBase, error) {
+	var kb types.KnowledgeBase
+	if err := r.db.WithContext(ctx).Unscoped().
+		Where("id = ? AND tenant_id = ?", id, tenantID).
+		First(&kb).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrKnowledgeBaseNotFound
 		}
@@ -177,6 +204,73 @@ func (r *knowledgeBaseRepository) DeleteKnowledgeBase(ctx context.Context, id st
 	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&types.KnowledgeBase{}).Error
 }
 
+// ListDeletedKnowledgeBasesWithActiveKnowledge 返回仍有清理残留的已删除知识库。
+// 除知识和目录外，分享、数据源及持久任务也必须触发恢复，空知识库同样不能漏扫。
+func (r *knowledgeBaseRepository) ListDeletedKnowledgeBasesWithActiveKnowledge(
+	ctx context.Context,
+	limit int,
+) ([]*types.KnowledgeBase, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	var knowledgeBases []*types.KnowledgeBase
+	err := r.db.WithContext(ctx).Unscoped().
+		Where("knowledge_bases.deleted_at IS NOT NULL").
+		Where(`EXISTS (
+			SELECT 1 FROM knowledges
+			WHERE knowledges.knowledge_base_id = knowledge_bases.id
+			  AND knowledges.deleted_at IS NULL
+		) OR EXISTS (
+			SELECT 1 FROM knowledge_folders
+			WHERE knowledge_folders.knowledge_base_id = knowledge_bases.id
+			  AND knowledge_folders.deleted_at IS NULL
+		) OR EXISTS (
+			SELECT 1 FROM kb_shares
+			WHERE kb_shares.knowledge_base_id = knowledge_bases.id
+			  AND kb_shares.deleted_at IS NULL
+		) OR EXISTS (
+			SELECT 1 FROM data_sources
+			WHERE data_sources.knowledge_base_id = knowledge_bases.id
+			  AND (
+				data_sources.deleted_at IS NULL
+				OR EXISTS (
+					SELECT 1 FROM sync_logs
+					WHERE sync_logs.data_source_id = data_sources.id
+					  AND sync_logs.status IN ('running', 'pending')
+				)
+			  )
+		) OR EXISTS (
+			SELECT 1 FROM task_pending_ops
+			WHERE task_pending_ops.scope = 'knowledge_base'
+			  AND task_pending_ops.scope_id = knowledge_bases.id
+		)`).
+		Order("knowledge_bases.deleted_at ASC").
+		Limit(limit).
+		Find(&knowledgeBases).Error
+	return knowledgeBases, err
+}
+
+// ListKnowledgeBaseCleanupDataSourceIDs 返回仍需停止任务或同步日志的数据源。
+// 查询包含软删除数据源，使恢复任务能够补偿请求路径已经删除记录但未取消日志的情况。
+func (r *knowledgeBaseRepository) ListKnowledgeBaseCleanupDataSourceIDs(
+	ctx context.Context,
+	knowledgeBaseID string,
+) ([]string, error) {
+	var dataSourceIDs []string
+	err := r.db.WithContext(ctx).
+		Table("data_sources").
+		Distinct("data_sources.id").
+		Where("data_sources.knowledge_base_id = ?", knowledgeBaseID).
+		Where(`data_sources.deleted_at IS NULL OR EXISTS (
+			SELECT 1 FROM sync_logs
+			WHERE sync_logs.data_source_id = data_sources.id
+			  AND sync_logs.status IN ('running', 'pending')
+		)`).
+		Order("data_sources.id ASC").
+		Pluck("data_sources.id", &dataSourceIDs).Error
+	return dataSourceIDs, err
+}
+
 // CountByVectorStoreID counts active knowledge bases that are bound to the
 // given vector store within a tenant scope.
 //
@@ -204,16 +298,35 @@ func (r *knowledgeBaseRepository) CountByVectorStoreID(
 	return count, err
 }
 
-// CountByModelID counts active knowledge bases that reference modelID in any
-// model-binding column (scalar fields or JSON config blobs).
+// CountByModelID 统计直接引用模型的活动知识库，以及仍有待清理知识的知识库。
+// 后者包含已软删除知识库，避免异步向量清理完成前删除其嵌入模型。
 func (r *knowledgeBaseRepository) CountByModelID(
 	ctx context.Context, tenantID uint64, modelID string,
 ) (int64, error) {
-	var count int64
+	var activeKnowledgeBaseIDs []string
 	query := r.db.WithContext(ctx).
 		Model(&types.KnowledgeBase{}).
 		Where("tenant_id = ?", tenantID)
 	query = scopeKnowledgeBasesByModelID(query, modelID)
-	err := query.Count(&count).Error
-	return count, err
+	if err := query.Pluck("id", &activeKnowledgeBaseIDs).Error; err != nil {
+		return 0, err
+	}
+
+	var knowledgeBoundIDs []string
+	if err := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Distinct("knowledge_base_id").
+		Where("tenant_id = ? AND embedding_model_id = ?", tenantID, modelID).
+		Pluck("knowledge_base_id", &knowledgeBoundIDs).Error; err != nil {
+		return 0, err
+	}
+
+	referenced := make(map[string]struct{}, len(activeKnowledgeBaseIDs)+len(knowledgeBoundIDs))
+	for _, knowledgeBaseID := range activeKnowledgeBaseIDs {
+		referenced[knowledgeBaseID] = struct{}{}
+	}
+	for _, knowledgeBaseID := range knowledgeBoundIDs {
+		referenced[knowledgeBaseID] = struct{}{}
+	}
+	return int64(len(referenced)), nil
 }

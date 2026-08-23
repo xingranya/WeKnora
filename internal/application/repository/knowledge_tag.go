@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,108 +11,217 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// SetKnowledgeTags replaces all tags for a single knowledge entry.
-// It deletes existing relations and inserts new ones in a transaction.
-func (r *knowledgeRepository) SetKnowledgeTags(
-	ctx context.Context,
-	knowledgeID string,
+// ErrKnowledgeTagMutationConflict 表示知识的租户、知识库或生命周期状态
+// 已与调用方验证时的预期不一致，调用方应返回冲突而不是继续写入旧标签。
+var ErrKnowledgeTagMutationConflict = errors.New("knowledge tag mutation conflicts with knowledge lifecycle")
+
+func uniqueKnowledgeTagIDs(tagIDs []string) []string {
+	seen := make(map[string]struct{}, len(tagIDs))
+	unique := make([]string, 0, len(tagIDs))
+	for _, tagID := range tagIDs {
+		if tagID == "" {
+			continue
+		}
+		if _, exists := seen[tagID]; exists {
+			continue
+		}
+		seen[tagID] = struct{}{}
+		unique = append(unique, tagID)
+	}
+	return unique
+}
+
+func knowledgeTagBlockedStatuses(rejectFailed bool) []string {
+	statuses := []string{
+		types.ParseStatusMoving,
+		types.ParseStatusDeleting,
+		types.ParseStatusCancelled,
+	}
+	if rejectFailed {
+		statuses = append(statuses, types.ParseStatusFailed)
+	}
+	return statuses
+}
+
+func knowledgeTagMutationConflict(knowledgeID, status string) error {
+	if status == types.ParseStatusMoving {
+		return fmt.Errorf(
+			"%w: %w: knowledge %s",
+			ErrKnowledgeTagMutationConflict,
+			types.ErrKnowledgeMoveInProgress,
+			knowledgeID,
+		)
+	}
+	if status == "" {
+		return fmt.Errorf("%w: knowledge %s is outside the expected scope", ErrKnowledgeTagMutationConflict, knowledgeID)
+	}
+	return fmt.Errorf(
+		"%w: knowledge %s is not mutable in status %s",
+		ErrKnowledgeTagMutationConflict,
+		knowledgeID,
+		status,
+	)
+}
+
+func classifyKnowledgeTagMutationConflict(
+	tx *gorm.DB,
+	tenantID uint64,
+	kbID, knowledgeID string,
+	rejectFailed bool,
+) error {
+	var current types.Knowledge
+	if err := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID).First(&current).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return knowledgeTagMutationConflict(knowledgeID, "")
+		}
+		return err
+	}
+	if current.KnowledgeBaseID != kbID {
+		return knowledgeTagMutationConflict(knowledgeID, "")
+	}
+	for _, blocked := range knowledgeTagBlockedStatuses(rejectFailed) {
+		if current.ParseStatus == blocked {
+			return knowledgeTagMutationConflict(knowledgeID, current.ParseStatus)
+		}
+	}
+	return knowledgeTagMutationConflict(knowledgeID, "")
+}
+
+func knowledgeTagMutationRowQuery(tx *gorm.DB, tenantID uint64, knowledgeID string) *gorm.DB {
+	query := tx.Where("tenant_id = ? AND id = ?", tenantID, knowledgeID)
+	if tx.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	return query
+}
+
+// lockKnowledgeForTagMutation 在写标签前锁定并验证知识行。PostgreSQL/MySQL
+// 使用行锁；SQLite 先做受状态约束的无值变化 CAS，以取得单写者锁并覆盖
+// “验证后被移动”窗口。
+func lockKnowledgeForTagMutation(
+	tx *gorm.DB,
+	tenantID uint64,
+	kbID, knowledgeID string,
+	rejectFailed bool,
+) (*types.Knowledge, error) {
+	if tenantID == 0 || kbID == "" || knowledgeID == "" {
+		return nil, knowledgeTagMutationConflict(knowledgeID, "")
+	}
+
+	blockedStatuses := knowledgeTagBlockedStatuses(rejectFailed)
+	if tx.Dialector.Name() == "sqlite" {
+		result := tx.Model(&types.Knowledge{}).
+			Where("tenant_id = ? AND id = ? AND knowledge_base_id = ?", tenantID, knowledgeID, kbID).
+			Where("parse_status IS NULL OR parse_status NOT IN ?", blockedStatuses).
+			UpdateColumn("updated_at", gorm.Expr("updated_at"))
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil, classifyKnowledgeTagMutationConflict(tx, tenantID, kbID, knowledgeID, rejectFailed)
+		}
+	}
+
+	var knowledge types.Knowledge
+	query := knowledgeTagMutationRowQuery(tx, tenantID, knowledgeID)
+	if err := query.First(&knowledge).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, knowledgeTagMutationConflict(knowledgeID, "")
+		}
+		return nil, err
+	}
+	if knowledge.KnowledgeBaseID != kbID {
+		return nil, knowledgeTagMutationConflict(knowledgeID, "")
+	}
+	for _, blocked := range blockedStatuses {
+		if knowledge.ParseStatus == blocked {
+			return nil, knowledgeTagMutationConflict(knowledgeID, knowledge.ParseStatus)
+		}
+	}
+	return &knowledge, nil
+}
+
+func validateKnowledgeTagScope(
+	tx *gorm.DB,
+	tenantID uint64,
+	kbID string,
 	tagIDs []string,
 ) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	var tagCount int64
+	if err := tx.Model(&types.KnowledgeTag{}).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND id IN ?", tenantID, kbID, tagIDs).
+		Count(&tagCount).Error; err != nil {
+		return err
+	}
+	if tagCount != int64(len(tagIDs)) {
+		return fmt.Errorf("one or more tags do not belong to tenant %d and knowledge base %s", tenantID, kbID)
+	}
+	return nil
+}
+
+func buildKnowledgeTagRelations(knowledgeID string, tagIDs []string) []types.KnowledgeTagRelation {
+	now := time.Now()
+	relations := make([]types.KnowledgeTagRelation, 0, len(tagIDs))
+	for _, tagID := range tagIDs {
+		relations = append(relations, types.KnowledgeTagRelation{
+			KnowledgeID: knowledgeID,
+			TagID:       tagID,
+			CreatedAt:   now,
+		})
+	}
+	return relations
+}
+
+// SetKnowledgeTags 在同一事务中验证作用域、锁定知识行并替换全部标签。
+func (r *knowledgeRepository) SetKnowledgeTags(
+	ctx context.Context,
+	tenantID uint64,
+	kbID, knowledgeID string,
+	tagIDs []string,
+) error {
+	unique := uniqueKnowledgeTagIDs(tagIDs)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Delete all existing tag relations for this knowledge
+		if _, err := lockKnowledgeForTagMutation(tx, tenantID, kbID, knowledgeID, false); err != nil {
+			return err
+		}
+		if err := validateKnowledgeTagScope(tx, tenantID, kbID, unique); err != nil {
+			return err
+		}
 		if err := tx.Where("knowledge_id = ?", knowledgeID).
 			Delete(&types.KnowledgeTagRelation{}).Error; err != nil {
 			return err
 		}
-		// Insert new relations (skip empty and duplicate IDs)
-		if len(tagIDs) == 0 {
+		if len(unique) == 0 {
 			return nil
 		}
-		seen := make(map[string]struct{}, len(tagIDs))
-		now := time.Now()
-		relations := make([]types.KnowledgeTagRelation, 0, len(tagIDs))
-		for _, tagID := range tagIDs {
-			if tagID == "" {
-				continue
-			}
-			if _, dup := seen[tagID]; dup {
-				continue
-			}
-			seen[tagID] = struct{}{}
-			relations = append(relations, types.KnowledgeTagRelation{
-				KnowledgeID: knowledgeID,
-				TagID:       tagID,
-				CreatedAt:   now,
-			})
-		}
-		if len(relations) == 0 {
-			return nil
-		}
-		return tx.Create(&relations).Error
+		return tx.Create(buildKnowledgeTagRelations(knowledgeID, unique)).Error
 	})
 }
 
-// AddKnowledgeTagRelations incrementally adds validated relations and never
-// removes existing manual tags. The composite primary key plus DO NOTHING
-// makes retries and duplicate deliveries idempotent.
+// AddKnowledgeTagRelations 在锁定知识行后增量添加标签，不删除人工标签；
+// 复合主键和 DO NOTHING 共同保证重复投递幂等。
 func (r *knowledgeRepository) AddKnowledgeTagRelations(
 	ctx context.Context,
 	tenantID uint64,
 	kbID, knowledgeID string,
 	tagIDs []string,
 ) error {
-	seen := make(map[string]struct{}, len(tagIDs))
-	unique := make([]string, 0, len(tagIDs))
-	for _, id := range tagIDs {
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		unique = append(unique, id)
-	}
-	if len(unique) == 0 {
-		return nil
-	}
-
+	unique := uniqueKnowledgeTagIDs(tagIDs)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var knowledgeCount int64
-		if err := tx.Model(&types.Knowledge{}).
-			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL", knowledgeID, tenantID, kbID).
-			Where("parse_status NOT IN ?", []string{
-				types.ParseStatusCancelled,
-				types.ParseStatusDeleting,
-				types.ParseStatusFailed,
-			}).
-			Count(&knowledgeCount).Error; err != nil {
+		if _, err := lockKnowledgeForTagMutation(tx, tenantID, kbID, knowledgeID, true); err != nil {
 			return err
 		}
-		if knowledgeCount != 1 {
-			return fmt.Errorf("knowledge %s does not belong to tenant %d and knowledge base %s", knowledgeID, tenantID, kbID)
+		if len(unique) == 0 {
+			return nil
 		}
-
-		var tagCount int64
-		if err := tx.Model(&types.KnowledgeTag{}).
-			Where("tenant_id = ? AND knowledge_base_id = ? AND id IN ?", tenantID, kbID, unique).
-			Count(&tagCount).Error; err != nil {
+		if err := validateKnowledgeTagScope(tx, tenantID, kbID, unique); err != nil {
 			return err
 		}
-		if tagCount != int64(len(unique)) {
-			return fmt.Errorf("one or more tags do not belong to tenant %d and knowledge base %s", tenantID, kbID)
-		}
-
-		now := time.Now()
-		relations := make([]types.KnowledgeTagRelation, 0, len(unique))
-		for _, tagID := range unique {
-			relations = append(relations, types.KnowledgeTagRelation{
-				KnowledgeID: knowledgeID,
-				TagID:       tagID,
-				CreatedAt:   now,
-			})
-		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&relations).Error
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).
+			Create(buildKnowledgeTagRelations(knowledgeID, unique)).Error
 	})
 }
 

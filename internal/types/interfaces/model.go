@@ -59,8 +59,22 @@ type ModelRepository interface {
 		modelType types.ModelType,
 		source types.ModelSource,
 	) ([]*types.Model, error)
-	// Update updates a model
+	// Update 保留完整模型兼容更新；新增生产路径必须使用下方的按意图更新方法。
 	Update(ctx context.Context, model *types.Model) error
+	// UpdateConfiguration 仅更新普通模型配置，并保留数据库中的凭据和运行状态。
+	UpdateConfiguration(ctx context.Context, model *types.Model) error
+	// UpdateCredentials 仅更新明确传入的凭据字段；nil 表示保持原值。
+	// managedBy 非 nil 时同步更新模型的生命周期归属。
+	UpdateCredentials(
+		ctx context.Context,
+		tenantID uint64,
+		id string,
+		apiKey *string,
+		appSecret *string,
+		managedBy *string,
+	) error
+	// UpdateStatus 仅更新后台下载流程维护的运行状态。
+	UpdateStatus(ctx context.Context, tenantID uint64, id string, status types.ModelStatus) error
 	// Delete deletes a model
 	Delete(ctx context.Context, tenantID uint64, id string) error
 	// ClearDefaultByType clears the default flag for all models of a specific type

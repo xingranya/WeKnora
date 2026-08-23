@@ -149,6 +149,20 @@ func newWikiEnqueuePostProcessTask(t *testing.T, knowledgeID string) *asynq.Task
 	return asynq.NewTask(types.TypeKnowledgePostProcess, payload)
 }
 
+func TestKnowledgePostProcessRetriesWhileMoveOwnsKnowledge(t *testing.T) {
+	const knowledgeID = "knowledge-moving"
+	repo := &wikiEnqueueFailureKnowledgeRepo{knowledge: &types.Knowledge{
+		ID:          knowledgeID,
+		ParseStatus: types.ParseStatusMoving,
+	}}
+	service := &KnowledgePostProcessService{knowledgeRepo: repo}
+
+	err := service.Handle(context.Background(), newWikiEnqueuePostProcessTask(t, knowledgeID))
+
+	require.ErrorIs(t, err, types.ErrKnowledgeMoveInProgress)
+	assert.Equal(t, types.ParseStatusMoving, repo.knowledge.ParseStatus)
+}
+
 func TestKnowledgePostProcessAtomicallySeedsWikiSlot(t *testing.T) {
 	const knowledgeID = "knowledge-wiki-enqueue-failure"
 	tests := []struct {

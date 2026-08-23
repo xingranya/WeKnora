@@ -133,6 +133,9 @@ interface StatusInfo {
   spin?: boolean;
 }
 const computeStatus = (item: KnowledgeItem): StatusInfo => {
+  if (item.parse_status === 'moving') {
+    return { label: t('knowledgeBase.statusMoving'), theme: 'primary', icon: 'swap', spin: true };
+  }
   if (item.parse_status === 'pending' || item.parse_status === 'processing') {
     return { label: t('knowledgeBase.statusProcessing'), theme: 'primary', icon: 'loading', spin: true };
   }

@@ -38,6 +38,7 @@ const CANCELABLE_PARSE_STATUSES = new Set(['pending', 'processing', 'finalizing'
 const isParseInFlight = computed(() =>
   CANCELABLE_PARSE_STATUSES.has(String(props.item.parse_status ?? ''))
 );
+const isMoving = computed(() => props.item.parse_status === 'moving');
 
 const fileName = computed(() => props.item.file_name || props.item.title || props.item.id);
 </script>
@@ -54,7 +55,7 @@ const fileName = computed(() => props.item.file_name || props.item.title || prop
   </div>
 
   <!-- 编辑文档 -->
-  <div v-if="item.type === 'manual'" class="doc-action-menu-item" @click.stop="emit('edit')">
+  <div v-if="item.type === 'manual' && !isMoving" class="doc-action-menu-item" @click.stop="emit('edit')">
     <t-icon class="icon" name="edit" />
     <span>{{ $t('knowledgeBase.editDocument') }}</span>
   </div>
@@ -65,8 +66,13 @@ const fileName = computed(() => props.item.file_name || props.item.title || prop
     <span>{{ $t('knowledgeStages.viewTrace') }}</span>
   </div>
 
+  <div v-if="isMoving" class="doc-action-menu-item disabled" aria-disabled="true">
+    <t-icon class="icon" name="swap" />
+    <span>{{ $t('knowledgeBase.statusMoving') }}</span>
+  </div>
+
   <!-- 重建知识 (in-flight: no popconfirm, just emits) -->
-  <div v-if="isParseInFlight" class="doc-action-menu-item" @click.stop="emit('reparse')">
+  <div v-else-if="isParseInFlight" class="doc-action-menu-item" @click.stop="emit('reparse')">
     <t-icon class="icon" name="refresh" />
     <span>{{ $t('knowledgeBase.rebuildDocument') }}</span>
   </div>
@@ -96,25 +102,25 @@ const fileName = computed(() => props.item.file_name || props.item.title || prop
   </t-popconfirm>
 
   <!-- 移动到目录 -->
-  <div v-if="canMutateKnowledge" class="doc-action-menu-item" @click.stop="emit('move-folder')">
+  <div v-if="canMutateKnowledge && !isMoving" class="doc-action-menu-item" @click.stop="emit('move-folder')">
     <t-icon class="icon" name="folder" />
     <span>{{ $t('knowledgeBase.moveToFolder.action') }}</span>
   </div>
 
   <!-- 移动到其他知识库 -->
-  <div v-if="canMutateKnowledge" class="doc-action-menu-item" @click.stop="emit('move')">
+  <div v-if="canMutateKnowledge && !isMoving" class="doc-action-menu-item" @click.stop="emit('move')">
     <t-icon class="icon" name="swap" />
     <span>{{ $t('knowledgeBase.moveDocument') }}</span>
   </div>
 
   <!-- 批量管理 -->
-  <div v-if="canMutateKnowledge" class="doc-action-menu-item" @click.stop="emit('batch-manage')">
+  <div v-if="canMutateKnowledge && !isMoving" class="doc-action-menu-item" @click.stop="emit('batch-manage')">
     <t-icon class="icon" name="queue" />
     <span>{{ $t('menu.batchManage') }}</span>
   </div>
 
   <!-- 删除文档 -->
-  <t-popconfirm theme="warning"
+  <t-popconfirm v-if="!isMoving" theme="warning"
     :content="$t('knowledgeBase.confirmDeleteDocument', { fileName })"
     :confirm-btn="{ content: $t('knowledgeBase.confirmDelete'), theme: 'danger' }"
     :cancel-btn="{ content: $t('common.cancel') }" placement="left"
@@ -188,6 +194,17 @@ const fileName = computed(() => props.item.file_name || props.item.title || prop
 
     &:active {
       background: var(--td-error-color-2);
+    }
+  }
+
+  &.disabled {
+    color: var(--td-text-color-disabled);
+    cursor: not-allowed;
+
+    &:hover,
+    &:active {
+      background: transparent;
+      transform: none;
     }
   }
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -14,6 +16,8 @@ import (
 	"github.com/hibiken/asynq"
 	"golang.org/x/sync/errgroup"
 )
+
+var errKnowledgeCleanupLifecycleLost = errors.New("knowledge cleanup lost lifecycle ownership")
 
 // collectImageURLs extracts unique provider:// image URLs from image_info JSON strings.
 func collectImageURLs(ctx context.Context, imageInfos []string) []string {
@@ -56,25 +60,98 @@ func deleteExtractedImages(ctx context.Context, fileSvc interfaces.FileService, 
 	}
 }
 
+// deleteKnowledgeReferencedFiles 逐项按引用自身的 resource/backend 归属解析存储。
+// knowledge base 默认存储只用于没有显式归属的历史路径。
+func (s *knowledgeService) deleteKnowledgeReferencedFiles(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	filePaths []string,
+) {
+	for _, filePath := range filePaths {
+		if strings.TrimSpace(filePath) == "" {
+			continue
+		}
+		fileSvc, deletePath, err := s.resolveKnowledgeFileDeletionTarget(ctx, kb, filePath)
+		if errors.Is(err, interfaces.ErrResourceNotFound) {
+			continue
+		}
+		if err != nil {
+			logger.Errorf(ctx, "Failed to resolve referenced file path=%q: %v", logger.AuditText(filePath, 4096), err)
+			continue
+		}
+		if fileSvc == nil {
+			logger.Warnf(ctx, "No file service for referenced path, skipping delete: %q", logger.AuditText(filePath, 4096))
+			continue
+		}
+		if err := fileSvc.DeleteFile(ctx, deletePath); err != nil {
+			logger.Errorf(ctx, "Failed to delete referenced file path=%q: %v", logger.AuditText(filePath, 4096), err)
+		}
+	}
+}
+
+func (s *knowledgeService) resolveKnowledgeFileDeletionTarget(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	filePath string,
+) (interfaces.FileService, string, error) {
+	if _, isResource := types.ParseResourcePath(filePath); isResource {
+		if s.resourceCatalog == nil || s.storageResolver == nil || s.tenantRepo == nil {
+			return nil, "", errors.New("resource storage resolver is unavailable")
+		}
+		resource, err := s.resourceCatalog.Resolve(ctx, filePath)
+		if err != nil {
+			return nil, "", err
+		}
+		if resource == nil {
+			return nil, "", interfaces.ErrResourceNotFound
+		}
+		ownerTenant, err := s.tenantRepo.GetTenantByID(ctx, resource.TenantID)
+		if err != nil {
+			return nil, "", err
+		}
+		baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
+		resolved, _, err := s.storageResolver.ResolveFileService(
+			ctx,
+			ownerTenant,
+			resource.StorageBackendID,
+			resource.Provider,
+			baseDir,
+		)
+		if err != nil {
+			return nil, "", err
+		}
+		return resolved, filePath, nil
+	}
+	return s.resolveFileServiceForPath(ctx, kb, filePath), filePath, nil
+}
+
 // DeleteKnowledge deletes a knowledge entry and all related resources
 func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error {
-	// Get the knowledge entry
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), id)
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, id)
 	if err != nil {
 		return err
 	}
 
-	// Mark as deleting first to prevent async task conflicts
-	// This ensures that any running async tasks will detect the deletion and abort
 	originalStatus := knowledge.ParseStatus
-	knowledge.ParseStatus = types.ParseStatusDeleting
-	knowledge.UpdatedAt = time.Now()
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge failed to mark as deleting")
-		// Continue with deletion even if marking fails
-	} else {
-		logger.Infof(ctx, "Marked knowledge %s as deleting (previous status: %s)", id, originalStatus)
+	claimer, ok := s.repo.(knowledgeListDeleteClaimer)
+	if !ok {
+		return errors.New("knowledge repository does not support delete claims")
 	}
+	claimed, err := claimer.ClaimKnowledgeListForKBDelete(
+		ctx,
+		tenantID,
+		knowledge.KnowledgeBaseID,
+		[]string{id},
+	)
+	if err != nil {
+		return fmt.Errorf("claim knowledge for deletion: %w", err)
+	}
+	if len(claimed) != 1 || claimed[0] == nil {
+		return errors.New("knowledge could not be claimed for deletion")
+	}
+	knowledge = claimed[0]
+	logger.Infof(ctx, "Marked knowledge %s as deleting (previous status: %s)", id, originalStatus)
 
 	// Best-effort: purge any queued downstream tasks for this knowledge
 	// (multimodal / post-process / question / summary / graph extract).
@@ -89,10 +166,8 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 
 	// Resolve file service for this KB before spawning goroutines
 	kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-	kbFileSvc := s.resolveFileService(ctx, kb)
 
 	// Collect image URLs before chunks are deleted (ImageInfo references are lost after deletion)
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantID, []string{id})
 	if err != nil {
 		logger.Errorf(ctx, "Failed to collect image URLs for cleanup: %v", err)
@@ -181,23 +256,31 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 	// row could leave a "file missing but row present" zombie that can neither be
 	// reparsed nor cleanly re-deleted (issue #2192). Orphaning a file after the
 	// row is gone is the tolerable failure mode instead.
-	if err := s.repo.DeleteKnowledge(ctx, tenantID, id); err != nil {
+	transactionalDeleter, ok := s.repo.(knowledgeListAndQuotaDeleter)
+	if !ok {
+		return errors.New("knowledge repository does not support transactional quota cleanup")
+	}
+	if err := transactionalDeleter.DeleteKnowledgeListAndAdjustStorage(
+		ctx,
+		tenantID,
+		"",
+		[]string{id},
+	); err != nil {
 		return err
 	}
 
 	// Best-effort physical cleanup. Errors here only leak storage; they must not
 	// fail the delete now that the row is already gone.
 	if knowledge.FilePath != "" {
-		if err := kbFileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
-		}
+		s.deleteKnowledgeReferencedFiles(ctx, kb, []string{knowledge.FilePath})
 	}
-	deleteExtractedImages(ctx, kbFileSvc, imageURLs)
+	s.deleteKnowledgeReferencedFiles(ctx, kb, imageURLs)
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	quotaBytes := knowledge.QuotaStorageBytes()
-	tenantInfo.StorageUsed -= quotaBytes
-	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -quotaBytes); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
+	if quotaBytes >= tenantInfo.StorageUsed {
+		tenantInfo.StorageUsed = 0
+	} else {
+		tenantInfo.StorageUsed -= quotaBytes
 	}
 	recordKBActivity(ctx, s.audit, tenantID, knowledge.KnowledgeBaseID, types.AuditActionKnowledgeDeleted,
 		"knowledge", knowledge.ID, types.AuditOutcomeSuccess,
@@ -501,20 +584,43 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 		return err
 	}
 
-	// Mark all as deleting first to prevent async task conflicts.
-	// Remember which entries still had queued / in-flight downstream tasks
-	// so we can dequeue them in one pass after marking.
+	claimer, ok := s.repo.(knowledgeListDeleteClaimer)
+	if !ok {
+		return errors.New("knowledge repository does not support delete claims")
+	}
+	idsByKnowledgeBase := make(map[string][]string)
+	originalStatus := make(map[string]string, len(knowledgeList))
+	for _, knowledge := range knowledgeList {
+		if knowledge == nil || knowledge.ID == "" || knowledge.KnowledgeBaseID == "" {
+			return errors.New("knowledge batch contains an invalid item")
+		}
+		originalStatus[knowledge.ID] = knowledge.ParseStatus
+		idsByKnowledgeBase[knowledge.KnowledgeBaseID] = append(
+			idsByKnowledgeBase[knowledge.KnowledgeBaseID],
+			knowledge.ID,
+		)
+	}
+	claimedKnowledge := make([]*types.Knowledge, 0, len(knowledgeList))
+	for knowledgeBaseID, knowledgeIDs := range idsByKnowledgeBase {
+		claimed, claimErr := claimer.ClaimKnowledgeListForKBDelete(
+			ctx,
+			tenantInfo.ID,
+			knowledgeBaseID,
+			knowledgeIDs,
+		)
+		if claimErr != nil {
+			return fmt.Errorf("claim knowledge list for deletion: %w", claimErr)
+		}
+		if len(claimed) != len(knowledgeIDs) {
+			return errors.New("knowledge list could not be fully claimed for deletion")
+		}
+		claimedKnowledge = append(claimedKnowledge, claimed...)
+	}
+	knowledgeList = claimedKnowledge
 	var inFlightIDs []string
 	for _, knowledge := range knowledgeList {
-		prev := knowledge.ParseStatus
-		knowledge.ParseStatus = types.ParseStatusDeleting
-		knowledge.UpdatedAt = time.Now()
-		if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).WithField("knowledge_id", knowledge.ID).
-				Errorf("DeleteKnowledgeList failed to mark as deleting")
-			// Continue with deletion even if marking fails
-		}
-		if prev == types.ParseStatusPending || prev == types.ParseStatusProcessing {
+		previousStatus := originalStatus[knowledge.ID]
+		if previousStatus == types.ParseStatusPending || previousStatus == types.ParseStatusProcessing {
 			inFlightIDs = append(inFlightIDs, knowledge.ID)
 		}
 	}
@@ -527,14 +633,12 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 		s.dequeueKnowledgeTasks(ctx, kid)
 	}
 
-	// Pre-resolve KB metadata and file services so goroutines don't need DB access.
+	// Pre-resolve KB metadata；具体文件服务按每条持久引用的 backend 归属选择。
 	knowledgeBases := make(map[string]*types.KnowledgeBase)
-	kbFileServices := make(map[string]interfaces.FileService)
 	for _, knowledge := range knowledgeList {
-		if _, ok := kbFileServices[knowledge.KnowledgeBaseID]; !ok {
+		if _, ok := knowledgeBases[knowledge.KnowledgeBaseID]; !ok {
 			kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
 			knowledgeBases[knowledge.KnowledgeBaseID] = kb
-			kbFileServices[knowledge.KnowledgeBaseID] = s.resolveFileService(ctx, kb)
 		}
 	}
 
@@ -643,32 +747,43 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	// gone avoids "file missing but row present" zombies that break reparse /
 	// re-delete when an earlier cleanup step failed (issue #2192). A failure below
 	// only orphans storage.
-	if err := s.repo.DeleteKnowledgeList(ctx, tenantInfo.ID, ids); err != nil {
+	transactionalDeleter, ok := s.repo.(knowledgeListAndQuotaDeleter)
+	if !ok {
+		return errors.New("knowledge repository does not support transactional quota cleanup")
+	}
+	if err := transactionalDeleter.DeleteKnowledgeListAndAdjustStorage(
+		ctx,
+		tenantInfo.ID,
+		"",
+		ids,
+	); err != nil {
 		return err
 	}
 
-	storageAdjust := int64(0)
+	storageDeduct := int64(0)
 	for _, knowledge := range knowledgeList {
 		if knowledge.FilePath != "" {
-			fSvc := kbFileServices[knowledge.KnowledgeBaseID]
-			if err := fSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
-			}
+			s.deleteKnowledgeReferencedFiles(
+				ctx,
+				knowledgeBases[knowledge.KnowledgeBaseID],
+				[]string{knowledge.FilePath},
+			)
 		}
-		storageAdjust -= knowledge.QuotaStorageBytes()
+		quotaBytes := knowledge.QuotaStorageBytes()
+		if quotaBytes > math.MaxInt64-storageDeduct {
+			storageDeduct = math.MaxInt64
+		} else {
+			storageDeduct += quotaBytes
+		}
 	}
 	// Delete extracted images per KB
 	for kbID, urls := range kbImageURLs {
-		fSvc := kbFileServices[kbID]
-		if fSvc == nil {
-			logger.Warnf(ctx, "No file service for KB %s, skipping %d image deletions", kbID, len(urls))
-			continue
-		}
-		deleteExtractedImages(ctx, fSvc, urls)
+		s.deleteKnowledgeReferencedFiles(ctx, knowledgeBases[kbID], urls)
 	}
-	tenantInfo.StorageUsed += storageAdjust
-	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, storageAdjust); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
+	if storageDeduct >= tenantInfo.StorageUsed {
+		tenantInfo.StorageUsed = 0
+	} else {
+		tenantInfo.StorageUsed -= storageDeduct
 	}
 	byKB := make(map[string][]*types.Knowledge)
 	for i := range knowledgeList {
@@ -693,7 +808,11 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	return nil
 }
 
-func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowledge *types.Knowledge) error {
+func (s *knowledgeService) cleanupKnowledgeResources(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	moveTaskIDs ...string,
+) error {
 	logger.GetLogger(ctx).Infof("Cleaning knowledge resources before manual update, knowledge ID: %s", knowledge.ID)
 
 	var cleanupErr error
@@ -765,19 +884,38 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
-	if knowledge.StorageSize > 0 {
-		tenantInfo.StorageUsed -= knowledge.StorageSize
-		if tenantInfo.StorageUsed < 0 {
-			tenantInfo.StorageUsed = 0
-		}
-		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Error("Failed to adjust storage usage during manual cleanup")
-			cleanupErr = errors.Join(cleanupErr, err)
-		}
-		knowledge.StorageSize = 0
+	// 外部清理全部成功后，才在 tenant+knowledge 单事务中结算索引占用。
+	// 某一步失败时保留原计费值，下一次重试完成后只会按持久 marker 扣一次。
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	moveTaskID := ""
+	if len(moveTaskIDs) > 0 {
+		moveTaskID = moveTaskIDs[0]
+	}
+	resetter, ok := s.repo.(indexedKnowledgeStorageResetRepository)
+	if !ok {
+		return errors.New("knowledge repository does not support atomic indexed storage reset")
+	}
+	applied, delta, err := resetter.ResetIndexedKnowledgeStorage(
+		ctx,
+		knowledge.TenantID,
+		knowledge.ID,
+		moveTaskID,
+	)
+	if err != nil {
+		return fmt.Errorf("reset indexed knowledge storage: %w", err)
+	}
+	if !applied {
+		return errKnowledgeCleanupLifecycleLost
+	}
+	knowledge.StorageSize = 0
+	tenantInfo.StorageUsed += delta
+	if tenantInfo.StorageUsed < 0 {
+		tenantInfo.StorageUsed = 0
 	}
 
-	return cleanupErr
+	return nil
 }
 
 // ProcessKnowledgeListDelete handles Asynq knowledge list delete tasks

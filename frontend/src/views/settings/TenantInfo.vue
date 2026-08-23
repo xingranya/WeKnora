@@ -415,7 +415,11 @@ async function deleteCurrentTenant() {
       authStore.logout()
       window.location.href = '/login'
     } else {
-      MessagePlugin.error(resp.message || t('tenant.deleteDangerZone.failed'))
+      if (resp.blockedByResources) {
+        MessagePlugin.warning(t('tenant.deleteDangerZone.blockedByResources'))
+      } else {
+        MessagePlugin.error(resp.message || t('tenant.deleteDangerZone.failed'))
+      }
     }
   } catch (err: any) {
     MessagePlugin.error(err?.message || t('tenant.deleteDangerZone.failed'))

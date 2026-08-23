@@ -46,6 +46,7 @@ type HousekeepingService struct {
 	// falls back to the span/updated_at heuristics alone.
 	inspector        interfaces.TaskInspector
 	knowledgeService interfaces.KnowledgeService
+	kbService        interfaces.KnowledgeBaseService
 
 	mu      sync.Mutex
 	started bool
@@ -55,13 +56,18 @@ type HousekeepingService struct {
 // the cron — call Start in the application bootstrap so a misconfigured
 // cron schedule cannot prevent the rest of the service from coming up.
 func NewHousekeepingService(
-	db *gorm.DB, cfg *config.Config, inspector interfaces.TaskInspector, knowledgeService interfaces.KnowledgeService,
+	db *gorm.DB,
+	cfg *config.Config,
+	inspector interfaces.TaskInspector,
+	knowledgeService interfaces.KnowledgeService,
+	kbService interfaces.KnowledgeBaseService,
 ) *HousekeepingService {
 	return &HousekeepingService{
 		db:               db,
 		cfg:              cfg,
 		inspector:        inspector,
 		knowledgeService: knowledgeService,
+		kbService:        kbService,
 		cron: cron.New(cron.WithSeconds(), cron.WithChain(
 			cron.Recover(cron.DefaultLogger),
 		)),
@@ -92,6 +98,11 @@ func (h *HousekeepingService) Start(ctx context.Context) error {
 	}
 	h.cron.Start()
 	h.started = true
+	go func() {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		h.recoverPendingKBDeletes(recoveryCtx)
+	}()
 	logger.Infof(ctx, "[Housekeeping] started with 5-minute sweep")
 	return nil
 }
@@ -111,6 +122,8 @@ func (h *HousekeepingService) Stop() {
 // runSweep is exported on the type for testability — tests can drive a
 // single sweep without waiting for the cron tick.
 func (h *HousekeepingService) runSweep(ctx context.Context) {
+	h.recoverPendingKBDeletes(ctx)
+	h.recoverPendingKnowledgeMoves(ctx, false)
 	if h.knowledgeService != nil {
 		if err := h.knowledgeService.RecoverPendingQuestionIndexes(ctx, 200); err != nil {
 			logger.Warnf(ctx, "[Housekeeping] pending question index recovery failed: %v", err)
@@ -215,6 +228,34 @@ func (h *HousekeepingService) runSweep(ctx context.Context) {
 		logger.Warnf(ctx, "[Housekeeping] summary sweep failed: %v", resSummary.Error)
 	} else if resSummary.RowsAffected > 0 {
 		logger.Infof(ctx, "[Housekeeping] recovered %d stuck summary rows", resSummary.RowsAffected)
+	}
+}
+
+type knowledgeBaseDeleteRecoverer interface {
+	RecoverPendingKBDeletes(ctx context.Context, limit int) error
+}
+
+type knowledgeMoveRecoverer interface {
+	RecoverPendingKnowledgeMoves(context.Context, int, bool) error
+}
+
+func (h *HousekeepingService) recoverPendingKnowledgeMoves(ctx context.Context, force bool) {
+	recoverer, ok := h.knowledgeService.(knowledgeMoveRecoverer)
+	if !ok {
+		return
+	}
+	if err := recoverer.RecoverPendingKnowledgeMoves(ctx, 200, force); err != nil {
+		logger.Warnf(ctx, "[Housekeeping] pending knowledge move recovery failed: %v", err)
+	}
+}
+
+func (h *HousekeepingService) recoverPendingKBDeletes(ctx context.Context) {
+	recoverer, ok := h.kbService.(knowledgeBaseDeleteRecoverer)
+	if !ok {
+		return
+	}
+	if err := recoverer.RecoverPendingKBDeletes(ctx, 100); err != nil {
+		logger.Warnf(ctx, "[Housekeeping] pending knowledge base delete recovery failed: %v", err)
 	}
 }
 

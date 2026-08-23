@@ -4,7 +4,7 @@ export type KnowledgePollStatus = {
 }
 
 export function isKnowledgeParseInFlight(status?: string): boolean {
-  return status === 'pending' || status === 'processing' || status === 'finalizing'
+  return status === 'pending' || status === 'processing' || status === 'finalizing' || status === 'moving'
 }
 
 export function knowledgeNeedsStatusPolling(item: KnowledgePollStatus): boolean {

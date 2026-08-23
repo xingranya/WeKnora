@@ -1,5 +1,6 @@
 import { get, post, postUpload, put, del } from '../../utils/request';
 import i18n from '@/i18n'
+import { prepareModelUpdatePayload } from './modelUpdatePayload'
 
 const t = (key: string) => i18n.global.t(key)
 
@@ -112,7 +113,7 @@ export function getModel(id: string): Promise<ModelConfig> {
 // 更新模型
 export function updateModel(id: string, data: Partial<ModelConfig>): Promise<ModelConfig> {
   return new Promise((resolve, reject) => {
-    put(`/api/v1/models/${id}`, data)
+    put(`/api/v1/models/${id}`, prepareModelUpdatePayload(data))
       .then((response: any) => {
         if (response.success && response.data) {
           resolve(response.data);

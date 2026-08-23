@@ -119,7 +119,7 @@ func (s *resourceCatalog) Resolve(ctx context.Context, reference string) (*types
 		return nil, err
 	}
 	if resource == nil {
-		return nil, fmt.Errorf("resource not found")
+		return nil, interfaces.ErrResourceNotFound
 	}
 	return resource, nil
 }

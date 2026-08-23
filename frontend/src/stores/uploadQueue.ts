@@ -422,7 +422,7 @@ export const createUploadQueueStore = (
           this.patch(taskId, longRunning
             ? { status: 'status_unknown', error: t('errors.parseTakingLonger') }
             : {
-                status: status === 'processing' || status === 'finalizing' ? 'parsing' : 'waiting_parse',
+                status: status === 'processing' || status === 'finalizing' || status === 'moving' ? 'parsing' : 'waiting_parse',
                 error: undefined,
               })
           await dependencies.sleep(longRunning
@@ -472,7 +472,7 @@ export const createUploadQueueStore = (
       }
       if (status !== 'failed' && status !== 'cancelled') {
         this.patch(id, {
-          status: status === 'processing' || status === 'finalizing' ? 'parsing' : 'waiting_parse',
+          status: status === 'processing' || status === 'finalizing' || status === 'moving' ? 'parsing' : 'waiting_parse',
           error: undefined,
         })
         await this.pollParsing(id, knowledgeId)

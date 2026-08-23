@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -40,6 +41,8 @@ func TestLogicalKey_DelimiterIsUnambiguous(t *testing.T) {
 }
 
 func TestParseIMAConfig(t *testing.T) {
+	fakedns.InstallDefault(t, map[string][]string{"ima.qq.com": {"8.8.8.8"}})
+
 	tests := []struct {
 		name        string
 		credentials map[string]interface{}

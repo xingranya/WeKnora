@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/testutil/fakedns"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -29,9 +30,9 @@ func TestNewOpenSearchClient_RejectsEmptyAddr(t *testing.T) {
 // We don't probe the cluster (no network), just verify the constructor
 // returns successfully.
 func TestNewOpenSearchClient_Succeeds_OnValidAddr(t *testing.T) {
-	t.Parallel()
+	fakedns.InstallDefault(t, map[string][]string{"opensearch.example.com": {"8.8.8.8"}})
 	client, err := NewOpenSearchClient(&types.ConnectionConfig{
-		Addr:     "https://opensearch.example.com:9200",
+		Addr:     "https://opensearch.example.com",
 		Username: "admin",
 		Password: "secret", // not a real password — wire-format only
 	})

@@ -53,6 +53,29 @@ func (r *metadataUpdateKnowledgeRepo) UpdateKnowledge(_ context.Context, knowled
 	return nil
 }
 
+func (r *metadataUpdateKnowledgeRepo) PatchKnowledgeUserFields(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	values map[string]interface{},
+) (bool, string, error) {
+	if r.knowledge.ParseStatus == types.ParseStatusMoving ||
+		r.knowledge.ParseStatus == types.ParseStatusDeleting ||
+		r.knowledge.ParseStatus == types.ParseStatusCancelled {
+		return false, r.knowledge.ParseStatus, nil
+	}
+	if value, ok := values["title"].(string); ok {
+		r.knowledge.Title = value
+	}
+	if value, ok := values["description"].(string); ok {
+		r.knowledge.Description = value
+	}
+	if value, ok := values["custom_metadata"].(types.JSON); ok {
+		r.knowledge.CustomMetadata = value
+	}
+	return true, r.knowledge.ParseStatus, nil
+}
+
 func (r *metadataUpdateKnowledgeRepo) UpdateKnowledgeColumn(
 	_ context.Context, _ string, column string, value interface{},
 ) error {
@@ -60,6 +83,34 @@ func (r *metadataUpdateKnowledgeRepo) UpdateKnowledgeColumn(
 		r.summaryStatusUpdate = value
 	}
 	return nil
+}
+
+func (r *metadataUpdateKnowledgeRepo) UpdateKnowledgeSummaryIfCurrent(
+	_ context.Context,
+	_ uint64,
+	_ string,
+	knowledgeBaseID string,
+	parseStatus string,
+	metadata types.JSON,
+	customMetadata types.JSON,
+	values map[string]interface{},
+) (bool, error) {
+	if r.knowledge.KnowledgeBaseID != knowledgeBaseID ||
+		r.knowledge.ParseStatus != parseStatus ||
+		string(r.knowledge.Metadata) != string(metadata) ||
+		string(r.knowledge.CustomMetadata) != string(customMetadata) {
+		return false, nil
+	}
+	if value, ok := values["summary_status"]; ok {
+		r.summaryStatusUpdate = value
+		if status, valid := value.(string); valid {
+			r.knowledge.SummaryStatus = status
+		}
+	}
+	if value, ok := values["description"].(string); ok {
+		r.knowledge.Description = value
+	}
+	return true, nil
 }
 
 type metadataUpdateChunkRepo struct {

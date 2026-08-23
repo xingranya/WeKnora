@@ -3167,6 +3167,7 @@ export default {
       confirm: '确认删除',
       nameMismatch: '空间名称不匹配',
       success: '空间已删除',
+      blockedByResources: '空间中仍有知识库或后台清理尚未完成。请先删除所有知识库，并等待清理完成后再删除空间。',
       failed: '删除空间失败'
     },
     leaveDangerZone: {
@@ -6013,6 +6014,7 @@ export default {
     batchReparseSkippedInFlight: '已跳过 {count} 个正在解析中的文档',
     statusCompleted: '已完成',
     statusProcessing: '解析中',
+    statusMoving: '移动中',
     statusFinalizing: '优化中',
     statusFailed: '失败',
     statusCancelled: '已取消',

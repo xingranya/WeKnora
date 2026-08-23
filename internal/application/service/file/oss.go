@@ -48,8 +48,13 @@ func newOSSClient(endpoint, region, accessKey, secretKey string) (*oss.Client, e
 	return oss.NewClient(cfg), nil
 }
 
+type ossBucketClient interface {
+	IsBucketExist(context.Context, string, ...func(*oss.Options)) (bool, error)
+	PutBucket(context.Context, *oss.PutBucketRequest, ...func(*oss.Options)) (*oss.PutBucketResult, error)
+}
+
 // ossEnsureBucket checks if the bucket exists and creates it if missing.
-func ossEnsureBucket(client *oss.Client, bucketName string) error {
+func ossEnsureBucket(client ossBucketClient, bucketName string) error {
 	exists, err := client.IsBucketExist(context.Background(), bucketName)
 	if err != nil {
 		return fmt.Errorf("failed to check OSS bucket: %w", err)

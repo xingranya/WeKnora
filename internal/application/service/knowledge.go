@@ -74,6 +74,7 @@ type knowledgeService struct {
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
 	memFAQRunningImport sync.Map // kbID -> *runningFAQImportInfo
+	memMoveProgress     sync.Map // taskID -> *types.KnowledgeMoveProgress（Lite 进程生命周期）
 	wikiRepo            interfaces.WikiPageRepository
 	wikiService         interfaces.WikiPageService
 
@@ -756,18 +757,31 @@ func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.
 	return file, knowledge.FileName, nil
 }
 
+type knowledgeUserFieldsPatcher interface {
+	PatchKnowledgeUserFields(
+		context.Context,
+		uint64,
+		string,
+		map[string]interface{},
+	) (applied bool, status string, err error)
+}
+
 func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
-	record, err := s.repo.GetKnowledgeByID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), knowledge.ID)
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	record, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledge.ID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge record: %v", err)
 		return err
 	}
+	updates := make(map[string]interface{}, 4)
 	// if need other fields update, please add here
 	if knowledge.Title != "" {
 		record.Title = knowledge.Title
+		updates["title"] = knowledge.Title
 	}
 	if knowledge.Description != "" {
 		record.Description = knowledge.Description
+		updates["description"] = knowledge.Description
 	}
 	metadataChanged := false
 	if knowledge.CustomMetadata != nil {
@@ -794,13 +808,29 @@ func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types
 		}
 		metadataChanged = !reflect.DeepEqual(existing, custom)
 		record.CustomMetadata = knowledge.CustomMetadata
+		updates["custom_metadata"] = knowledge.CustomMetadata
 	}
 
-	// Update knowledge record in the repository
-	if err := s.repo.UpdateKnowledge(ctx, record); err != nil {
+	updatedAt := time.Now()
+	updates["updated_at"] = updatedAt
+	patcher, ok := s.repo.(knowledgeUserFieldsPatcher)
+	if !ok {
+		return errors.New("knowledge repository does not support guarded user patches")
+	}
+	applied, status, err := patcher.PatchKnowledgeUserFields(
+		ctx,
+		tenantID,
+		record.ID,
+		updates,
+	)
+	if err != nil {
 		logger.Errorf(ctx, "Failed to update knowledge: %v", err)
 		return err
 	}
+	if !applied {
+		return werrors.NewConflictError(fmt.Sprintf("知识当前处于 %s 状态，无法编辑", status))
+	}
+	record.UpdatedAt = updatedAt
 	if metadataChanged && record.SummaryStatus != "" && record.SummaryStatus != types.SummaryStatusNone {
 		if err := enqueueSummaryRefresh(ctx, s.repo, s.task, s.kbService, s.tracker(), record); err != nil {
 			logger.Warnf(ctx, "Metadata saved but summary refresh enqueue failed for %s: %v", record.ID, err)
@@ -871,7 +901,33 @@ func (s *knowledgeService) GetKnowledgeBatchWithSharedAccess(ctx context.Context
 
 // SetKnowledgeTags replaces all tags for a single knowledge entry.
 func (s *knowledgeService) SetKnowledgeTags(ctx context.Context, knowledgeID string, tagIDs []string) error {
-	return s.repo.SetKnowledgeTags(ctx, knowledgeID, tagIDs)
+	tenantID := types.MustTenantIDFromContext(ctx)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	if err != nil {
+		return err
+	}
+	return s.setKnowledgeTagsGuarded(
+		ctx,
+		tenantID,
+		knowledge.KnowledgeBaseID,
+		knowledgeID,
+		tagIDs,
+	)
+}
+
+func (s *knowledgeService) setKnowledgeTagsGuarded(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	knowledgeID string,
+	tagIDs []string,
+) error {
+	err := s.repo.SetKnowledgeTags(ctx, tenantID, kbID, knowledgeID, tagIDs)
+	if errors.Is(err, repository.ErrKnowledgeTagMutationConflict) ||
+		errors.Is(err, types.ErrKnowledgeMoveInProgress) {
+		return werrors.NewConflictError("知识正在移动、删除或取消中，无法修改标签")
+	}
+	return err
 }
 
 // ListKnowledgeIDsByTagIDs returns document knowledge IDs carrying any of the
@@ -955,7 +1011,7 @@ func (s *knowledgeService) setAndAttachKnowledgeTags(
 		return err
 	}
 	if len(tagIDs) > 0 {
-		if err := s.repo.SetKnowledgeTags(ctx, knowledge.ID, tagIDs); err != nil {
+		if err := s.setKnowledgeTagsGuarded(ctx, tenantID, kbID, knowledge.ID, tagIDs); err != nil {
 			return err
 		}
 	}
@@ -981,7 +1037,13 @@ func (s *knowledgeService) UpdateKnowledgeTag(ctx context.Context, knowledgeID s
 		return err
 	}
 
-	return s.repo.SetKnowledgeTags(ctx, knowledgeID, tagIDs)
+	return s.setKnowledgeTagsGuarded(
+		ctx,
+		tenantID,
+		knowledge.KnowledgeBaseID,
+		knowledgeID,
+		tagIDs,
+	)
 }
 
 // UpdateKnowledgeTagBatch updates tags for document knowledge items in batch.
@@ -1069,9 +1131,24 @@ func (s *knowledgeService) UpdateKnowledgeTagBatch(ctx context.Context, authoriz
 		}
 	}
 
+	knowledgeByID := make(map[string]*types.Knowledge, len(knowledgeList))
+	for _, knowledge := range knowledgeList {
+		knowledgeByID[knowledge.ID] = knowledge
+	}
+
 	// Set tags for each knowledge
 	for knowledgeID, tagIDs := range updates {
-		if err := s.repo.SetKnowledgeTags(ctx, knowledgeID, tagIDs); err != nil {
+		knowledge := knowledgeByID[knowledgeID]
+		if knowledge == nil {
+			return werrors.NewForbiddenError("some knowledge IDs are not accessible in the authorized scope")
+		}
+		if err := s.setKnowledgeTagsGuarded(
+			ctx,
+			tenantID,
+			knowledge.KnowledgeBaseID,
+			knowledgeID,
+			tagIDs,
+		); err != nil {
 			return err
 		}
 	}

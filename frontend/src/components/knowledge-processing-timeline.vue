@@ -203,7 +203,7 @@ function isPolling(status?: string): boolean {
   // finalizing is the post-process fan-out window — subspans
   // (summary / question / graph.chunk[*]) are still actively producing
   // events, so we must keep polling and drawing LIVE.
-  return status === 'pending' || status === 'processing' || status === 'finalizing'
+  return status === 'pending' || status === 'processing' || status === 'finalizing' || status === 'moving'
 }
 
 // Hard-terminal statuses override traceActive: even if child spans were
@@ -1121,6 +1121,7 @@ function attemptGlyph(status: string): { ch: string; cls: string } {
     case 'running':
     case 'pending':
     case 'processing':
+    case 'moving':
       return { ch: '●', cls: 'kp-glyph-running' }
     default:
       return { ch: '–', cls: 'kp-glyph-unknown' }
@@ -1168,6 +1169,7 @@ const headerStatusTheme = computed(() => {
     case 'processing':
     case 'pending':
     case 'finalizing':
+    case 'moving':
       return 'warning'
     default:
       return 'default'
