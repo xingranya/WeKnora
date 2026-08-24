@@ -29,8 +29,8 @@ test('见外知识库展示名在所有主界面语言中保持一致', () => {
     assert.match(locale.integrations.claw.setupPrompt, /\{archiveName\}/, `${localeName} 配置提示缺少安装包占位符`)
     assert.match(locale.integrations.claw.setupPrompt, /\{officeCliInstallCommand\}/, `${localeName} 配置提示缺少 OfficeCLI 安装命令`)
     assert.equal(locale.integrations.claw.compatibility.generic.length > 0, true, `${localeName} 缺少通用 Agent 文案`)
-    assert.match(locale.integrations.claw.downloadCtaHint, /v1\.6\.0/, `${localeName} 下载版本不是 v1.6.0`)
-    assert.match(locale.integrations.claw.packageMeta, /v1\.6\.0/, `${localeName} 包版本不是 v1.6.0`)
+    assert.match(locale.integrations.claw.downloadCtaHint, /v1\.6\.1/, `${localeName} 下载版本不是 v1.6.1`)
+    assert.match(locale.integrations.claw.packageMeta, /v1\.6\.1/, `${localeName} 包版本不是 v1.6.1`)
   }
 })
 
