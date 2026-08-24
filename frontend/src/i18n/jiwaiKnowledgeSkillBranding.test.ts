@@ -36,7 +36,7 @@ test('见外知识库展示名在所有主界面语言中保持一致', () => {
 
 test('见外知识库安装包使用稳定的静态下载地址', () => {
   assert.equal(JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL, '/downloads/jiwai-knowledge-skill.zip')
-  assert.equal(JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME, 'jiwai-knowledge-skill.zip')
+  assert.equal(JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME, '见外知识库.zip')
   assert.equal(OFFICECLI_SKILL_INSTALL_COMMAND, 'curl -fsSL https://officecli.ai/SKILL.md')
 })
 
