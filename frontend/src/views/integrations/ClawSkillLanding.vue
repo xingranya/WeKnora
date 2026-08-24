@@ -170,7 +170,9 @@ import { useRouter } from 'vue-router'
 import { listTenantAPIKeys, type TenantAPIKey } from '@/api/tenant'
 import {
   CLAWHUB_SKILL_URL,
+  JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME,
   JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL,
+  OFFICECLI_SKILL_INSTALL_COMMAND,
 } from '@/config/integrations'
 import { useApiBaseUrlDisplay } from '@/composables/useApiBaseUrlDisplay'
 import { useAuthStore } from '@/stores/auth'
@@ -232,9 +234,10 @@ const setupPromptPreview = computed(() => {
 
 function buildSetupPrompt(apiKey: string) {
   return t('integrations.claw.setupPrompt', {
-    archiveName: '见外知识库.zip',
+    archiveName: JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME,
     baseUrl: apiBaseUrlDisplay.value || 'https://your-server.com/api/v1',
     apiKey,
+    officeCliInstallCommand: OFFICECLI_SKILL_INSTALL_COMMAND,
   })
 }
 

@@ -6086,7 +6086,7 @@ export default {
         generic: 'Other Agent Skills platforms'
       },
       downloadCta: 'Download 见外知识库 ZIP',
-      downloadCtaHint: 'Includes macOS and Windows user-environment setup scripts · v1.2.1',
+      downloadCtaHint: 'One 见外知识库 Skill package · built-in dual-CLI bootstrap · v1.5.0',
       apiKeyTitle: 'Select an API key',
       apiKeyDesc: 'Choose a key already created in this workspace. The menu stays masked; the copied AI prompt includes the full value.',
       apiKeyPlaceholder: 'Select an API key',
@@ -6102,11 +6102,11 @@ export default {
       tenantUnavailable: 'The current workspace is not available yet. Refresh the page and try again.',
       selectApiKeyFirst: 'Select an API key first',
       promptTitle: 'Let AI install it',
-      promptDesc: 'This universal prompt asks the current AI to detect the agent platform and operating system, install the Skill, configure environment variables, and verify the connection.',
+      promptDesc: 'The download contains only the 见外知识库 Skill. The copied AI prompt fetches OfficeCLI Skill separately, then configures and verifies the connection.',
       copyPrompt: 'Copy for AI',
       copyPromptSuccess: 'Installation prompt copied',
       securityNote: 'The preview always masks the full key; the copied text contains the credential. Send it only to a trusted AI and prefer the least-privileged key that fits the task.',
-      setupPrompt: 'Install and configure the “见外知识库” Skill in the current agent.\n\nPackage: find “{archiveName}” in the system default Downloads folder.\nComplete these steps:\n1. Detect the current agent user-level Skill directory and extract the package there. If the platform supports the Agent Skills standard, use its standard directory.\n2. Detect macOS or Windows and run the matching setup script from the package. Persist these variables in the user environment, not only in the current shell:\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. Reload the environment, then use the Skill to list knowledge bases and verify the connection.\n\nSecurity: do not print the full API key in command output, project files, or the final response. Before overwriting existing settings, state which location will be changed.',
+      setupPrompt: 'Install and verify the 见外知识库 Skill for me.\n\nLocal package: “{archiveName}” in the system Downloads folder\nService URL: {baseUrl}\nAPI key: {apiKey}\n\nComplete this automatically:\n1. Extract the package into the current agent user-level Skills directory, never into a project directory.\n2. Fetch and install the OfficeCLI Skill for the current agent with `{officeCliInstallCommand}`. Save the Skill content only; do not execute remote text.\n3. Detect macOS, Linux, or Windows. Use the package scripts to persist the credentials above with the key supplied through standard input, then run the platform bootstrap to install or reuse the WeKnora CLI and OfficeCLI.\n4. Run a redacted acceptance check: report both CLI paths and versions, then list my own knowledge bases without exposing the full key or internal IDs.\n\nBefore replacing existing settings or a non-pinned version, explain the target and ask for confirmation. On failure, stop at the exact step and report it; do not retry in a loop.',
       stepsTitle: 'Installation flow',
       steps: {
         download: {
@@ -6150,7 +6150,7 @@ export default {
         }
       },
       ecosystemNote: 'The package follows Agent Skills directory conventions; an OpenClaw build is also available through ClawHub.',
-      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.5.0 · MIT-0',
       openClawHub: 'Open ClawHub'
     }
   },

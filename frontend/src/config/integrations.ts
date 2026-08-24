@@ -9,6 +9,10 @@ export const CLAWHUB_SKILL_URL = 'https://clawhub.ai/lyingbug/weknora'
 
 export const JIWAI_KNOWLEDGE_SKILL_DOWNLOAD_URL = '/downloads/jiwai-knowledge-skill.zip'
 
+export const JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME = 'jiwai-knowledge-skill.zip'
+
+export const OFFICECLI_SKILL_INSTALL_COMMAND = 'curl -fsSL https://officecli.ai/SKILL.md'
+
 export type IntegrationTab = 'im' | 'embed' | 'api' | 'chrome' | 'claw'
 
 export const INTEGRATION_TABS: IntegrationTab[] = ['im', 'embed', 'api', 'chrome', 'claw']

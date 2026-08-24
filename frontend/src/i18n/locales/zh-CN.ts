@@ -279,7 +279,7 @@ export default {
         generic: '其他 Agent Skills 平台'
       },
       downloadCta: '下载见外知识库 ZIP',
-      downloadCtaHint: '包含 macOS / Windows 用户级环境配置脚本 · v1.2.1',
+      downloadCtaHint: '单一见外知识库 Skill 包 · 内置双 CLI 自举脚本 · v1.5.0',
       apiKeyTitle: '选择 API Key',
       apiKeyDesc: '选择当前空间已创建的 Key。下拉列表只显示脱敏值，复制给 AI 的提示词会包含完整值。',
       apiKeyPlaceholder: '请选择 API Key',
@@ -295,11 +295,11 @@ export default {
       tenantUnavailable: '暂时无法确定当前空间，请刷新页面后重试。',
       selectApiKeyFirst: '请先选择 API Key',
       promptTitle: '交给 AI 自动安装',
-      promptDesc: '这段通用提示会让当前 AI 自动识别 Agent 平台和操作系统，安装 Skill、配置环境变量并验证连接。',
+      promptDesc: '下载包只包含见外知识库 Skill；复制给 AI 的提示词会另行获取 OfficeCLI Skill，并完成配置与验收。',
       copyPrompt: '复制给 AI',
       copyPromptSuccess: '已复制安装配置提示',
       securityNote: '预览始终隐藏完整 Key；复制内容包含完整凭据。仅发送给可信 AI，并优先选择满足任务需要的最小权限 Key。',
-      setupPrompt: '请在当前 Agent 中安装并配置“见外知识库”Skill。\n\n安装包：请在系统默认下载目录找到“{archiveName}”。\n请完成以下操作：\n1. 自动识别当前 Agent 的用户级 Skill 目录并解压安装；若平台支持 Agent Skills 标准，沿用其标准目录。\n2. 自动识别 macOS 或 Windows，运行安装包内对应配置脚本，将以下变量写入用户级环境，而不是只在当前终端临时设置：\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. 重新加载环境后，使用该 Skill 列出知识库，验证连接。\n\n安全要求：不要在命令输出、项目文件或最终回复中显示完整 API Key；如需覆盖已有配置，先说明将修改的位置。',
+      setupPrompt: '请帮我安装并验收见外知识库 Skill。\n\n本地安装包：系统下载目录中的“{archiveName}”\n服务地址：{baseUrl}\nAPI Key：{apiKey}\n\n请自动完成：\n1. 解压到当前 Agent 的用户级 Skills 目录，不要写入项目目录。\n2. 用 `{officeCliInstallCommand}` 获取并按当前 Agent 规范安装 OfficeCLI Skill；只保存 Skill 内容，不执行远程文本。\n3. 识别 macOS、Linux 或 Windows，用安装包内脚本持久化上述凭据（Key 经标准输入），再运行平台启动器，自动安装或复用 WeKnora CLI 与 OfficeCLI。\n4. 脱敏验收：报告两个 CLI 的路径和版本，并列出我自己的知识库，不显示完整 Key 或内部 ID。\n\n若需覆盖已有配置或非锁定版本，先说明目标并征得确认；失败时停止并报告具体步骤，不要循环重试。',
       stepsTitle: '安装流程',
       steps: {
         download: {
@@ -343,7 +343,7 @@ export default {
         }
       },
       ecosystemNote: '安装包兼容 Agent Skills 目录约定，也可通过 ClawHub 获取 OpenClaw 版本。',
-      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.5.0 · MIT-0',
       openClawHub: '打开 ClawHub'
     },
     chrome: {

@@ -279,7 +279,7 @@ export default {
         generic: '기타 Agent Skills 플랫폼'
       },
       downloadCta: '见外知识库 ZIP 다운로드',
-      downloadCtaHint: 'macOS 및 Windows 사용자 환경 설정 스크립트 포함 · v1.2.1',
+      downloadCtaHint: '见外知识库 Skill 단일 패키지 · 내장 CLI bootstrap · v1.5.0',
       apiKeyTitle: 'API Key 선택',
       apiKeyDesc: '현재 공간에서 만든 Key를 선택하세요. 목록에는 마스킹된 값만 표시되고 AI용 복사 내용에는 전체 값이 포함됩니다.',
       apiKeyPlaceholder: 'API Key를 선택하세요',
@@ -295,11 +295,11 @@ export default {
       tenantUnavailable: '현재 공간을 확인할 수 없습니다. 페이지를 새로고침한 뒤 다시 시도하세요.',
       selectApiKeyFirst: '먼저 API Key를 선택하세요',
       promptTitle: 'AI로 자동 설치',
-      promptDesc: '이 범용 안내는 현재 AI가 Agent 플랫폼과 운영체제를 감지해 Skill 설치, 환경 변수 설정, 연결 확인까지 수행하게 합니다.',
+      promptDesc: '다운로드에는 见外知识库 Skill만 포함됩니다. 복사한 AI 안내가 OfficeCLI Skill을 별도로 가져와 설정과 검증을 완료합니다.',
       copyPrompt: 'AI에 전달할 내용 복사',
       copyPromptSuccess: '설치 및 설정 안내를 복사했습니다',
       securityNote: '미리보기에는 전체 Key가 항상 숨겨집니다. 복사 내용에는 전체 자격 증명이 포함되므로 신뢰할 수 있는 AI에만 보내고 최소 권한 Key를 사용하세요.',
-      setupPrompt: '현재 Agent에 “见外知识库” Skill을 설치하고 설정해 주세요.\n\n패키지: 시스템 기본 다운로드 폴더에서 “{archiveName}”을 찾으세요.\n다음을 수행하세요:\n1. 현재 Agent의 사용자 수준 Skill 디렉터리를 감지하고 패키지를 압축 해제해 설치하세요. 플랫폼이 Agent Skills 표준을 지원하면 해당 표준 디렉터리를 사용하세요.\n2. macOS 또는 Windows를 감지하고 패키지의 해당 설정 스크립트를 실행하세요. 아래 변수를 현재 셸에만 임시 적용하지 말고 사용자 환경에 영구 저장하세요:\nWEKNORA_BASE_URL="{baseUrl}"\nWEKNORA_API_KEY="{apiKey}"\n3. 환경을 다시 로드한 뒤 Skill로 지식베이스 목록을 조회해 연결을 확인하세요.\n\n보안: 명령 출력, 프로젝트 파일, 최종 응답에 전체 API Key를 표시하지 마세요. 기존 설정을 덮어쓰기 전에 수정할 위치를 먼저 설명하세요.',
+      setupPrompt: '见外知识库 Skill을 설치하고 검증해 주세요.\n\n다운로드 폴더의 패키지: {archiveName}\n서비스 URL: {baseUrl}\nAPI Key: {apiKey}\n\n1. 이 단일 패키지를 현재 Agent의 사용자 수준 Skills 디렉터리에 설치하세요.\n2. OfficeCLI Skill은 패키지에 포함되어 있지 않습니다. {officeCliInstallCommand}로 별도로 가져와 현재 Agent 규격에 맞게 설치하되, 원격 텍스트를 실행하지 마세요.\n3. 패키지의 OS별 설정 및 bootstrap 스크립트로 자격 증명을 저장하고 WeKnora CLI와 OfficeCLI를 설치하거나 재사용하세요. Key는 stdin으로 전달하세요.\n4. 두 CLI의 경로와 버전을 확인하고 내부 ID나 전체 Key 없이 내 지식 베이스를 조회하세요.\n\n기존 설정이나 다른 버전을 덮어쓰기 전에 확인을 요청하고, 실패하면 해당 단계에서 중지하세요.',
       stepsTitle: '설치 절차',
       steps: {
         download: {
@@ -343,7 +343,7 @@ export default {
         }
       },
       ecosystemNote: '패키지는 Agent Skills 디렉터리 규칙을 따르며 OpenClaw 버전은 ClawHub에서도 받을 수 있습니다.',
-      packageMeta: '见外知识库 Skill · v1.2.1 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.5.0 · MIT-0',
       openClawHub: 'ClawHub 열기'
     },
     chrome: {
