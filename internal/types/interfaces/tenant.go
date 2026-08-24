@@ -92,6 +92,7 @@ type TenantAPIKeyUpdateRequest struct {
 type TenantAPIKeyRepository interface {
 	CreateAPIKey(ctx context.Context, key *types.TenantAPIKey) error
 	GetAPIKeyByHash(ctx context.Context, hash string) (*types.TenantAPIKey, error)
+	GetAPIKey(ctx context.Context, tenantID uint64, id uint64) (*types.TenantAPIKey, error)
 	ListAPIKeys(ctx context.Context, tenantID uint64) ([]*types.TenantAPIKey, error)
 	ListPlatformAPIKeys(ctx context.Context) ([]*types.TenantAPIKey, error)
 	UpdateAPIKey(ctx context.Context, tenantID uint64, id uint64, key *types.TenantAPIKey) (*types.TenantAPIKey, error)
@@ -111,6 +112,7 @@ type TenantAPIKeyRepository interface {
 type TenantAPIKeyService interface {
 	CreateAPIKey(ctx context.Context, req TenantAPIKeyCreateRequest) (*TenantAPIKeyCreateResult, error)
 	AuthenticateAPIKey(ctx context.Context, token string) (*types.TenantAPIKey, error)
+	RevealAPIKey(ctx context.Context, tenantID uint64, id uint64) (string, error)
 	ListAPIKeys(ctx context.Context, tenantID uint64) ([]*types.TenantAPIKey, error)
 	ListPlatformAPIKeys(ctx context.Context) ([]*types.TenantAPIKey, error)
 	UpdateAPIKey(ctx context.Context, req TenantAPIKeyUpdateRequest) (*types.TenantAPIKey, error)

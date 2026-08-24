@@ -156,7 +156,7 @@ type tenantAPIKeyResponse struct {
 	ID               uint64                `json:"id"`
 	ScopeType        types.APIKeyScopeType `json:"scope_type"`
 	Name             string                `json:"name"`
-	APIKey           string                `json:"api_key"` // 仅返回掩码；完整值只存在于创建响应的 token 字段。
+	APIKey           string                `json:"api_key"` // 列表与更新响应仅返回掩码；完整值只通过创建或 Owner 主动读取响应返回。
 	FullAccess       bool                  `json:"full_access"`
 	KnowledgeBaseIDs types.StringArray     `json:"knowledge_base_ids"`
 	Capabilities     types.StringArray     `json:"capabilities"`
@@ -167,6 +167,10 @@ type tenantAPIKeyResponse struct {
 
 type tenantAPIKeyCreateResponse struct {
 	tenantAPIKeyResponse
+	Token string `json:"token"`
+}
+
+type tenantAPIKeyRevealResponse struct {
 	Token string `json:"token"`
 }
 
@@ -674,6 +678,50 @@ func (h *TenantHandler) ListAPIKeys(c *gin.Context) {
 		resp = append(resp, tenantAPIKeyForResponse(key))
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// RevealAPIKey godoc
+// @Summary      读取完整租户 API Key
+// @Description  仅供空间 Owner 在主动复制或生成安装提示词时按 Key ID 读取；响应禁止缓存，列表接口仍只返回掩码。
+// @Tags         tenants
+// @Produce      json
+// @Param        id      path      int  true  "空间 ID"
+// @Param        key_id  path      int  true  "API Key ID"
+// @Success      200     {object}  map[string]interface{}
+// @Failure      400     {object}  errors.AppError
+// @Failure      404     {object}  errors.AppError
+// @Security     Bearer
+// @Router       /tenants/{id}/api-keys/{key_id}/reveal [post]
+func (h *TenantHandler) RevealAPIKey(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || tenantID == 0 {
+		c.Error(errors.NewBadRequestError("Invalid workspace ID"))
+		return
+	}
+	keyID, err := strconv.ParseUint(c.Param("key_id"), 10, 64)
+	if err != nil || keyID == 0 {
+		c.Error(errors.NewBadRequestError("Invalid API key ID"))
+		return
+	}
+	token, err := h.apiKeyService.RevealAPIKey(ctx, tenantID, keyID)
+	if err != nil {
+		c.Error(errors.NewNotFoundError("API key not found"))
+		return
+	}
+	writeTenantAPIKeyRevealResponse(c, token)
+}
+
+// writeTenantAPIKeyRevealResponse 写出不可缓存的单次密钥读取响应。
+// 完整密钥不得进入列表、日志或错误详情，只在这个显式响应的 token 字段中返回。
+func writeTenantAPIKeyRevealResponse(c *gin.Context, token string) {
+	c.Header("Cache-Control", "no-store, private")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    tenantAPIKeyRevealResponse{Token: token},
+	})
 }
 
 func (h *TenantHandler) CreateAPIKey(c *gin.Context) {

@@ -418,6 +418,7 @@ export default {
       retry: '다시 시도',
       copy: '복사',
       copySuccess: '복사되었습니다',
+      revealApiKeyFailed: '전체 API Key를 읽을 수 없습니다. 현재 계정이 여전히 워크스페이스 Owner인지 확인한 후 다시 시도하세요.',
       baseUrl: 'API Base URL',
       baseUrlDesc: 'REST API 경로와 함께 사용하세요.',
       apiKeys: 'API Keys',

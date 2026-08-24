@@ -418,6 +418,7 @@ export default {
       retry: '重试',
       copy: '复制',
       copySuccess: '已复制',
+      revealApiKeyFailed: '无法读取完整 API Key，请确认当前账号仍是空间 Owner 后重试',
       baseUrl: 'API 地址',
       baseUrlDesc: '与 REST API 路径拼接使用。',
       apiKeys: 'API Keys',

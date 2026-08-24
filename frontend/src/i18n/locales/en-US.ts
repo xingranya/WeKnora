@@ -5854,6 +5854,7 @@ export default {
       retry: 'Retry',
       copy: 'Copy',
       copySuccess: 'Copied',
+      revealApiKeyFailed: 'Unable to read the complete API key. Confirm that this account is still a workspace Owner and try again.',
       baseUrl: 'API Base URL',
       baseUrlDesc: 'Use this base URL with REST API paths.',
       apiKeys: 'API Keys',

@@ -102,6 +102,25 @@ func (s *tenantAPIKeyService) AuthenticateAPIKey(ctx context.Context, token stri
 	return key, nil
 }
 
+// RevealAPIKey 为已经通过空间 Owner 权限校验的读取请求返回完整密钥。
+// 列表接口继续只返回掩码；只有用户主动复制或生成安装提示词时才调用此方法。
+func (s *tenantAPIKeyService) RevealAPIKey(
+	ctx context.Context, tenantID uint64, id uint64,
+) (string, error) {
+	if tenantID == 0 || id == 0 {
+		return "", apprepo.ErrTenantAPIKeyNotFound
+	}
+	key, err := s.repo.GetAPIKey(ctx, tenantID, id)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(key.APIKey)
+	if token == "" {
+		return "", errors.New("api key token is unavailable")
+	}
+	return token, nil
+}
+
 // touchAPIKeyLastUsedAsync persists last_used_at at most once per key per
 // apiKeyLastUsedMinInterval. The write runs in a detached goroutine so auth
 // latency is not tied to an UPDATE on the hot path.

@@ -42,6 +42,13 @@ func TestTenantAPIKeyRepositoryEncryptsAndHidesAPIKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(rawJSON), rawAPIKey)
 	require.NotContains(t, string(rawJSON), `"api_key"`)
+
+	// 主动复制路径必须经过租户和 Key ID 双重约束，并由 AfterFind 解密。
+	revealed, err := repo.GetAPIKey(context.Background(), tenantID, key.ID)
+	require.NoError(t, err)
+	require.Equal(t, rawAPIKey, revealed.APIKey)
+	_, err = repo.GetAPIKey(context.Background(), tenantID+1, key.ID)
+	require.ErrorIs(t, err, ErrTenantAPIKeyNotFound)
 }
 
 func TestTenantAPIKeyRepositoryPersistsUTCExpiry(t *testing.T) {

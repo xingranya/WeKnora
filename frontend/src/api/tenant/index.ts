@@ -111,6 +111,10 @@ export interface CreatedTenantAPIKey extends TenantAPIKey {
   token?: string
 }
 
+export interface RevealedTenantAPIKey {
+  token: string
+}
+
 export interface CreateTenantAPIKeyPayload {
   name: string
   full_access?: boolean
@@ -217,6 +221,25 @@ export async function listTenantAPIKeys(
     return {
       success: false,
       message: error.message || t('error.tenant.listApiKeysFailed'),
+    }
+  }
+}
+
+/**
+ * 在空间 Owner 主动复制时读取一个完整 API Key。
+ * 列表接口继续只返回掩码；该 POST 响应由服务端设置 no-store，调用方不得写入持久化状态。
+ */
+export async function revealTenantAPIKey(
+  tenantId: number,
+  keyId: number,
+): Promise<{ success: boolean; data?: RevealedTenantAPIKey; message?: string }> {
+  try {
+    const response = await post(`/api/v1/tenants/${tenantId}/api-keys/${keyId}/reveal`, {})
+    return response as unknown as { success: boolean; data?: RevealedTenantAPIKey; message?: string }
+  } catch (error: any) {
+    return {
+      success: false,
+      message: error.message || t('integrations.api.revealApiKeyFailed'),
     }
   }
 }

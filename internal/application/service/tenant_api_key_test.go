@@ -69,6 +69,20 @@ func (r *fakeTenantAPIKeyRepo) GetAPIKeyByHash(_ context.Context, hash string) (
 	return &cp, nil
 }
 
+func (r *fakeTenantAPIKeyRepo) GetAPIKey(
+	_ context.Context, tenantID uint64, id uint64,
+) (*types.TenantAPIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, key := range r.byHash {
+		if key.ID == id && key.TenantIDValue() == tenantID && !key.IsPlatform() && key.RevokedAt == nil {
+			cp := *key
+			return &cp, nil
+		}
+	}
+	return nil, apprepo.ErrTenantAPIKeyNotFound
+}
+
 func (r *fakeTenantAPIKeyRepo) ListAPIKeys(_ context.Context, tenantID uint64) ([]*types.TenantAPIKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -80,6 +94,38 @@ func (r *fakeTenantAPIKeyRepo) ListAPIKeys(_ context.Context, tenantID uint64) (
 		}
 	}
 	return out, nil
+}
+
+// TestTenantAPIKeyServiceRevealAPIKeyRespectsTenantBoundary 验证完整密钥只按租户和 Key ID 返回。
+// 跨租户与已撤销 Key 都必须表现为不存在，防止复制接口泄露其他空间凭据。
+func TestTenantAPIKeyServiceRevealAPIKeyRespectsTenantBoundary(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeTenantAPIKeyRepo()
+	svc := NewTenantAPIKeyService(repo)
+	created, err := svc.CreateAPIKey(ctx, interfaces.TenantAPIKeyCreateRequest{
+		TenantID: 42,
+		Name:     "copyable",
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIKey returned error: %v", err)
+	}
+
+	token, err := svc.RevealAPIKey(ctx, 42, created.APIKey.ID)
+	if err != nil {
+		t.Fatalf("RevealAPIKey returned error: %v", err)
+	}
+	if token != created.Token {
+		t.Fatalf("revealed token = %q, want created token", token)
+	}
+	if _, err := svc.RevealAPIKey(ctx, 43, created.APIKey.ID); !errors.Is(err, apprepo.ErrTenantAPIKeyNotFound) {
+		t.Fatalf("cross-tenant RevealAPIKey error = %v, want not found", err)
+	}
+	if err := svc.RevokeAPIKey(ctx, 42, created.APIKey.ID); err != nil {
+		t.Fatalf("RevokeAPIKey returned error: %v", err)
+	}
+	if _, err := svc.RevealAPIKey(ctx, 42, created.APIKey.ID); !errors.Is(err, apprepo.ErrTenantAPIKeyNotFound) {
+		t.Fatalf("revoked RevealAPIKey error = %v, want not found", err)
+	}
 }
 
 func (r *fakeTenantAPIKeyRepo) ListPlatformAPIKeys(_ context.Context) ([]*types.TenantAPIKey, error) {

@@ -2,11 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,4 +54,20 @@ func TestTenantAPIKeyEntityNeverSerializesSecret(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(body), rawToken)
 	require.NotContains(t, string(body), `"api_key"`)
+}
+
+func TestTenantAPIKeyRevealResponseReturnsFullTokenWithoutCaching(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	rawToken := "sk-tenant-reveal-secret-1234567890"
+
+	writeTenantAPIKeyRevealResponse(ctx, rawToken)
+
+	require.Equal(t, 200, recorder.Code)
+	require.Equal(t, "no-store, private", recorder.Header().Get("Cache-Control"))
+	require.Equal(t, "no-cache", recorder.Header().Get("Pragma"))
+	require.Equal(t, "0", recorder.Header().Get("Expires"))
+	require.Equal(t, 1, strings.Count(recorder.Body.String(), rawToken))
+	require.NotContains(t, recorder.Body.String(), maskManagedAPIKey(rawToken))
 }

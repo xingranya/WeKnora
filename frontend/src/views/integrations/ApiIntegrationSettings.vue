@@ -168,8 +168,10 @@
                           <t-button
                             shape="square"
                             variant="text"
+                            :loading="revealingAPIKeyId === key.id"
+                            :disabled="revealingAPIKeyId !== null"
                             :title="$t('integrations.api.copy')"
-                            @click="copy(key.api_key)"
+                            @click="copyTenantAPIKey(key)"
                           >
                             <t-icon name="file-copy" />
                           </t-button>
@@ -684,6 +686,7 @@ import {
   createAPIPrincipalTestToken,
   getAPIPrincipalConfig,
   listTenantAPIKeys,
+  revealTenantAPIKey,
   updateTenantAPIKey,
   updateAPIPrincipalConfig,
   type APIPrincipalConfig,
@@ -701,6 +704,7 @@ import {
   type ApiKeyCapabilityGroup,
 } from '@/config/apiKeyCapabilities'
 import { normalizeAPIKeyKnowledgeBaseIDs } from './apiKeyScope'
+import { extractRevealedAPIKeyToken } from './apiKeyReveal'
 import { consumeApiPlaygroundSSE } from './apiPlaygroundSSE'
 
 const { t } = useI18n()
@@ -716,6 +720,7 @@ const apiKey = ref('')
 const config = ref<APIPrincipalConfig | null>(null)
 const apiKeys = ref<TenantAPIKey[]>([])
 const apiKeysLoading = ref(false)
+const revealingAPIKeyId = ref<number | null>(null)
 const apiKeyDialogVisible = ref(false)
 const apiKeyCreating = ref(false)
 const apiKeyScopeDialogVisible = ref(false)
@@ -1138,6 +1143,8 @@ async function load() {
       throw new Error(t('integrations.api.loadFailed'))
     }
     tenantId.value = Number(tenant.id)
+    // 切换空间或重试加载时清掉页面内存中的明文，避免沿用其他空间曾即时读取的 Key。
+    apiKey.value = ''
     await Promise.all([
       loadAPIKeys(),
       loadKnowledgeBaseOptions(),
@@ -1173,9 +1180,6 @@ async function loadAPIKeys() {
       throw new Error(resp.message || t('integrations.api.loadApiKeysFailed'))
     }
     apiKeys.value = resp.data || []
-    if (!apiKey.value && apiKeys.value.length > 0) {
-      apiKey.value = apiKeys.value[0].api_key || ''
-    }
   } catch (err: any) {
     MessagePlugin.error(err?.message || t('integrations.api.loadApiKeysFailed'))
   } finally {
@@ -1219,8 +1223,16 @@ function ensurePlaygroundAgent() {
   playground.agent_id = smartReasoning?.id || agents.value[0]?.id || ''
 }
 
-function openPlaygroundDrawer() {
+async function openPlaygroundDrawer() {
   ensurePlaygroundAgent()
+  const key = apiKeys.value[0]
+  if (!apiKey.value && key) {
+    try {
+      apiKey.value = await loadRevealedAPIKey(key)
+    } catch (err: any) {
+      MessagePlugin.error(err?.message || t('integrations.api.revealApiKeyFailed'))
+    }
+  }
   playgroundDrawerVisible.value = true
 }
 
@@ -1310,6 +1322,28 @@ async function saveIfNeeded(options: { showSuccess?: boolean } = {}) {
 
 async function copy(text: string) {
   await copyWithToast(text, 'integrations.api.copySuccess')
+}
+
+async function loadRevealedAPIKey(key: TenantAPIKey) {
+  const response = await revealTenantAPIKey(tenantId.value, key.id)
+  const token = extractRevealedAPIKeyToken(response)
+  if (!token) {
+    throw new Error(response.message || t('integrations.api.revealApiKeyFailed'))
+  }
+  return token
+}
+
+async function copyTenantAPIKey(key: TenantAPIKey) {
+  if (revealingAPIKeyId.value !== null) return
+  revealingAPIKeyId.value = key.id
+  try {
+    const token = await loadRevealedAPIKey(key)
+    await copyWithToast(token, 'integrations.api.copySuccess')
+  } catch (err: any) {
+    MessagePlugin.error(err?.message || t('integrations.api.revealApiKeyFailed'))
+  } finally {
+    revealingAPIKeyId.value = null
+  }
 }
 
 async function tryLoadWailsApiBaseURL() {
@@ -1464,11 +1498,11 @@ async function createScopedAPIKey() {
       // Capabilities only matter below full access; full access already covers them all.
       capabilities: apiKeyFullAccessEnabled.value ? [] : selectedCapabilities(),
     })
-    if (!resp.success || !resp.data?.api_key) {
+    if (!resp.success || !resp.data?.token) {
       throw new Error(resp.message || t('integrations.api.createApiKeyFailed'))
     }
     apiKeyDialogVisible.value = false
-    apiKey.value = resp.data.api_key
+    apiKey.value = resp.data.token
     MessagePlugin.success(t('integrations.api.apiKeyCreated'))
     await loadAPIKeys()
   } catch (err: any) {

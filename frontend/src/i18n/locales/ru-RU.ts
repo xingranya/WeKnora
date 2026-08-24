@@ -418,6 +418,7 @@ export default {
       retry: 'Повторить',
       copy: 'Копировать',
       copySuccess: 'Скопировано',
+      revealApiKeyFailed: 'Не удалось получить полный API Key. Убедитесь, что аккаунт всё ещё является владельцем рабочего пространства, и повторите попытку.',
       baseUrl: 'Базовый URL API',
       baseUrlDesc: 'Используйте с путями REST API.',
       apiKeys: 'API Keys',

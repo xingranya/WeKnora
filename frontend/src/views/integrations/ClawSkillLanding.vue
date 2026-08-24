@@ -88,7 +88,8 @@
               size="small"
               variant="text"
               shape="square"
-              :disabled="!selectedAPIKey"
+              :disabled="!selectedAPIKey || copyingSetupPrompt"
+              :loading="copyingSetupPrompt"
               :title="$t('integrations.claw.copyPrompt')"
               @click="copySetupPrompt"
             >
@@ -101,7 +102,8 @@
           </div>
           <t-button
             theme="primary"
-            :disabled="!selectedAPIKey"
+            :disabled="!selectedAPIKey || copyingSetupPrompt"
+            :loading="copyingSetupPrompt"
             class="copy-prompt-button"
             @click="copySetupPrompt"
           >
@@ -167,7 +169,7 @@ import { computed, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { listTenantAPIKeys, type TenantAPIKey } from '@/api/tenant'
+import { listTenantAPIKeys, revealTenantAPIKey, type TenantAPIKey } from '@/api/tenant'
 import {
   CLAWHUB_SKILL_URL,
   JIWAI_KNOWLEDGE_SKILL_ARCHIVE_NAME,
@@ -180,6 +182,7 @@ import { useUIStore } from '@/stores/ui'
 import { copyWithToast } from '@/utils/clipboard'
 import IntegrationExternalCta from './IntegrationExternalCta.vue'
 import IntegrationLandingLayout from './IntegrationLandingLayout.vue'
+import { extractRevealedAPIKeyToken } from './apiKeyReveal'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -204,6 +207,7 @@ const apiKeysLoading = ref(false)
 const apiKeysLoaded = ref(false)
 const apiKeysError = ref('')
 const selectedApiKeyId = ref<number>()
+const copyingSetupPrompt = ref(false)
 let apiKeyRequestSerial = 0
 
 const activeTenantId = computed(() => Number(authStore.effectiveTenantId || 0))
@@ -219,11 +223,6 @@ const apiKeyOptions = computed(() => availableAPIKeys.value.map((key) => ({
   value: key.id,
   label: `${key.name} · ${maskAPIKey(key.api_key)}`,
 })))
-
-const setupPrompt = computed(() => {
-  if (!selectedAPIKey.value) return ''
-  return buildSetupPrompt(selectedAPIKey.value.api_key)
-})
 
 const setupPromptPreview = computed(() => {
   const previewKey = selectedAPIKey.value
@@ -305,11 +304,29 @@ function openApiSettings() {
 }
 
 async function copySetupPrompt() {
-  if (!setupPrompt.value) {
+  const key = selectedAPIKey.value
+  const tenantId = activeTenantId.value
+  if (!key || !tenantId) {
     MessagePlugin.warning(t('integrations.claw.selectApiKeyFirst'))
     return
   }
-  await copyWithToast(setupPrompt.value, 'integrations.claw.copyPromptSuccess')
+  if (copyingSetupPrompt.value) return
+
+  copyingSetupPrompt.value = true
+  try {
+    const response = await revealTenantAPIKey(tenantId, key.id)
+    const token = extractRevealedAPIKeyToken(response)
+    if (!token) {
+      throw new Error(response.message || t('integrations.api.revealApiKeyFailed'))
+    }
+    await copyWithToast(buildSetupPrompt(token), 'integrations.claw.copyPromptSuccess')
+  } catch (error: unknown) {
+    MessagePlugin.error(
+      error instanceof Error ? error.message : t('integrations.api.revealApiKeyFailed'),
+    )
+  } finally {
+    copyingSetupPrompt.value = false
+  }
 }
 
 watch(activeTenantId, loadAPIKeys, { immediate: true })

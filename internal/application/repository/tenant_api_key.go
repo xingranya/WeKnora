@@ -38,6 +38,25 @@ func (r *tenantAPIKeyRepository) GetAPIKeyByHash(ctx context.Context, hash strin
 	return &key, nil
 }
 
+// GetAPIKey 按租户和 Key ID 读取一个未撤销的租户级 API Key。
+// 查询必须同时匹配租户、类型和 ID，避免密钥读取接口跨空间返回凭据。
+func (r *tenantAPIKeyRepository) GetAPIKey(
+	ctx context.Context, tenantID uint64, id uint64,
+) (*types.TenantAPIKey, error) {
+	var key types.TenantAPIKey
+	err := r.db.WithContext(ctx).
+		Where("id = ? AND tenant_id = ? AND scope_type = ? AND revoked_at IS NULL",
+			id, tenantID, types.APIKeyScopeTenant).
+		First(&key).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrTenantAPIKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
 func (r *tenantAPIKeyRepository) ListAPIKeys(ctx context.Context, tenantID uint64) ([]*types.TenantAPIKey, error) {
 	var keys []*types.TenantAPIKey
 	err := r.db.WithContext(ctx).
