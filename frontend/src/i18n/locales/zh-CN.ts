@@ -279,7 +279,7 @@ export default {
         generic: '其他 Agent Skills 平台'
       },
       downloadCta: '下载见外知识库 ZIP',
-      downloadCtaHint: '单一见外知识库 Skill 包 · 内置双 CLI 自举脚本 · v1.6.1',
+      downloadCtaHint: '单一见外知识库 Skill 包 · 内置双 CLI 自举脚本 · v1.6.2',
       apiKeyTitle: '选择 API Key',
       apiKeyDesc: '选择当前空间已创建的 Key。下拉列表只显示脱敏值，复制给 AI 的提示词会包含完整值。',
       apiKeyPlaceholder: '请选择 API Key',
@@ -343,7 +343,7 @@ export default {
         }
       },
       ecosystemNote: '安装包兼容 Agent Skills 目录约定，也可通过 ClawHub 获取 OpenClaw 版本。',
-      packageMeta: '见外知识库 Skill · v1.6.1 · MIT-0',
+      packageMeta: '见外知识库 Skill · v1.6.2 · MIT-0',
       openClawHub: '打开 ClawHub'
     },
     chrome: {
