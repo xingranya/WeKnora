@@ -344,32 +344,72 @@ func (r *authTokenRepository) RotateRefreshToken(
 		return ErrTokenNotFound
 	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx.Model(&types.AuthToken{}).
-			Where("user_id = ? AND token_type = ? AND is_revoked = ? AND expires_at > ?",
-				expectedUserID, "refresh_token", false, time.Now().UTC())
-		if r.hasTokenFingerprintColumn {
-			query = query.Where(
-				"(token = ? OR token_fingerprint = ?)",
-				oldTokenValue, authTokenFingerprint(oldTokenValue),
-			)
-		} else {
-			query = query.Where("token = ?", oldTokenValue)
-		}
-		result := query.Updates(map[string]any{
-			"is_revoked": true,
-			"updated_at": time.Now().UTC(),
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return ErrTokenNotFound
-		}
-		if err := r.createTokenWithDB(tx, accessToken); err != nil {
+		return r.rotateRefreshTokenWithDB(tx, oldTokenValue, expectedUserID, accessToken, refreshToken)
+	})
+}
+
+func (r *authTokenRepository) rotateRefreshTokenWithDB(tx *gorm.DB, oldTokenValue, expectedUserID string,
+	accessToken, refreshToken *types.AuthToken) error {
+	query := tx.Model(&types.AuthToken{}).
+		Where("user_id = ? AND token_type = ? AND is_revoked = ? AND expires_at > ?",
+			expectedUserID, "refresh_token", false, time.Now().UTC())
+	if r.hasTokenFingerprintColumn {
+		query = query.Where(
+			"(token = ? OR token_fingerprint = ?)",
+			oldTokenValue, authTokenFingerprint(oldTokenValue),
+		)
+	} else {
+		query = query.Where("token = ?", oldTokenValue)
+	}
+	result := query.Updates(map[string]any{
+		"is_revoked": true,
+		"updated_at": time.Now().UTC(),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrTokenNotFound
+	}
+	if err := r.createTokenWithDB(tx, accessToken); err != nil {
+		return err
+	}
+	return r.createTokenWithDB(tx, refreshToken)
+}
+
+// SwitchTenantSession 原子提交身份轮换和工作区偏好，任一写入失败均回滚。
+func (r *authTokenRepository) SwitchTenantSession(ctx context.Context, userID string, tenantID uint64,
+	oldRefreshToken string, accessToken, refreshToken *types.AuthToken) (types.UserPreferences, error) {
+	var preferences types.UserPreferences
+	if userID == "" || tenantID == 0 || accessToken == nil || refreshToken == nil ||
+		accessToken.UserID != userID || refreshToken.UserID != userID {
+		return preferences, errors.New("workspace session identity is required")
+	}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user types.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", userID).First(&user).Error; err != nil {
 			return err
 		}
-		return r.createTokenWithDB(tx, refreshToken)
+		if strings.TrimSpace(oldRefreshToken) != "" {
+			if err := r.rotateRefreshTokenWithDB(tx, oldRefreshToken, userID, accessToken, refreshToken); err != nil {
+				return err
+			}
+		} else {
+			if err := r.createTokenWithDB(tx, accessToken); err != nil {
+				return err
+			}
+			if err := r.createTokenWithDB(tx, refreshToken); err != nil {
+				return err
+			}
+		}
+		preferences = user.Preferences
+		preferences.LastActiveTenantID = &tenantID
+		return tx.Model(&user).Update("preferences", preferences).Error
 	})
+	if err != nil {
+		return types.UserPreferences{}, err
+	}
+	return preferences, nil
 }
 
 // GetTokenByValue 优先使用原始令牌的 SHA-256 指纹查询。
@@ -411,6 +451,18 @@ func (r *authTokenRepository) GetTokenByValue(ctx context.Context, tokenValue st
 func authTokenFingerprint(tokenValue string) string {
 	sum := sha256.Sum256([]byte(tokenValue))
 	return hex.EncodeToString(sum[:])
+}
+
+// GetTokenByID gets a token by its primary key
+func (r *authTokenRepository) GetTokenByID(ctx context.Context, id string) (*types.AuthToken, error) {
+	var token types.AuthToken
+	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTokenNotFound
+		}
+		return nil, err
+	}
+	return &token, nil
 }
 
 // GetTokensByUserID gets all tokens for a user

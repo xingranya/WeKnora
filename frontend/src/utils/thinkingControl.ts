@@ -80,6 +80,7 @@ export function defaultThinkingControl(
         ? 'reasoning_effort'
         : 'chat_template_kwargs'
     case 'nvidia':
+    case 'litellm':
       return 'chat_template_kwargs'
     case 'volcengine':
       return 'thinking_type'

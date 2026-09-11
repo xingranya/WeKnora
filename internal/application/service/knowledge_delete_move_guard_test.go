@@ -7,7 +7,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type movingKnowledgeSingleDeleteRepo struct {
@@ -61,17 +60,18 @@ func TestDeleteKnowledgeStopsBeforeSideEffectsWhenMoveOwnsClaim(t *testing.T) {
 
 	err := svc.DeleteKnowledge(ctx, "knowledge-moving-single-delete")
 
-	require.ErrorIs(t, err, types.ErrKnowledgeMoveInProgress)
+	requireConflictAppError(t, err)
 	assert.False(t, repo.updateCalled)
 }
 
 func TestDeleteKnowledgeListStopsBeforeSideEffectsWhenMoveOwnsClaim(t *testing.T) {
 	repo := &movingKnowledgeSingleDeleteRepo{}
 	svc := &knowledgeService{repo: repo}
-	ctx := context.WithValue(context.Background(), types.TenantInfoContextKey, &types.Tenant{ID: 1})
+	ctx := types.WithExecutionTenant(context.Background(), 1)
+	ctx = context.WithValue(ctx, types.TenantInfoContextKey, &types.Tenant{ID: 1})
 
 	err := svc.DeleteKnowledgeList(ctx, []string{"knowledge-moving-single-delete"})
 
-	require.ErrorIs(t, err, types.ErrKnowledgeMoveInProgress)
+	requireConflictAppError(t, err)
 	assert.False(t, repo.updateCalled)
 }

@@ -90,6 +90,9 @@ func (s *chunkService) GetRepository() interfaces.ChunkRepository {
 // Returns:
 //   - error: Any error encountered during chunk creation
 func (s *chunkService) CreateChunks(ctx context.Context, chunks []*types.Chunk) error {
+	if err := s.validateChunkWrites(ctx, chunks, true); err != nil {
+		return err
+	}
 	err := s.chunkRepository.CreateChunks(ctx, chunks)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
@@ -221,6 +224,9 @@ func (s *chunkService) ListPagedChunksByKnowledgeID(ctx context.Context,
 //
 // This method handles the actual update logic for a chunk, including updating the vector database representation
 func (s *chunkService) UpdateChunk(ctx context.Context, chunk *types.Chunk) error {
+	if err := s.validateChunkWrites(ctx, []*types.Chunk{chunk}, false); err != nil {
+		return err
+	}
 	logger.Infof(ctx, "Updating chunk, ID: %s, knowledge ID: %s", chunk.ID, chunk.KnowledgeID)
 
 	// Update the chunk in the repository
@@ -239,6 +245,9 @@ func (s *chunkService) UpdateChunk(ctx context.Context, chunk *types.Chunk) erro
 
 // UpdateChunks updates chunks in batch
 func (s *chunkService) UpdateChunks(ctx context.Context, chunks []*types.Chunk) error {
+	if err := s.validateChunkWrites(ctx, chunks, false); err != nil {
+		return err
+	}
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -266,6 +275,9 @@ func (s *chunkService) UpdateChunks(ctx context.Context, chunks []*types.Chunk) 
 // Returns:
 //   - error: Any error encountered during deletion
 func (s *chunkService) DeleteChunk(ctx context.Context, id string) error {
+	if _, err := s.writableChunk(ctx, id); err != nil {
+		return err
+	}
 	tenantID := types.MustTenantIDFromContext(ctx)
 	err := s.chunkRepository.DeleteChunk(ctx, tenantID, id)
 	if err != nil {
@@ -293,10 +305,15 @@ func (s *chunkService) DeleteChunks(ctx context.Context, ids []string) error {
 	logger.Info(ctx, "Start deleting chunks in batch")
 	logger.Infof(ctx, "Deleting %d chunks", len(ids))
 
+	checkedIDs, err := s.writableChunkIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	ids = checkedIDs
 	tenantID := types.MustTenantIDFromContext(ctx)
 	logger.Infof(ctx, "Tenant ID: %d", tenantID)
 
-	err := s.chunkRepository.DeleteChunks(ctx, tenantID, ids)
+	err = s.chunkRepository.DeleteChunks(ctx, tenantID, ids)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"chunk_ids": ids,
@@ -318,6 +335,9 @@ func (s *chunkService) DeleteChunks(ctx context.Context, ids []string) error {
 // Returns:
 //   - error: Any error encountered during bulk deletion
 func (s *chunkService) DeleteChunksByKnowledgeID(ctx context.Context, knowledgeID string) error {
+	if _, err := loadKnowledgeWriteBatch(ctx, s.knowledgeRepo, s.kbRepository, []string{knowledgeID}); err != nil {
+		return err
+	}
 	logger.Info(ctx, "Start deleting all chunks by knowledge ID")
 	logger.Infof(ctx, "Knowledge ID: %s", knowledgeID)
 
@@ -338,6 +358,9 @@ func (s *chunkService) DeleteChunksByKnowledgeID(ctx context.Context, knowledgeI
 }
 
 func (s *chunkService) DeleteByKnowledgeList(ctx context.Context, ids []string) error {
+	if _, err := loadKnowledgeWriteBatch(ctx, s.knowledgeRepo, s.kbRepository, ids); err != nil {
+		return err
+	}
 	logger.Info(ctx, "Start deleting all chunks by knowledge IDs")
 	logger.Infof(ctx, "Knowledge IDs: %v", ids)
 
@@ -386,11 +409,11 @@ func (s *chunkService) ListChunkByParentID(
 func (s *chunkService) UpdateDocumentChunk(
 	ctx context.Context, chunkID string, content *string, isEnabled *bool, expectedRevision *int,
 ) (*types.Chunk, error) {
-	tenantID := types.MustTenantIDFromContext(ctx)
-	current, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	current, err := s.writableChunk(ctx, chunkID)
 	if err != nil {
 		return nil, err
 	}
+	tenantID := current.TenantID
 	lockIDs := []string{chunkID}
 	if current.ParentChunkID != "" {
 		lockIDs = append(lockIDs, current.ParentChunkID)
@@ -416,13 +439,15 @@ func (s *chunkService) UpdateDocumentChunk(
 func (s *chunkService) updateDocumentChunkLocked(
 	ctx context.Context, chunkID string, content *string, isEnabled *bool, expectedRevision *int,
 ) (*types.Chunk, error) {
-	tenantID := types.MustTenantIDFromContext(ctx)
-	chunk, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	chunk, err := s.writableChunk(ctx, chunkID)
 	if err != nil {
 		return nil, err
 	}
 	if chunk.ChunkType != types.ChunkTypeText {
 		return nil, fmt.Errorf("only text chunks can be edited")
+	}
+	if err := s.validateDocumentChunkRelations(ctx, chunk); err != nil {
+		return nil, err
 	}
 	if expectedRevision != nil && *expectedRevision != chunk.ContentRevision {
 		return nil, ErrChunkRevisionConflict
@@ -515,7 +540,7 @@ func (s *chunkService) updateDocumentChunkLocked(
 		}
 	}
 	if bodyChanged || newEnabled != revision.IsEnabled {
-		knowledge, getErr := s.knowledgeRepo.GetKnowledgeByID(ctx, tenantID, chunk.KnowledgeID)
+		knowledge, getErr := s.knowledgeRepo.GetKnowledgeByID(ctx, chunk.TenantID, chunk.KnowledgeID)
 		if getErr == nil {
 			if err := enqueueSummaryRefresh(
 				ctx, s.knowledgeRepo, s.task, s.kbRepository, s.spanTracker, knowledge,
@@ -775,7 +800,7 @@ func (s *chunkService) upsertGeneratedQuestionLocked(
 	if question == "" {
 		return nil, fmt.Errorf("question cannot be empty")
 	}
-	chunk, err := s.chunkRepository.GetChunkByID(ctx, types.MustTenantIDFromContext(ctx), chunkID)
+	chunk, err := s.writableChunk(ctx, chunkID)
 	if err != nil {
 		return nil, err
 	}
@@ -846,7 +871,7 @@ func (s *chunkService) deleteGeneratedQuestionLocked(ctx context.Context, chunkI
 	tenantID := types.MustTenantIDFromContext(ctx)
 
 	// 1. Get the chunk
-	chunk, err := s.chunkRepository.GetChunkByID(ctx, tenantID, chunkID)
+	chunk, err := s.writableChunk(ctx, chunkID)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"chunk_id":  chunkID,

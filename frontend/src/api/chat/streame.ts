@@ -7,6 +7,12 @@ import {
   sanitizeStreamRequestBody,
   type StreamRequestMeta,
 } from '@/utils/chatRequestDebug';
+import {
+  StreamAuthError,
+  isStreamAuthError,
+  refreshAccessTokenShared,
+  runStreamWithAuthRetry,
+} from '@/utils/authRefresh';
 
 const MAX_ERROR_BODY_BYTES = 16 * 1024;
 const MAX_ERROR_MESSAGE_CHARS = 2048;
@@ -133,7 +139,7 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
   }
 
   // 启动流式请求
-  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; agent_enabled?: boolean; agent_id?: string; agent_source_tenant_id?: string | number; web_search_enabled?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; skill_names?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; images?: Array<{data: string}>; attachment_uploads?: Array<{data: string; file_name: string; file_size: number}>; attachment_ids?: string[]; suggestion_attribution?: { suggestion_set_id: string; question_id: string }; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
+  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; agent_enabled?: boolean; agent_id?: string; agent_source_tenant_id?: string | number; web_search_enabled?: boolean; local_browser_enabled?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; skill_names?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string; kb_id?: string; kb_name?: string; service_id?: string; skill_name?: string}>; images?: Array<{data: string}>; attachment_uploads?: Array<{data: string; file_name: string; file_size: number}>; attachment_ids?: string[]; suggestion_attribution?: { suggestion_set_id: string; question_id: string }; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
     const myGeneration = ++streamGeneration
     activeController?.abort()
     const requestController = new AbortController()
@@ -207,6 +213,10 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
       if (params.web_search_enabled !== undefined) {
         postBody.web_search_enabled = params.web_search_enabled;
       }
+      // Preserve the explicit browser choice when rebuilding the HTTP body.
+      if (params.local_browser_enabled !== undefined) {
+        postBody.local_browser_enabled = params.local_browser_enabled;
+      }
       // Include summary_model_id if provided (for non-Agent mode)
       if (params.summary_model_id) {
         postBody.summary_model_id = params.summary_model_id;
@@ -249,11 +259,12 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
         sentAt: Date.now(),
       };
       
-      await requestEventSource(url, {
+      // 握手 401 时刷新凭据并重试一次；保留本次流的取消与 generation 边界。
+      const runStream = (authToken: string) => requestEventSource(url, {
         method: params.method,
         headers: {
           "Content-Type": "application/json",
-          "Authorization": embedToken ? `Embed ${embedToken}` : `Bearer ${token}`,
+          "Authorization": embedToken ? `Embed ${embedToken}` : `Bearer ${authToken}`,
           "Accept-Language": i18n.global.locale?.value || localStorage.getItem('locale') || 'zh-CN',
           "X-Request-ID": requestID,
           ...(!embedToken && tenantIdHeader ? { "X-Tenant-ID": tenantIdHeader } : {}),
@@ -269,6 +280,7 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
 
         onopen: async (res) => {
           if (myGeneration !== streamGeneration || requestController.signal.aborted) return;
+          if (res.status === 401) throw new StreamAuthError(res.status);
           if (!res.ok) throw new Error(await buildStreamHTTPErrorMessage(res));
           console.log(`[TTFB] response:headers request_id=${requestID} elapsed_ms=${(performance.now() - sentAt).toFixed(1)}`);
           isLoading.value = false;
@@ -305,6 +317,7 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
 
         onerror: (err) => {
           if (myGeneration !== streamGeneration || requestController.signal.aborted) return;
+          if (isStreamAuthError(err)) throw err;
           throw err instanceof Error ? err : new Error(String(err));
         },
 
@@ -313,6 +326,20 @@ export function useStream(dependencies: UseStreamDependencies = {}) {
           if (!terminalReceived) throw new Error(i18n.global.t('error.streamFailed'));
           finishGeneration(myGeneration, false);
         },
+      });
+
+      await runStreamWithAuthRetry({
+        run: runStream,
+        initialToken: token,
+        isEmbed: Boolean(embedToken),
+        isCurrent: () => myGeneration === streamGeneration && !requestController.signal.aborted,
+        refreshAccessToken: () => refreshAccessTokenShared({
+          messages: {
+            pleaseRelogin: i18n.global.t('error.pleaseRelogin'),
+            tokenRefreshFailed: i18n.global.t('error.tokenRefreshFailed'),
+          },
+        }),
+        reloginMessage: i18n.global.t('error.pleaseRelogin'),
       });
 
       if (myGeneration === streamGeneration && !requestController.signal.aborted) {

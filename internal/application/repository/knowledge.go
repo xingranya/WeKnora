@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -136,6 +138,7 @@ func NewKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeRepository {
 
 // CreateKnowledge creates knowledge
 func (r *knowledgeRepository) CreateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
+	knowledge.ErrorMessage = common.CleanInvalidUTF8(knowledge.ErrorMessage)
 	err := r.db.WithContext(ctx).Create(knowledge).Error
 	return err
 }
@@ -523,6 +526,7 @@ func (r *knowledgeRepository) RenameKnowledgeFolderPath(
 
 // UpdateKnowledge updates knowledge
 func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
+	knowledge.ErrorMessage = common.CleanInvalidUTF8(knowledge.ErrorMessage)
 	omit := omitFieldsOnUpdate
 	// Legacy/unit-test schemas created before custom_metadata should continue
 	// to support unrelated updates when the caller did not provide the field.
@@ -537,6 +541,11 @@ func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *ty
 func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledgeList []*types.Knowledge) error {
 	if len(knowledgeList) == 0 {
 		return nil
+	}
+	for _, knowledge := range knowledgeList {
+		if knowledge != nil {
+			knowledge.ErrorMessage = common.CleanInvalidUTF8(knowledge.ErrorMessage)
+		}
 	}
 	return r.db.Debug().WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledgeList).Error
 }
@@ -763,6 +772,33 @@ func (r *knowledgeRepository) ClaimKnowledgeListForKBDelete(
 		).Find(&claimed).Error
 	})
 	return claimed, err
+}
+
+// ClaimKnowledgeListForDelete 在同一事务中领取所有知识库分组；任何一组竞争失败都会撤销整批声明。
+func (r *knowledgeRepository) ClaimKnowledgeListForDelete(
+	ctx context.Context, tenantID uint64, idsByKnowledgeBase map[string][]string,
+) ([]*types.Knowledge, error) {
+	knowledgeBaseIDs := make([]string, 0, len(idsByKnowledgeBase))
+	for id := range idsByKnowledgeBase {
+		knowledgeBaseIDs = append(knowledgeBaseIDs, id)
+	}
+	sort.Strings(knowledgeBaseIDs)
+	var claimed []*types.Knowledge
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		scoped := &knowledgeRepository{db: tx}
+		for _, kbID := range knowledgeBaseIDs {
+			rows, err := scoped.ClaimKnowledgeListForKBDelete(ctx, tenantID, kbID, idsByKnowledgeBase[kbID])
+			if err != nil {
+				return err
+			}
+			claimed = append(claimed, rows...)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
 }
 
 // ClaimKnowledgeForMove 在短事务中声明知识移动，不跨越任何外部存储调用持锁。
@@ -1294,6 +1330,14 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
 	column string,
 	value interface{},
 ) error {
+	if column == "error_message" {
+		switch v := value.(type) {
+		case string:
+			value = common.CleanInvalidUTF8(v)
+		case []byte:
+			value = common.CleanInvalidUTF8(string(v))
+		}
+	}
 	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Update(column, value).Error
 	return err
 }
@@ -1309,6 +1353,14 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
 ) error {
 	if len(values) == 0 {
 		return nil
+	}
+	if value, ok := values["error_message"]; ok {
+		switch v := value.(type) {
+		case string:
+			values["error_message"] = common.CleanInvalidUTF8(v)
+		case []byte:
+			values["error_message"] = common.CleanInvalidUTF8(string(v))
+		}
 	}
 	return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
 }
@@ -1662,7 +1714,7 @@ func (r *knowledgeRepository) PatchKnowledgeUserFields(
 			return nil
 		}
 		allowed := make(map[string]interface{}, 4)
-		for _, key := range []string{"title", "description", "custom_metadata", "updated_at"} {
+		for _, key := range []string{"title", "description", "summary_status", "custom_metadata", "updated_at"} {
 			if value, ok := values[key]; ok {
 				allowed[key] = value
 			}
@@ -2106,15 +2158,20 @@ func (r *knowledgeRepository) FinalizeIndexedKnowledge(
 // to normal queries and have not moved out of the transient deleting state.
 func (r *knowledgeRepository) UpdateActiveDeletingKnowledgeColumns(
 	ctx context.Context,
-	id string,
+	tenantID uint64,
+	kbID, id string,
 	values map[string]interface{},
 ) (bool, error) {
-	if len(values) == 0 {
+	if tenantID == 0 || kbID == "" || len(values) == 0 {
 		return false, nil
 	}
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
-		Where("id = ? AND parse_status = ?", id, types.ParseStatusDeleting).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND id = ? AND parse_status = ?",
+			tenantID,
+			kbID,
+			id,
+			types.ParseStatusDeleting).
 		Updates(values)
 	if result.Error != nil {
 		return false, result.Error

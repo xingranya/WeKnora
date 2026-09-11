@@ -17,6 +17,7 @@ import (
 const modelDeleteAutoTagKnowledgeBaseDDL = `
 CREATE TABLE knowledge_bases (
     id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL DEFAULT '',
     tenant_id INTEGER NOT NULL,
     embedding_model_id VARCHAR(64) NOT NULL,
     summary_model_id VARCHAR(64) NOT NULL,
@@ -69,8 +70,13 @@ func TestDeleteModelRejectsAutoTagOnlyReferenceUntilReleased(t *testing.T) {
 	require.Error(t, err)
 	appErr, ok := apperrors.IsAppError(err)
 	require.True(t, ok)
-	assert.Equal(t, apperrors.ErrBadRequest, appErr.Code)
+	assert.Equal(t, apperrors.ErrModelInUse, appErr.Code)
 	assert.Contains(t, appErr.Message, "knowledge base")
+	usage, ok := appErr.Details.(types.ModelUsageDetails)
+	require.True(t, ok)
+	require.Len(t, usage.KnowledgeBases, 1)
+	assert.Equal(t, "auto-tag-kb", usage.KnowledgeBases[0].ID)
+	assert.Equal(t, []types.ModelUsageBinding{types.ModelUsageBindingAutoTagModel}, usage.KnowledgeBases[0].Bindings)
 
 	var activeCount int64
 	require.NoError(t, db.Model(&types.Model{}).Where("id = ?", modelID).Count(&activeCount).Error)

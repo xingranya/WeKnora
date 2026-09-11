@@ -70,10 +70,11 @@ func (failingMoveDispatchLookupRepo) KnowledgeMoveDispatchExists(
 	return false, errors.New("database unavailable")
 }
 
-func (cancelledMoveChunkRepo) ListChunksByKnowledgeID(
-	context.Context, uint64, string,
-) ([]*types.Chunk, error) {
-	return nil, context.Canceled
+func (cancelledMoveChunkRepo) ListAllChunksByKnowledgeID(context.Context, uint64, string) ([]*types.Chunk, error) {
+	return nil, nil
+}
+func (cancelledMoveChunkRepo) MoveChunksByKnowledgeID(context.Context, uint64, string, string) error {
+	return context.Canceled
 }
 
 func (s moveRecoveryKBService) GetKnowledgeBaseByID(
@@ -296,4 +297,57 @@ func TestMoveCancellationDispatchLookupFailureFailsSafe(t *testing.T) {
 			TenantID: 1, TaskID: "move-1", SourceKBID: "kb-source",
 		},
 	))
+}
+
+func TestKnowledgeMoveMissingTargetReleasesClaimAndDispatch(t *testing.T) {
+	db, knowledgeRepo, pendingRepo := newMoveRecoveryDB(t)
+	tenant := &types.Tenant{Name: "tenant", Status: "active"}
+	require.NoError(t, db.Create(tenant).Error)
+	source := &types.KnowledgeBase{ID: "source", TenantID: tenant.ID, Name: "source"}
+	require.NoError(t, db.Create(source).Error)
+	row := &types.Knowledge{
+		ID: "missing-target-document", TenantID: tenant.ID, KnowledgeBaseID: source.ID,
+		ParseStatus: types.ParseStatusMoving,
+		Metadata:    types.JSON(`{"_weknora_move_claim":{"task_id":"missing-target-task","source_knowledge_base_id":"source","target_knowledge_base_id":"removed-target","mode":"reuse_vectors","stage":"active"}}`),
+	}
+	require.NoError(t, db.Create(row).Error)
+	payload := types.KnowledgeMovePayload{
+		TenantID: tenant.ID, TaskID: "missing-target-task", KnowledgeIDs: []string{row.ID},
+		SourceKBID: source.ID, TargetKBID: "removed-target", Mode: "reuse_vectors",
+	}
+	svc := &knowledgeService{repo: knowledgeRepo, taskPendingRepo: pendingRepo,
+		kbService: moveRecoveryKBService{byID: map[string]*types.KnowledgeBase{source.ID: source}},
+	}
+	require.NoError(t, svc.PersistKnowledgeMoveDispatch(context.Background(), payload))
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.ErrorIs(t, svc.ProcessKnowledgeMove(context.Background(), asynq.NewTask(types.TypeKnowledgeMove, raw)), asynq.SkipRetry)
+	stored, err := knowledgeRepo.GetKnowledgeByID(context.Background(), tenant.ID, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.ParseStatusFailed, stored.ParseStatus)
+	state, err := transferState(stored)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", state.Phase)
+	var pending int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Count(&pending).Error)
+	require.Zero(t, pending)
+}
+
+func TestUnresolvedMoveFailureHonorsPersistedCurrentKB(t *testing.T) {
+	for _, currentKB := range []string{"kb-dst", "unrelated"} {
+		t.Run(currentKB, func(t *testing.T) {
+			svc, _, _, _ := newMoveWikiService(t)
+			repo := svc.repo.(*moveWikiKnowledgeRepo)
+			repo.knowledge.KnowledgeBaseID = currentKB
+			repo.knowledge.ParseStatus = types.ParseStatusMoving
+			repo.knowledge.Metadata = types.JSON(`{"_weknora_move_claim":{"task_id":"move-task","source_knowledge_base_id":"kb-src","target_knowledge_base_id":"kb-dst","mode":"reuse_vectors","stage":"active"}}`)
+			payload := types.KnowledgeMovePayload{TenantID: 1, TaskID: "move-task", SourceKBID: "kb-src", TargetKBID: "kb-dst", KnowledgeIDs: []string{"kn-1"}, Mode: "reuse_vectors"}
+			require.NoError(t, svc.failUnresolvedKnowledgeMove(context.Background(), payload, asynq.SkipRetry))
+			if currentKB == "kb-dst" {
+				require.Equal(t, types.ParseStatusFailed, repo.knowledge.ParseStatus)
+			} else {
+				require.Equal(t, types.ParseStatusMoving, repo.knowledge.ParseStatus)
+			}
+		})
+	}
 }

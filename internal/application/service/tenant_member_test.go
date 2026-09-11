@@ -307,6 +307,7 @@ func (r *cleanupUserRepo) SearchUsers(context.Context, string, int) ([]*types.Us
 }
 
 type cleanupTokenRepo struct {
+	interfaces.AuthTokenRepository
 	revoked []string
 }
 
@@ -320,6 +321,9 @@ func (r *cleanupTokenRepo) RotateRefreshToken(
 	return nil
 }
 func (r *cleanupTokenRepo) GetTokenByValue(context.Context, string) (*types.AuthToken, error) {
+	return nil, errors.New("not found")
+}
+func (r *cleanupTokenRepo) GetTokenByID(context.Context, string) (*types.AuthToken, error) {
 	return nil, errors.New("not found")
 }
 func (r *cleanupTokenRepo) GetTokensByUserID(context.Context, string) ([]*types.AuthToken, error) {

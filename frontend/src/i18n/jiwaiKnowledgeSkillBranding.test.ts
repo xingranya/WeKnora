@@ -4,6 +4,7 @@ import enUS from './locales/en-US.ts'
 import koKR from './locales/ko-KR.ts'
 import ruRU from './locales/ru-RU.ts'
 import zhCN from './locales/zh-CN.ts'
+import jaJP from './locales/ja-JP.ts'
 import {
   CHROME_EXTENSION_DOWNLOAD_URL,
   INTEGRATION_TAB_MIN_ROLE,
@@ -17,6 +18,7 @@ const localeBundles = {
   'ko-KR': koKR,
   'ru-RU': ruRU,
   'zh-CN': zhCN,
+  'ja-JP': jaJP,
 }
 
 test('见外知识库展示名在所有主界面语言中保持一致', () => {

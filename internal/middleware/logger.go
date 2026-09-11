@@ -94,6 +94,16 @@ func Logger() gin.HandlerFunc {
 			"latency":     latency.String(),
 			"client_ip":   secutils.SanitizeForLog(clientIP),
 		})
-		logMsg.Info()
+		if last := c.Errors.Last(); last != nil && last.Err != nil {
+			logMsg = logMsg.WithField("error", secutils.SanitizeForLog(last.Err.Error()))
+		}
+		switch {
+		case statusCode >= 500:
+			logMsg.Error()
+		case statusCode >= 400:
+			logMsg.Warn()
+		default:
+			logMsg.Info()
+		}
 	}
 }

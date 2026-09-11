@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/access"
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -110,15 +111,18 @@ func TestMovedKnowledgeSingleDeleteUsesSourceResourceBackend(t *testing.T) {
 		}},
 		tenantRepo:      kbDeleteTenantRepo{tenant: tenant},
 		chunkService:    deleteRoutingChunkService{repo: deleteRoutingChunkRepo{}},
+		chunkRepo:       deleteRoutingChunkRepo{},
 		graphEngine:     parentChildGraphRepo{},
 		storageResolver: resolver,
 		resourceCatalog: resourceCatalog,
 	}
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, tenant.ID)
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
+	ctx, err = access.WithKBTaskWrite(ctx, &types.KnowledgeBase{ID: "kb-target", TenantID: tenant.ID}, tenant.ID)
+	require.NoError(t, err)
 
 	require.NoError(t, svc.DeleteKnowledge(ctx, knowledge.ID))
-	require.Equal(t, []string{sourceBackend}, resolver.calls)
+	require.Equal(t, []string{targetBackend, sourceBackend}, resolver.calls)
 	require.Equal(t, []string{"minio://bucket/source.pdf"}, sourcePhysical.deleted)
 	require.Empty(t, targetPhysical.deleted)
 }
@@ -191,4 +195,11 @@ func TestKnowledgeBaseDeleteWorkerRejectsCrossTenantPayloadBeforeSideEffects(t *
 
 	require.ErrorIs(t, err, asynq.SkipRetry)
 	require.Zero(t, knowledgeRepo.listCalls)
+}
+
+func (deleteRoutingChunkRepo) DeleteByKnowledgeList(context.Context, uint64, []string) error {
+	return nil
+}
+func (*kbDeleteResourceCatalog) Release(context.Context, string, string, string) (int64, error) {
+	return 0, nil
 }

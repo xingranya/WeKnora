@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -32,6 +33,7 @@ func TestResolveProvider(t *testing.T) {
 		{"SiliconFlow similar model falls back", provider.ProviderSiliconFlow, "vendor/deepseek-v4-copy", baseProvider{}},
 		{"generic", provider.ProviderGeneric, "anything", genericProvider{}},
 		{"generic Sub2API reasoning", provider.ProviderGeneric, "gpt-5.6-terra", genericReasoningProvider{}},
+		{"litellm", provider.ProviderLiteLLM, "anything", liteLLMProvider{}},
 		{"gemini", provider.ProviderGemini, "gemini-3-flash-preview", geminiProvider{}},
 		{"nvidia", provider.ProviderNvidia, "anything", nvidiaProvider{}},
 		{"volcengine", provider.ProviderVolcengine, "doubao", volcengineProvider{}},
@@ -74,7 +76,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 	t.Run("generic explicit thinking_type overrides legacy kwargs", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderGeneric), "deepseek-v4-flash",
 			map[string]string{ExtraConfigThinkingControl: "thinking_type"})
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js := mustJSON(t, body)
@@ -85,7 +87,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("generic legacy chat_template_kwargs", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderGeneric), "qwen", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), "chat_template_kwargs")
@@ -93,14 +95,14 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("generic GPT-5 uses Sub2API reasoning_effort", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderGeneric), "gpt-5.6-terra", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js := mustJSON(t, body)
 		assert.Contains(t, js, `"reasoning_effort":"high"`)
 		assert.NotContains(t, js, "chat_template_kwargs")
 
-		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err = c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		assert.False(t, useRaw)
 		assert.NotContains(t, mustJSON(t, body), "reasoning_effort")
@@ -109,7 +111,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 	t.Run("none keeps the standard SDK request", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderGeneric), "x",
 			map[string]string{ExtraConfigThinkingControl: "none"})
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		assert.False(t, useRaw)
 		_, ok := body.(*openai.ChatCompletionRequest)
@@ -118,7 +120,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("qwen non-stream forces disabled", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderAliyun), "qwen3-32b", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
@@ -127,7 +129,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 	t.Run("saved qwen default keeps provider non-stream protection", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderAliyun), "qwen3-32b",
 			map[string]string{ExtraConfigThinkingControl: "enable_thinking"})
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
@@ -135,7 +137,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("qwen stream honors requested true", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderAliyun), "qwen3-32b", nil)
-		body, _, _, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		body, _, _, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.NoError(t, err)
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":true`)
 	})
@@ -143,7 +145,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 	t.Run("SiliconFlow DeepSeek V4 uses official thinking field", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderSiliconFlow), "deepseek-ai/DeepSeek-V4-Flash",
 			map[string]string{ExtraConfigThinkingControl: "enable_thinking"})
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{
 			MaxCompletionTokens: 150,
 			Thinking:            ptrBool(false),
 		}, false)
@@ -155,36 +157,36 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 		assert.Contains(t, js, `"max_tokens":150`)
 		assert.NotContains(t, js, "max_completion_tokens")
 
-		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		body, _, useRaw, err = c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js = mustJSON(t, body)
 		assert.Contains(t, js, `"enable_thinking":true`)
 		assert.Contains(t, js, `"reasoning_effort":"high"`)
 
-		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
+		body, _, useRaw, err = c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, false)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js = mustJSON(t, body)
 		assert.Contains(t, js, `"enable_thinking":true`)
 		assert.Contains(t, js, `"reasoning_effort":"high"`)
 
-		body, _, useRaw, err = c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err = c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js = mustJSON(t, body)
 		assert.Contains(t, js, `"enable_thinking":false`)
 		assert.NotContains(t, js, "reasoning_effort")
 
-		body, _, useRaw, err = c.buildOutbound(msgs, nil, true)
+		body, _, useRaw, err = c.buildOutbound(context.Background(), msgs, nil, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), `"enable_thinking":false`)
 	})
 
-	t.Run("SiliconFlow non V4 request stays unchanged", func(t *testing.T) {
+	t.Run("SiliconFlow non V4 keeps thinking disabled and provider budget", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderSiliconFlow), "Qwen/Qwen3.5-397B-A17B", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{
 			MaxCompletionTokens: 150,
 			Thinking:            ptrBool(false),
 		}, false)
@@ -192,12 +194,14 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 		assert.False(t, useRaw)
 		js := mustJSON(t, body)
 		assert.NotContains(t, js, "enable_thinking")
-		assert.Contains(t, js, `"max_completion_tokens":150`)
+		// 上游统一预算适配现已覆盖 SiliconFlow 全模型，只发送 max_tokens。
+		assert.Contains(t, js, `"max_tokens":150`)
+		assert.NotContains(t, js, "max_completion_tokens")
 	})
 
 	t.Run("volcengine thinking enabled", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderVolcengine), "doubao", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(true)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		js := mustJSON(t, body)
@@ -207,7 +211,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("lkeap deepseek-v3 emits thinking type", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderLKEAP), "deepseek-v3.1", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		require.True(t, useRaw)
 		assert.Contains(t, mustJSON(t, body), `"thinking"`)
@@ -215,7 +219,7 @@ func TestBuildOutbound_Thinking(t *testing.T) {
 
 	t.Run("lkeap r1 left untouched", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderLKEAP), "deepseek-r1", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Thinking: ptrBool(false)}, true)
 		require.NoError(t, err)
 		assert.False(t, useRaw)
 		_, ok := body.(*openai.ChatCompletionRequest)
@@ -230,7 +234,7 @@ func TestBuildOutbound_ShapeRequest(t *testing.T) {
 
 	t.Run("deepseek strips tool_choice", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderDeepSeek), "deepseek-chat", nil)
-		body, _, useRaw, err := c.buildOutbound(msgs, &ChatOptions{ToolChoice: "auto"}, false)
+		body, _, useRaw, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{ToolChoice: "auto"}, false)
 		require.NoError(t, err)
 		assert.True(t, useRaw)
 		request, ok := body.(map[string]any)
@@ -240,7 +244,7 @@ func TestBuildOutbound_ShapeRequest(t *testing.T) {
 
 	t.Run("moonshot pins temperature to 1", func(t *testing.T) {
 		c := newOutboundChat(t, string(provider.ProviderMoonshot), "moonshot-v1-8k", nil)
-		body, _, _, err := c.buildOutbound(msgs, &ChatOptions{Temperature: 0.7, TopP: 0.9}, false)
+		body, _, _, err := c.buildOutbound(context.Background(), msgs, &ChatOptions{Temperature: 0.7, TopP: 0.9}, false)
 		require.NoError(t, err)
 		req := body.(*openai.ChatCompletionRequest)
 		assert.EqualValues(t, 1, req.Temperature)
@@ -266,7 +270,7 @@ func TestBuildOutbound_GeminiProviderMetadata(t *testing.T) {
 		},
 	}
 
-	body, _, useRaw, err := c.buildOutbound(messages, &ChatOptions{}, false)
+	body, _, useRaw, err := c.buildOutbound(context.Background(), messages, &ChatOptions{}, false)
 	require.NoError(t, err)
 	require.True(t, useRaw)
 

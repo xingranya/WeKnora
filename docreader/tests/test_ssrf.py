@@ -38,7 +38,12 @@ class TestSSRFValidation(unittest.TestCase):
         self.assertTrue(reason)
 
     def test_blocks_invalid_port(self):
-        safe, reason = is_ssrf_safe_url("https://example.com:99999/path")
+        # 只验证端口规则，避免本机代理 DNS 抢先触发保留地址拦截。
+        with patch(
+            "docreader.utils.ssrf._resolve_host_ips",
+            return_value=((ipaddress.ip_address("93.184.215.14"),), None),
+        ):
+            safe, reason = is_ssrf_safe_url("https://example.com:99999/path")
         self.assertFalse(safe)
         self.assertIn("invalid port", reason)
 
@@ -52,9 +57,22 @@ class TestSSRFValidation(unittest.TestCase):
         self.assertIn("restricted", reason)
 
     def test_allows_public_https(self):
-        safe, reason = is_ssrf_safe_url("https://example.com/article")
+        with patch(
+            "docreader.utils.ssrf._resolve_host_ips",
+            return_value=((ipaddress.ip_address("93.184.215.14"),), None),
+        ):
+            safe, reason = is_ssrf_safe_url("https://example.com/article")
         self.assertTrue(safe, reason)
         self.assertEqual(reason, "")
+
+    def test_blocks_proxy_fake_ip_resolution(self):
+        with patch(
+            "docreader.utils.ssrf._resolve_host_ips",
+            return_value=((ipaddress.ip_address("198.18.0.242"),), None),
+        ):
+            safe, reason = is_ssrf_safe_url("https://example.com/article")
+        self.assertFalse(safe)
+        self.assertIn("restricted", reason)
 
 
 if __name__ == "__main__":

@@ -289,9 +289,9 @@ func TestAgentPersistenceFailureDoesNotEmitComplete(t *testing.T) {
 		ID:   "agent-complete",
 		Type: event.EventAgentComplete,
 		Data: event.AgentCompleteData{
-			MessageID: streamCtx.assistantMessage.ID,
+			MessageID:   streamCtx.assistantMessage.ID,
 			FinalAnswer: "answer",
-			Outcome: event.AgentOutcomeSuccess,
+			Outcome:     event.AgentOutcomeSuccess,
 		},
 	}))
 
@@ -319,7 +319,7 @@ func TestAgentStopWaitsForSnapshotBeforePersisting(t *testing.T) {
 		Data: event.StopData{
 			SessionID: streamCtx.assistantMessage.SessionID,
 			MessageID: streamCtx.assistantMessage.ID,
-			Reason: "user_requested",
+			Reason:    "user_requested",
 		},
 	}))
 	require.ErrorIs(t, asyncCtx.Err(), context.Canceled)
@@ -330,10 +330,10 @@ func TestAgentStopWaitsForSnapshotBeforePersisting(t *testing.T) {
 	require.NoError(t, eventBus.Emit(context.Background(), event.Event{
 		Type: event.EventAgentComplete,
 		Data: event.AgentCompleteData{
-			MessageID: streamCtx.assistantMessage.ID,
-			FinalAnswer: "partial answer",
-			AgentSteps: steps,
-			Outcome: event.AgentOutcomeStopped,
+			MessageID:       streamCtx.assistantMessage.ID,
+			FinalAnswer:     "partial answer",
+			AgentSteps:      steps,
+			Outcome:         event.AgentOutcomeStopped,
 			TotalDurationMs: 321,
 		},
 	}))
@@ -364,6 +364,134 @@ func TestIsTerminalStreamEvent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, isTerminalStreamEvent(tt.evt))
+		})
+	}
+}
+
+// completionSteerProbe 记录排队读取发生时的持久化状态，不启动额外轮次。
+type completionSteerProbe struct {
+	interfaces.StreamManager
+	messages      *quickAnswerTerminalMessageStub
+	reads         int
+	readAfterSave bool
+}
+
+func (s *completionSteerProbe) GetSteerEvents(context.Context, string, string, int) ([]interfaces.StreamEvent, int, error) {
+	s.reads++
+	s.readAfterSave = s.readAfterSave || s.messages.updateCalls > 0
+	return nil, 0, nil
+}
+
+func TestAgentTerminalChecksFollowUpAfterPersistingSuccessOnly(t *testing.T) {
+	for _, outcome := range []event.AgentOutcome{event.AgentOutcomeSuccess, event.AgentOutcomeFailed, event.AgentOutcomeStopped} {
+		t.Run(string(outcome), func(t *testing.T) {
+			h, messages, streamCtx, _, bus, manager := newAgentTerminalTestContext(t)
+			probe := &completionSteerProbe{StreamManager: manager, messages: messages}
+			h.streamManager = probe
+			streamCtx.steerSink = &steerSink{}
+			require.NoError(t, bus.Emit(context.Background(), event.Event{
+				Type: event.EventAgentComplete,
+				Data: event.AgentCompleteData{MessageID: streamCtx.assistantMessage.ID,
+					FinalAnswer: "answer", Outcome: outcome},
+			}))
+			if outcome == event.AgentOutcomeSuccess {
+				require.Positive(t, probe.reads, "成功终态必须检查队列交接")
+				require.True(t, probe.readAfterSave, "持久化成功前不得创建后续轮次")
+				require.Equal(t, 1, messages.updateCalls)
+			} else {
+				require.Zero(t, probe.reads, "失败或停止快照不得触发下一轮")
+			}
+		})
+	}
+}
+
+type reservationFailureMessages struct {
+	steerPersistingMessageStub
+	updates int
+}
+
+func (s *reservationFailureMessages) UpdateMessage(_ context.Context, message *types.Message) error {
+	s.updates++
+	if s.updates == 1 {
+		return errors.New("forced current-message persistence failure")
+	}
+	return nil
+}
+
+func TestAgentPersistenceFailureDoesNotReserveOrStartFollowUp(t *testing.T) {
+	h, _, streamCtx, reqCtx, bus, manager := newAgentTerminalTestContext(t)
+	messages := &reservationFailureMessages{}
+	h.messageService = messages
+	h.streamManager = manager
+	streamCtx.steerSink = &steerSink{}
+	require.NoError(t, manager.SetLiveRun(context.Background(), reqCtx.sessionID, streamCtx.assistantMessage.ID, "old-request"))
+	require.NoError(t, manager.AppendSteerEvents(context.Background(), reqCtx.sessionID, streamCtx.assistantMessage.ID,
+		[]interfaces.StreamEvent{steerEventWithDelivery("queued", "下一轮请求", steerDeliveryAfter)}))
+	require.NoError(t, bus.Emit(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{MessageID: streamCtx.assistantMessage.ID,
+			FinalAnswer: "answer", Outcome: event.AgentOutcomeSuccess},
+	}))
+	require.Zero(t, messages.n, "当前消息写入失败不得创建后续轮次占位")
+	require.Empty(t, messages.byID, "当前消息写入失败不得留下后续消息")
+	require.False(t, streamCtx.followUpStarted, "持久化失败不得启动下一轮")
+	liveID, _, err := manager.GetLiveRun(context.Background(), reqCtx.sessionID)
+	require.NoError(t, err)
+	require.Equal(t, streamCtx.assistantMessage.ID, liveID)
+	events, _, err := manager.GetEvents(context.Background(), reqCtx.sessionID, streamCtx.assistantMessage.ID, 0)
+	require.NoError(t, err)
+	for _, evt := range events {
+		require.NotEqual(t, types.ResponseTypeComplete, evt.Type)
+	}
+}
+
+type preEngineStopSessionStub struct {
+	interfaces.SessionService
+	panics bool
+}
+
+func (s *preEngineStopSessionStub) UpdateSessionLastRequestState(context.Context, string, *types.SessionLastRequestState) error {
+	return nil
+}
+
+func (s *preEngineStopSessionStub) AgentQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+	// 模拟准备沙箱期间收到停止，整个 service 不进入 engine，不发布完成快照。
+	if err := bus.Emit(ctx, event.Event{Type: event.EventStop, SessionID: req.Session.ID,
+		Data: event.StopData{SessionID: req.Session.ID, MessageID: req.AssistantMessageID, Reason: "user_requested"}}); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	if s.panics {
+		panic("cancelled preparation panic")
+	}
+	return ctx.Err()
+}
+
+func TestPreEngineStopPersistsWithoutCompletionSnapshot(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		t.Run(map[bool]string{false: "准备时取消", true: "停止后panic"}[panics], func(t *testing.T) {
+			messages := &quickAnswerTerminalMessageStub{}
+			manager := streamstore.NewMemoryStreamManager()
+			h := &Handler{messageService: messages, streamManager: manager,
+				sessionService: &preEngineStopSessionStub{panics: panics}}
+			message := &types.Message{ID: "early-stop", SessionID: "session-early", Role: "assistant"}
+			reqCtx := &qaRequestContext{ctx: context.Background(), sessionID: message.SessionID,
+				session:          &types.Session{ID: message.SessionID, TenantID: 42},
+				assistantMessage: message, userMessageID: "existing-user", skipSSE: true,
+				customAgent: &types.CustomAgent{ID: "agent", Config: types.CustomAgentConfig{AgentMode: types.AgentModeSmartReasoning}}}
+			h.executeQA(reqCtx, qaModeAgent, false)
+			require.Equal(t, 1, messages.updateCalls)
+			require.True(t, messages.updatedMessage.IsCompleted)
+			require.Zero(t, messages.indexCalls)
+			liveID, _, err := manager.GetLiveRun(context.Background(), message.SessionID)
+			require.NoError(t, err)
+			require.Empty(t, liveID)
+			events, _, err := manager.GetEvents(context.Background(), message.SessionID, message.ID, 0)
+			require.NoError(t, err)
+			for _, evt := range events {
+				require.NotEqual(t, types.ResponseTypeComplete, evt.Type)
+				require.NotEqual(t, types.ResponseTypeError, evt.Type, "停止期间 panic 不得发布第二种终态")
+			}
 		})
 	}
 }

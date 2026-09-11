@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/access"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -23,11 +24,14 @@ type folderMoveRepoStub struct {
 	renameCalls int
 	renameErr   error
 	deleteErr   error
+	ensureCalls int
+	deleteCalls int
 }
 
 func (r *folderMoveRepoStub) EnsureKnowledgeFolderPath(
 	_ context.Context, _ uint64, _ string, _ string, _ string,
 ) error {
+	r.ensureCalls++
 	return nil
 }
 
@@ -52,16 +56,28 @@ func (r *folderMoveRepoStub) RenameKnowledgeFolderPath(
 func (r *folderMoveRepoStub) DeleteEmptyKnowledgeFolderTree(
 	_ context.Context, _ uint64, _ string, _ string,
 ) error {
+	r.deleteCalls++
 	return r.deleteErr
 }
 
 func folderMoveContext() context.Context {
-	return context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
+	return (&access.KBAccess{
+		KnowledgeBase: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: 1,
+		},
+		Caller:            types.CallerFromContext(ctx),
+		EffectiveTenantID: 1,
+		Permission:        types.OrgRoleEditor,
+	}).Context(
+		ctx,
+	)
 }
 
 func TestMoveKnowledgeToFolderNormalizesDestination(t *testing.T) {
 	repo := &folderMoveRepoStub{}
-	svc := &knowledgeService{repo: repo}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
 
 	affected, err := svc.MoveKnowledgeToFolder(folderMoveContext(), "kb-1", []string{"k1", "k2"}, "/docs//spec/")
 	require.NoError(t, err)
@@ -72,7 +88,7 @@ func TestMoveKnowledgeToFolderNormalizesDestination(t *testing.T) {
 
 func TestMoveKnowledgeToFolderAcceptsRootAndRejectsEmptyBatch(t *testing.T) {
 	repo := &folderMoveRepoStub{}
-	svc := &knowledgeService{repo: repo}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
 
 	// The empty destination is meaningful: it files documents back at the top level.
 	_, err := svc.MoveKnowledgeToFolder(folderMoveContext(), "kb-1", []string{"k1"}, "")
@@ -86,7 +102,7 @@ func TestMoveKnowledgeToFolderAcceptsRootAndRejectsEmptyBatch(t *testing.T) {
 
 func TestMoveKnowledgeToFolderRejectsTraversalAndUnsafeInput(t *testing.T) {
 	repo := &folderMoveRepoStub{}
-	svc := &knowledgeService{repo: repo}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
 
 	_, err := svc.MoveKnowledgeToFolder(folderMoveContext(), "kb-1", []string{"k1"}, "../../etc/docs")
 	require.NoError(t, err)
@@ -98,7 +114,7 @@ func TestMoveKnowledgeToFolderRejectsTraversalAndUnsafeInput(t *testing.T) {
 
 func TestRenameKnowledgeFolderValidatesPaths(t *testing.T) {
 	repo := &folderMoveRepoStub{}
-	svc := &knowledgeService{repo: repo}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
 	ctx := folderMoveContext()
 
 	affected, err := svc.RenameKnowledgeFolder(ctx, "kb-1", "docs", "handbook")
@@ -134,7 +150,7 @@ func TestKnowledgeFolderActiveUploadMapsToConflict(t *testing.T) {
 		renameErr: types.ErrKnowledgeFolderHasActiveUploads,
 		deleteErr: types.ErrKnowledgeFolderHasActiveUploads,
 	}
-	svc := &knowledgeService{repo: repo}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
 	ctx := folderMoveContext()
 
 	_, err := svc.RenameKnowledgeFolder(ctx, "kb-1", "docs", "handbook")
@@ -148,4 +164,33 @@ func TestKnowledgeFolderActiveUploadMapsToConflict(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, http.StatusConflict, appErr.HTTPCode)
 	assert.Equal(t, "文件夹中仍有上传任务，请等待完成或先取消上传", appErr.Message)
+}
+
+func (r *folderMoveRepoStub) GetKnowledgeBatch(
+	_ context.Context,
+	tenant uint64,
+	ids []string,
+) ([]*types.Knowledge, error) {
+	rows := make([]*types.Knowledge, 0, len(ids))
+	for _, id := range ids {
+		rows = append(rows, &types.Knowledge{ID: id, TenantID: tenant, KnowledgeBaseID: "kb-1"})
+	}
+	return rows, nil
+}
+
+func TestCompanyFolderWritesRequireExactKBGrant(t *testing.T) {
+	repo := &folderMoveRepoStub{}
+	svc := &knowledgeService{repo: repo, kbService: &writeKBLookup{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}}}
+	unscoped := types.WithExecutionTenant(context.Background(), 1)
+	_, err := svc.CreateKnowledgeFolder(unscoped, "kb-1", "", "公司资料")
+	require.Error(t, err)
+	require.Error(t, svc.DeleteKnowledgeFolder(unscoped, "kb-1", "公司资料"))
+	require.Zero(t, repo.ensureCalls)
+	require.Zero(t, repo.deleteCalls)
+	folder, err := svc.CreateKnowledgeFolder(folderMoveContext(), "kb-1", "", "公司资料")
+	require.NoError(t, err)
+	require.Equal(t, "公司资料", folder.Path)
+	require.NoError(t, svc.DeleteKnowledgeFolder(folderMoveContext(), "kb-1", "公司资料"))
+	require.Equal(t, 1, repo.ensureCalls)
+	require.Equal(t, 1, repo.deleteCalls)
 }

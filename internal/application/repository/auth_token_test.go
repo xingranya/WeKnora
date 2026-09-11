@@ -168,3 +168,53 @@ func TestAuthTokenJSONNeverSerializesRawToken(t *testing.T) {
 	require.NotContains(t, string(raw), `"token"`)
 	require.NotContains(t, string(raw), token.Token)
 }
+
+func TestSwitchTenantSessionCommitsPreferenceAndTokensAtomically(t *testing.T) {
+	for _, scenario := range []string{"成功", "无效刷新令牌", "第二令牌写入失败", "偏好写入失败"} {
+		t.Run(scenario, func(t *testing.T) {
+			db := newAuthTokenTestDB(t, true)
+			require.NoError(t, db.AutoMigrate(&types.User{}))
+			home := uint64(7)
+			oidc := true
+			user := &types.User{ID: "alice", Username: "alice", Email: "alice@example.test",
+				Preferences: types.UserPreferences{LastActiveTenantID: &home, OidcOnlyLogin: &oidc}}
+			require.NoError(t, db.Create(user).Error)
+			repo := NewAuthTokenRepository(db)
+			ctx := context.Background()
+			old := &types.AuthToken{ID: "old", UserID: user.ID, Token: "old-refresh", TokenType: "refresh_token", ExpiresAt: time.Now().Add(time.Hour)}
+			require.NoError(t, repo.CreateToken(ctx, old))
+			access := &types.AuthToken{ID: "new-access", UserID: user.ID, Token: "new-access-token", TokenType: "access_token", ExpiresAt: time.Now().Add(time.Hour)}
+			refresh := &types.AuthToken{ID: "new-refresh", UserID: user.ID, Token: "new-refresh-token", TokenType: "refresh_token", ExpiresAt: time.Now().Add(time.Hour)}
+			presented := old.Token
+			switch scenario {
+			case "无效刷新令牌":
+				presented = "invalid-refresh"
+			case "第二令牌写入失败":
+				refresh.ID = access.ID
+			case "偏好写入失败":
+				require.NoError(t, db.Exec(`CREATE TRIGGER reject_preferences BEFORE UPDATE OF preferences ON users BEGIN SELECT RAISE(ABORT, 'forced preference failure'); END`).Error)
+			}
+			preferences, err := repo.SwitchTenantSession(ctx, user.ID, 42, presented, access, refresh)
+			var storedUser types.User
+			require.NoError(t, db.First(&storedUser, "id = ?", user.ID).Error)
+			var storedOld types.AuthToken
+			require.NoError(t, db.First(&storedOld, "id = ?", old.ID).Error)
+			var count int64
+			require.NoError(t, db.Model(&types.AuthToken{}).Count(&count).Error)
+			require.True(t, *storedUser.Preferences.OidcOnlyLogin)
+			if scenario == "成功" {
+				require.NoError(t, err)
+				require.Equal(t, uint64(42), *preferences.LastActiveTenantID)
+				require.Equal(t, uint64(42), *storedUser.Preferences.LastActiveTenantID)
+				require.True(t, storedOld.IsRevoked)
+				require.Equal(t, int64(3), count)
+			} else {
+				require.Error(t, err)
+				require.Nil(t, preferences.LastActiveTenantID)
+				require.Equal(t, home, *storedUser.Preferences.LastActiveTenantID)
+				require.False(t, storedOld.IsRevoked)
+				require.Equal(t, int64(1), count, "失败切换不得留下新 token")
+			}
+		})
+	}
+}

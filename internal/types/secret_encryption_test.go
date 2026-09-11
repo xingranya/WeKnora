@@ -53,6 +53,24 @@ func TestSecretValueAndHooksPropagateEncryptionFailure(t *testing.T) {
 			_, err := (&TenantSandboxConfig{EnvVars: map[string]string{"TOKEN": "secret"}}).Value()
 			return err
 		}},
+		{name: "沙箱 Cube 注入凭据", run: func() error {
+			config := &TenantSandboxConfig{Network: &SandboxNetworkPolicy{
+				CubeRules: []CubeEgressRule{{Inject: []CubeHeaderInject{{Secret: "secret"}}}},
+			}}
+			value, err := config.Value()
+			require.Nil(t, value)
+			require.Equal(t, "secret", config.Network.CubeRules[0].Inject[0].Secret)
+			return err
+		}},
+		{name: "沙箱 E2B 注入凭据", run: func() error {
+			config := &TenantSandboxConfig{Network: &SandboxNetworkPolicy{
+				E2BHostRules: []E2BHostRule{{Headers: map[string]string{"X-Key": "secret"}}},
+			}}
+			value, err := config.Value()
+			require.Nil(t, value)
+			require.Equal(t, "secret", config.Network.E2BHostRules[0].Headers["X-Key"])
+			return err
+		}},
 		{name: "数据源凭据", run: func() error {
 			_, err := (&DataSourceConfig{Credentials: map[string]interface{}{"token": "secret"}}).ToJSON()
 			return err

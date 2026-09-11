@@ -83,3 +83,15 @@ func TestRawOpenAIStreamMalformedToolArgumentsBeforeDoneIsTerminalError(t *testi
 		}
 	}
 }
+
+func TestRawOpenAIStreamFailurePreservesUsageAndPartialTool(t *testing.T) {
+	responses := collectRawOpenAIStream(t,
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}}\n\n")
+	last := responses[len(responses)-1]
+	require.Equal(t, types.ResponseTypeError, last.ResponseType)
+	require.Equal(t, types.FinishReasonIncomplete, last.FinishReason)
+	require.Equal(t, publicModelStreamErrorMessage, last.Content)
+	require.Len(t, last.ToolCalls, 1)
+	require.NotNil(t, last.Usage)
+	require.Equal(t, 10, last.Usage.TotalTokens)
+}

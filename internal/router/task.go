@@ -339,8 +339,9 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 // document-related asynq payload. Kept narrow so we don't accidentally
 // depend on the full payload schema and survive future field churn.
 type deadLetterKnowledgePayload struct {
-	TenantID    uint64 `json:"tenant_id,omitempty"`
-	KnowledgeID string `json:"knowledge_id,omitempty"`
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+	KnowledgeID     string `json:"knowledge_id,omitempty"`
 	// Attempt threads through DocumentProcess / ManualProcess /
 	// KnowledgePostProcess payloads (added when span tracking shipped)
 	// — extracted here so the dead-letter callback can also close the
@@ -381,10 +382,6 @@ var taskTypesAffectingKnowledgeStatus = map[string]struct{}{
 	types.TypeManualProcess:        {},
 }
 
-type deadLetterKnowledgeListDeletePayload struct {
-	KnowledgeIDs []string `json:"knowledge_ids,omitempty"`
-}
-
 // newDeadLetterKnowledgeFailer returns the callback wired into the asynq
 // dead-letter middleware. When a document-related task exhausts its retry
 // budget, this callback marks the corresponding Knowledge row as failed so
@@ -403,7 +400,7 @@ func newDeadLetterKnowledgeFailer(ks interfaces.KnowledgeService, tracker servic
 		return nil
 	}
 	return func(ctx context.Context, t *asynq.Task, taskErr error) {
-		if t == nil {
+		if t == nil || taskErr == nil || errors.Is(taskErr, asynq.SkipRetry) {
 			return
 		}
 		if t.Type() == types.TypeKnowledgeListDelete {
@@ -414,42 +411,45 @@ func newDeadLetterKnowledgeFailer(ks interfaces.KnowledgeService, tracker servic
 			return
 		}
 		var probe deadLetterKnowledgePayload
-		if err := json.Unmarshal(t.Payload(), &probe); err != nil || probe.KnowledgeID == "" {
+		if err := json.Unmarshal(t.Payload(), &probe); err != nil || probe.KnowledgeID == "" ||
+			probe.TenantID == 0 {
 			return
 		}
-		if probe.TenantID == 0 {
-			knowledge, lookupErr := repo.GetKnowledgeByIDOnly(ctx, probe.KnowledgeID)
-			if lookupErr != nil || knowledge == nil {
+		row, err := repo.GetKnowledgeByID(ctx, probe.TenantID, probe.KnowledgeID)
+		if err != nil || row == nil || row.ID != probe.KnowledgeID || row.TenantID != probe.TenantID {
+			return
+		}
+		if probe.KnowledgeBaseID == "" {
+			// 旧投递未携带 KB 时，只能恢复未发生移动且归属明确的原文档。
+			fields, metadataErr := row.Metadata.Map()
+			if metadataErr != nil || row.KnowledgeBaseID == "" ||
+				fields[types.KnowledgeTransferMetadataKey] != nil || fields["_weknora_move_claim"] != nil {
 				return
 			}
-			probe.TenantID = knowledge.TenantID
+			probe.KnowledgeBaseID = row.KnowledgeBaseID
+		}
+		if row.KnowledgeBaseID != probe.KnowledgeBaseID {
+			return
+		}
+		switch row.ParseStatus {
+		case types.ParseStatusPending, types.ParseStatusProcessing, types.ParseStatusFinalizing:
+		default:
+			return
 		}
 		errMsg := "task " + t.Type() + " exhausted retries: " + taskErr.Error()
 		// 8KB is the same cap the dead-letter row uses for last_error.
 		if len(errMsg) > 8192 {
 			errMsg = errMsg[:8192]
 		}
-		failureRepo, ok := repo.(deadLetterKnowledgeFailureRepository)
-		if !ok {
-			logger.Warnf(ctx, "dead-letter callback: knowledge repository lacks guarded failure support")
-			return
-		}
-		applied, status, err := failureRepo.FailKnowledgeProcessing(
-			ctx,
-			probe.TenantID,
-			probe.KnowledgeID,
-			errMsg,
-			time.Now(),
-		)
-		if err != nil {
-			logger.Warnf(ctx, "dead-letter callback: failed to mark knowledge %s as failed: %v", probe.KnowledgeID, err)
-			return
-		}
-		if !applied {
-			logger.Infof(ctx,
-				"dead-letter callback: skipped knowledge %s because lifecycle state is %s",
+		before, after := *row, *row
+		after.ParseStatus = types.ParseStatusFailed
+		after.ErrorMessage = errMsg
+		if err := repo.UpdateKnowledgeForTransfer(ctx, &before, &after); err != nil {
+			logger.Warnf(
+				ctx,
+				"dead-letter callback: knowledge %s changed or failed to update: %v",
 				probe.KnowledgeID,
-				status,
+				err,
 			)
 			return
 		}
@@ -470,10 +470,29 @@ func markKnowledgeListDeleteFailed(
 	t *asynq.Task,
 	taskErr error,
 ) {
-	var payload deadLetterKnowledgeListDeletePayload
-	if err := json.Unmarshal(t.Payload(), &payload); err != nil || len(payload.KnowledgeIDs) == 0 {
+	// A rejected scope must not gain a side effect through the failure path.
+	if errors.Is(taskErr, asynq.SkipRetry) {
 		return
 	}
+	var payload types.KnowledgeListDeletePayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil || payload.TenantID == 0 ||
+		len(payload.KnowledgeIDs) == 0 {
+		return
+	}
+	if payload.KnowledgeBaseID == "" {
+		rows, err := repo.GetKnowledgeBatch(ctx, payload.TenantID, payload.KnowledgeIDs)
+		if err != nil || len(rows) == 0 {
+			return
+		}
+		for _, row := range rows {
+			if row == nil || row.TenantID != payload.TenantID || row.KnowledgeBaseID == "" ||
+				(payload.KnowledgeBaseID != "" && payload.KnowledgeBaseID != row.KnowledgeBaseID) {
+				return
+			}
+			payload.KnowledgeBaseID = row.KnowledgeBaseID
+		}
+	}
+
 	errMsg := "delete task exhausted retries: " + taskErr.Error()
 	if len(errMsg) > 8192 {
 		errMsg = errMsg[:8192]
@@ -482,10 +501,16 @@ func markKnowledgeListDeleteFailed(
 		if knowledgeID == "" {
 			continue
 		}
-		updated, err := repo.UpdateActiveDeletingKnowledgeColumns(ctx, knowledgeID, map[string]interface{}{
-			"parse_status":  types.ParseStatusFailed,
-			"error_message": errMsg,
-		})
+		updated, err := repo.UpdateActiveDeletingKnowledgeColumns(
+			ctx,
+			payload.TenantID,
+			payload.KnowledgeBaseID,
+			knowledgeID,
+			map[string]interface{}{
+				"parse_status":  types.ParseStatusFailed,
+				"error_message": errMsg,
+			},
+		)
 		if err != nil {
 			logger.Warnf(ctx, "dead-letter callback: failed to mark delete failure for knowledge %s: %v", knowledgeID, err)
 			continue

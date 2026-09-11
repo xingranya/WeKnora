@@ -56,7 +56,7 @@ func TestDeadLetterFailurePreservesLifecycleClaims(t *testing.T) {
 	} {
 		t.Run(status, func(t *testing.T) {
 			knowledge := &types.Knowledge{
-				ID: "knowledge-1", TenantID: 7, ParseStatus: status,
+				ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1", ParseStatus: status,
 				Metadata: types.JSON(`{"_weknora_move_claim":{"task_id":"owner"}}`),
 			}
 			repo := &deadLetterLifecycleRepo{knowledge: knowledge}
@@ -64,7 +64,7 @@ func TestDeadLetterFailurePreservesLifecycleClaims(t *testing.T) {
 				deadLetterLifecycleService{repo: repo}, nil,
 			)
 			payload, err := json.Marshal(types.DocumentProcessPayload{
-				TenantID: 7, KnowledgeID: knowledge.ID,
+				TenantID: 7, KnowledgeBaseID: knowledge.KnowledgeBaseID, KnowledgeID: knowledge.ID,
 			})
 			require.NoError(t, err)
 
@@ -82,6 +82,39 @@ func TestDeadLetterFailurePreservesLifecycleClaims(t *testing.T) {
 				require.Equal(t, status, knowledge.ParseStatus)
 				require.Empty(t, knowledge.ErrorMessage)
 				require.Contains(t, string(knowledge.Metadata), "owner")
+			}
+		})
+	}
+}
+
+func (r *deadLetterLifecycleRepo) GetKnowledgeByID(context.Context, uint64, string) (*types.Knowledge, error) {
+	copy := *r.knowledge
+	return &copy, nil
+}
+func (r *deadLetterLifecycleRepo) UpdateKnowledgeForTransfer(_ context.Context, before, after *types.Knowledge) error {
+	if r.knowledge.ParseStatus != before.ParseStatus || r.knowledge.KnowledgeBaseID != before.KnowledgeBaseID {
+		return errors.New("knowledge changed during failure checkpoint")
+	}
+	*r.knowledge = *after
+	return nil
+}
+
+func TestDeadLetterLegacyTaskRestoresOnlyUnmovedScope(t *testing.T) {
+	for _, moved := range []bool{false, true} {
+		t.Run(map[bool]string{false: "original", true: "moved"}[moved], func(t *testing.T) {
+			row := &types.Knowledge{ID: "knowledge-legacy", TenantID: 7, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusPending}
+			if moved {
+				row.Metadata = types.JSON(`{"_knowledge_transfer":{"phase":"done"}}`)
+			}
+			repo := &deadLetterLifecycleRepo{knowledge: row}
+			payload, err := json.Marshal(types.DocumentProcessPayload{TenantID: 7, KnowledgeID: row.ID})
+			require.NoError(t, err)
+			newDeadLetterKnowledgeFailer(deadLetterLifecycleService{repo: repo}, nil)(context.Background(),
+				asynq.NewTask(types.TypeDocumentProcess, payload), errors.New("worker exhausted"))
+			if moved {
+				require.Equal(t, types.ParseStatusPending, row.ParseStatus)
+			} else {
+				require.Equal(t, types.ParseStatusFailed, row.ParseStatus)
 			}
 		})
 	}

@@ -355,7 +355,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 	}
 
 	// Persist chunks
-	if err := s.chunkService.CreateChunks(ctx, newChunks); err != nil {
+	if err := s.chunkService.GetRepository().CreateChunks(ctx, newChunks); err != nil {
 		handleErr = fmt.Errorf("create multimodal chunks: %w", err)
 		return handleErr
 	}
@@ -460,7 +460,7 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 				continue
 			}
 			dbChunk.Status = int(types.ChunkStatusIndexed)
-			if uerr := s.chunkService.UpdateChunk(ctx, dbChunk); uerr != nil {
+			if uerr := s.chunkService.GetRepository().UpdateChunk(ctx, dbChunk); uerr != nil {
 				logger.Warnf(ctx, "[ImageMultimodal] Failed to update chunk %s status to indexed: %v", chunk.ID, uerr)
 			}
 		}
@@ -517,7 +517,7 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 			continue
 		}
 		dbChunk.Status = int(types.ChunkStatusIndexed)
-		if err := s.chunkService.UpdateChunk(ctx, dbChunk); err != nil {
+		if err := s.chunkService.GetRepository().UpdateChunk(ctx, dbChunk); err != nil {
 			logger.Warnf(ctx, "[ImageMultimodal] Failed to update chunk %s status to indexed: %v", chunk.ID, err)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/access"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -70,6 +71,9 @@ func (r *metadataUpdateKnowledgeRepo) PatchKnowledgeUserFields(
 	if value, ok := values["description"].(string); ok {
 		r.knowledge.Description = value
 	}
+	if value, ok := values["summary_status"].(string); ok {
+		r.knowledge.SummaryStatus = value
+	}
 	if value, ok := values["custom_metadata"].(types.JSON); ok {
 		r.knowledge.CustomMetadata = value
 	}
@@ -125,7 +129,7 @@ type metadataUpdateKBService struct {
 func (metadataUpdateKBService) GetKnowledgeBaseByID(
 	_ context.Context, id string,
 ) (*types.KnowledgeBase, error) {
-	return &types.KnowledgeBase{ID: id, SummaryModelID: "summary-model"}, nil
+	return &types.KnowledgeBase{ID: id, TenantID: 7, SummaryModelID: "summary-model"}, nil
 }
 
 type metadataUpdateTaskEnqueuer struct {
@@ -165,6 +169,17 @@ func TestUpdateKnowledgeMetadataDoesNotReindexChunks(t *testing.T) {
 		repo: repo, chunkRepo: chunkRepo, kbService: metadataUpdateKBService{}, task: taskEnqueuer,
 	}
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(7))
+	ctx = (&access.KBAccess{
+		KnowledgeBase: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: 7,
+		},
+		Caller:            types.CallerFromContext(ctx),
+		EffectiveTenantID: 7,
+		Permission:        types.OrgRoleEditor,
+	}).Context(
+		ctx,
+	)
 
 	err := service.UpdateKnowledge(ctx, &types.Knowledge{
 		ID:             "knowledge-1",
@@ -194,6 +209,17 @@ func TestUpdateKnowledgeMetadataDoesNotLeaveTasklessPendingStatus(t *testing.T) 
 		task: &metadataUpdateTaskEnqueuer{err: errors.New("queue unavailable")},
 	}
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(7))
+	ctx = (&access.KBAccess{
+		KnowledgeBase: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: 7,
+		},
+		Caller:            types.CallerFromContext(ctx),
+		EffectiveTenantID: 7,
+		Permission:        types.OrgRoleEditor,
+	}).Context(
+		ctx,
+	)
 
 	require.NoError(t, service.UpdateKnowledge(ctx, &types.Knowledge{
 		ID: "knowledge-1", CustomMetadata: types.JSON(`{"region":"Shanghai"}`),
@@ -213,6 +239,17 @@ func TestUpdateKnowledgeUnchangedMetadataDoesNotRefreshSummary(t *testing.T) {
 		repo: repo, chunkRepo: &metadataUpdateChunkRepo{}, kbService: metadataUpdateKBService{}, task: taskEnqueuer,
 	}
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(7))
+	ctx = (&access.KBAccess{
+		KnowledgeBase: &types.KnowledgeBase{
+			ID:       "kb-1",
+			TenantID: 7,
+		},
+		Caller:            types.CallerFromContext(ctx),
+		EffectiveTenantID: 7,
+		Permission:        types.OrgRoleEditor,
+	}).Context(
+		ctx,
+	)
 
 	require.NoError(t, service.UpdateKnowledge(ctx, &types.Knowledge{
 		ID:             "knowledge-1",

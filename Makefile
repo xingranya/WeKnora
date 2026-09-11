@@ -129,10 +129,12 @@ docker-build-app:
 docker-build-docreader:
 	docker build --platform $(PLATFORM) -f docker/Dockerfile.docreader -t wechatopenai/weknora-docreader:latest .
 
-# Build frontend Docker image
+# Build frontend Docker image (multi-stage: npm runs inside the builder stage)
 docker-build-frontend:
-	./scripts/build_frontend_dist.sh
-	docker build --platform $(PLATFORM) -f frontend/Dockerfile -t wechatopenai/weknora-ui:latest frontend/
+	@eval $$(./scripts/get_version.sh env); \
+	docker build --platform $(PLATFORM) \
+		--build-arg VITE_FRONTEND_COMMIT="$$COMMIT_ID" \
+		-f frontend/Dockerfile -t wechatopenai/weknora-ui:latest frontend/
 
 # Build all Docker images
 docker-build-all: docker-build-app docker-build-docreader docker-build-frontend
@@ -226,7 +228,7 @@ migrate-goto:
 # Generate API documentation (Swagger)
 docs:
 	@echo "生成 Swagger API 文档..."
-	swag init -g $(MAIN_PATH)/main.go -o ./docs --parseDependency --parseInternal
+	swag init -g $(MAIN_PATH)/main.go -o ./docs --parseDependency --parseInternal --exclude tmp,temp,.upstream-sync
 	@echo "文档已生成到 ./docs 目录"
 	@echo "启动服务后访问 http://localhost:8080/swagger/index.html 查看文档"
 
@@ -347,4 +349,3 @@ dev-app:
 
 dev-frontend:
 	./scripts/dev.sh frontend
-

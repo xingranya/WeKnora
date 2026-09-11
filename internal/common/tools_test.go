@@ -3,6 +3,7 @@ package common
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseLLMJsonResponse(t *testing.T) {
@@ -69,6 +70,18 @@ func TestPipelineLogPreservesAuditContentButRedactsCredentials(t *testing.T) {
 		if !strings.Contains(logLine, expected) {
 			t.Fatalf("PipelineLog missing %q: %s", expected, logLine)
 		}
+	}
+}
+
+func TestCleanInvalidUTF8(t *testing.T) {
+	input := "valid " + string([]byte{0xef, 0xbc, 0x2e}) + "\x00tail"
+
+	got := CleanInvalidUTF8(input)
+	if !utf8.ValidString(got) {
+		t.Fatalf("CleanInvalidUTF8 returned invalid UTF-8: % x", []byte(got))
+	}
+	if want := "valid .tail"; got != want {
+		t.Fatalf("CleanInvalidUTF8() = %q, want %q", got, want)
 	}
 }
 

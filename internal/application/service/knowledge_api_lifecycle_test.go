@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/access"
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -102,10 +103,12 @@ func TestKnowledgeUserPatchInterleavingReturnsConflictAndKeepsMoveClaim(t *testi
 				"metadata":     types.JSON(`{"_weknora_move_claim":{"task_id":"winner"}}`),
 			}).Error)
 	}
-	svc := &knowledgeService{repo: wrapped}
-	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, tenant.ID)
+	kb := &types.KnowledgeBase{ID: "kb-1", TenantID: tenant.ID}
+	svc := &knowledgeService{repo: wrapped, kbService: lifecycleKBService{kb: kb}}
+	ctx, err := access.WithKBTaskWrite(context.Background(), kb, tenant.ID)
+	require.NoError(t, err)
 
-	err := svc.UpdateKnowledge(ctx, &types.Knowledge{ID: knowledge.ID, Title: "陈旧标题"})
+	err = svc.UpdateKnowledge(ctx, &types.Knowledge{ID: knowledge.ID, Title: "陈旧标题"})
 
 	requireConflictAppError(t, err)
 	var persisted types.Knowledge

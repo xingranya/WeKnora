@@ -798,3 +798,23 @@ func TestCreateKnowledgeBaseAndDeleteTenantConcurrentTransactionsStayConsistent(
 		assert.Zero(t, activeTenants)
 	}
 }
+
+func TestMultiKBDeleteClaimsRollBackAllGroupsWhenOneIsMoving(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	first := insertKnowledgeInKB(t, db, 1, "kb-a", types.ParseStatusCompleted)
+	moving := insertKnowledgeInKB(t, db, 1, "kb-b", types.ParseStatusMoving)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	claimed, err := repo.ClaimKnowledgeListForDelete(context.Background(), 1, map[string][]string{
+		"kb-a": {first}, "kb-b": {moving},
+	})
+	require.ErrorIs(t, err, types.ErrKnowledgeMoveInProgress)
+	require.Nil(t, claimed)
+	rows, err := repo.GetKnowledgeBatch(context.Background(), 1, []string{first, moving})
+	require.NoError(t, err)
+	byID := map[string]string{}
+	for _, row := range rows {
+		byID[row.ID] = row.ParseStatus
+	}
+	require.Equal(t, types.ParseStatusCompleted, byID[first])
+	require.Equal(t, types.ParseStatusMoving, byID[moving])
+}

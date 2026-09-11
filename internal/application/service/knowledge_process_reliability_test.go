@@ -761,7 +761,7 @@ func TestProcessDocumentReturnsRetrieveEngineCreationErrorWithoutPanicking(t *te
 			IndexingStrategy: types.IndexingStrategy{VectorEnabled: true},
 		}},
 		modelService: processReliabilityModelService{embedder: parentChildEmbedder{}},
-		chunkService: &parentChildChunkService{},
+		chunkRepo:    &parentChildChunkService{},
 		retrieveEngine: failingProcessRetrieveRegistry{
 			err: engineErr,
 		},
@@ -984,12 +984,12 @@ func TestProcessDocumentReturnsFinalStatePersistenceError(t *testing.T) {
 		finalizeErrors: []error{persistErr},
 	}
 	service := &knowledgeService{
-		repo:         repo,
-		tenantRepo:   &processReliabilityTenantRepo{tenant: &types.Tenant{ID: 1}},
-		kbService:    processReliabilityKBService{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}},
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		repo:        repo,
+		tenantRepo:  &processReliabilityTenantRepo{tenant: &types.Tenant{ID: 1}},
+		kbService:   processReliabilityKBService{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}},
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        1,
@@ -1012,12 +1012,12 @@ func TestProcessDocumentReturnsPostProcessEnqueueError(t *testing.T) {
 		ParseStatus:     types.ParseStatusPending,
 	}}
 	service := &knowledgeService{
-		repo:         repo,
-		tenantRepo:   &processReliabilityTenantRepo{tenant: &types.Tenant{ID: 1}},
-		kbService:    processReliabilityKBService{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}},
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{err: enqueueErr},
+		repo:        repo,
+		tenantRepo:  &processReliabilityTenantRepo{tenant: &types.Tenant{ID: 1}},
+		kbService:   processReliabilityKBService{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 1}},
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{err: enqueueErr},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        1,
@@ -1064,7 +1064,7 @@ func TestProcessDocumentReturnsStorageQuotaUpdateError(t *testing.T) {
 			IndexingStrategy: types.IndexingStrategy{VectorEnabled: true},
 		}},
 		modelService:   processReliabilityModelService{embedder: parentChildEmbedder{}},
-		chunkService:   &parentChildChunkService{},
+		chunkRepo:      &parentChildChunkService{},
 		retrieveEngine: parentChildRetrieveRegistry{engine: retrieveEngine},
 		graphEngine:    parentChildGraphRepo{},
 		task:           &processReliabilityTaskEnqueuer{},
@@ -1118,7 +1118,7 @@ func TestProcessDocumentRetryDoesNotDoubleCountIndexedStorage(t *testing.T) {
 			IndexingStrategy: types.IndexingStrategy{VectorEnabled: true},
 		}},
 		modelService:   processReliabilityModelService{embedder: parentChildEmbedder{}},
-		chunkService:   &parentChildChunkService{},
+		chunkRepo:      &parentChildChunkService{},
 		retrieveEngine: parentChildRetrieveRegistry{engine: retrieveEngine},
 		graphEngine:    parentChildGraphRepo{},
 		task:           enqueuer,
@@ -1178,10 +1178,10 @@ func TestProcessDocumentFileURLRetryReusesStoredObjectAndSourceQuota(t *testing.
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         enqueuer,
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        enqueuer,
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,
@@ -1249,10 +1249,10 @@ func TestProcessDocumentFileURLLazyMissingStableObjectFallsBackToDownload(t *tes
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,
@@ -1308,10 +1308,10 @@ func TestProcessDocumentFileURLReusesPreparedStableObjectWithoutRemoteDownload(t
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,
@@ -1367,10 +1367,10 @@ func TestProcessDocumentFileURLPreparedObjectReadFailureDoesNotRedownload(t *tes
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,
@@ -1426,10 +1426,10 @@ func TestProcessDocumentFileURLMetadataRetryCleansUnownedStableObject(t *testing
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,
@@ -1489,10 +1489,10 @@ func TestProcessDocumentFileURLAtomicQuotaFailureRetriesWithoutPartialWrite(t *t
 			ID:       "kb-1",
 			TenantID: tenant.ID,
 		}},
-		fileSvc:      fileService,
-		chunkService: &parentChildChunkService{},
-		graphEngine:  parentChildGraphRepo{},
-		task:         &processReliabilityTaskEnqueuer{},
+		fileSvc:     fileService,
+		chunkRepo:   &parentChildChunkService{},
+		graphEngine: parentChildGraphRepo{},
+		task:        &processReliabilityTaskEnqueuer{},
 	}
 	task := newDocumentProcessTask(t, types.DocumentProcessPayload{
 		TenantID:        tenant.ID,

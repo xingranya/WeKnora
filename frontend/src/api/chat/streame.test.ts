@@ -8,6 +8,10 @@ class MemoryStorage {
     return this.values.get(key) ?? null
   }
 
+  removeItem(key: string) {
+    this.values.delete(key)
+  }
+
   setItem(key: string, value: string) {
     this.values.set(key, String(value))
   }
@@ -18,7 +22,7 @@ storage.setItem('weknora_token', 'test-token')
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
 Object.defineProperty(globalThis, 'window', {
   configurable: true,
-  value: { __RUNTIME_CONFIG__: {} },
+  value: { __RUNTIME_CONFIG__: {}, location: { pathname: '/platform/chat', href: '' } },
 })
 
 await mock.module('vue', {
@@ -44,6 +48,11 @@ await mock.module(new URL('../../utils/api-base.ts', import.meta.url).href, {
   namedExports: {
     getApiBaseUrl: () => 'http://localhost',
   },
+})
+
+let refreshHandler: (token: string) => Promise<any> = async () => ({ success: false })
+await mock.module(new URL('../auth/index.ts', import.meta.url).href, {
+  namedExports: { refreshToken: (token: string) => refreshHandler(token) },
 })
 
 const {
@@ -191,4 +200,76 @@ test('非 2xx 文本错误体按字节上限读取并取消剩余内容', async 
 
   const message = await buildStreamHTTPErrorMessage(new Response('upstream unavailable', { status: 502 }))
   assert.equal(message, 'HTTP 502: upstream unavailable')
+})
+
+
+test('握手 401 刷新后使用新凭据继续流并保持终态校验', async () => {
+  storage.setItem('weknora_token', 'old-token')
+  storage.setItem('weknora_refresh_token', 'refresh-token')
+  let refreshCalls = 0
+  refreshHandler = async (token) => {
+    assert.equal(token, 'refresh-token')
+    refreshCalls += 1
+    return { success: true, data: { token: 'new-token', refreshToken: 'next-refresh' } }
+  }
+  const headers: string[] = []
+  const stream = useStream({
+    fetchEventSource: (async (_url: string, options: any) => {
+      headers.push(options.headers.Authorization)
+      await options.onopen(new Response(null, { status: headers.length === 1 ? 401 : 200 }))
+      options.onmessage({ data: '{"response_type":"complete","done":true}' })
+      options.onclose()
+    }) as any,
+  })
+  await stream.startStream(baseParams)
+  assert.deepEqual(headers, ['Bearer old-token', 'Bearer new-token'])
+  assert.equal(refreshCalls, 1)
+  assert.equal(stream.error.value, null)
+  assert.equal(stream.isStreaming.value, false)
+})
+
+test('刷新凭据期间停止请求后不能重放旧流', async () => {
+  storage.setItem('weknora_token', 'old-token')
+  storage.setItem('weknora_refresh_token', 'refresh-token')
+  let started!: () => void
+  const refreshing = new Promise<void>((resolve) => { started = resolve })
+  let release!: (value: any) => void
+  refreshHandler = () => {
+    started()
+    return new Promise((resolve) => { release = resolve })
+  }
+  let requests = 0
+  const stream = useStream({
+    fetchEventSource: (async (_url: string, options: any) => {
+      requests += 1
+      await options.onopen(new Response(null, { status: 401 }))
+    }) as any,
+  })
+  const pending = stream.startStream(baseParams)
+  await refreshing
+  stream.stopStream()
+  release({ success: true, data: { token: 'new-token', refreshToken: 'next-refresh' } })
+  await pending
+  assert.equal(requests, 1)
+  assert.equal(stream.error.value, null)
+  assert.equal(stream.isStreaming.value, false)
+})
+
+test('刷新后无明确终态的 EOF 仍按失败结束', async () => {
+  storage.setItem('weknora_token', 'old-token')
+  storage.setItem('weknora_refresh_token', 'refresh-token')
+  refreshHandler = async () => ({ success: true, data: { token: 'new-token', refreshToken: 'next-refresh' } })
+  let requests = 0
+  const stream = useStream({
+    fetchEventSource: (async (_url: string, options: any) => {
+      requests += 1
+      await options.onopen(new Response(null, { status: requests === 1 ? 401 : 200 }))
+      options.onmessage({ data: '{"response_type":"answer","content":"partial","done":false}' })
+      options.onclose()
+    }) as any,
+  })
+  await stream.startStream(baseParams)
+  assert.equal(requests, 2)
+  assert.equal(stream.error.value, 'error.streamFailed')
+  assert.equal(stream.isStreaming.value, false)
 })
