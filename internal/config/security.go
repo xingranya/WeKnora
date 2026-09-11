@@ -10,8 +10,8 @@ const (
 	minJWTSecretBytes    = 32
 	minSecretUniqueBytes = 8
 
-	// MinimumProductionMigrationVersion 是本版本标准版生产服务可安全运行的最低迁移版本。
-	MinimumProductionMigrationVersion uint = 87
+	// MinimumProductionMigrationVersion 是本版本标准版生产服务要求的精确迁移版本。
+	MinimumProductionMigrationVersion uint = 96
 
 	legacyDefaultSystemAESKey = "weknora-system-aes-key-32bytes!!"
 	legacyDefaultJWTSecret    = "weknora-jwt-secret"

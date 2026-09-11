@@ -1,11 +1,30 @@
 package config
 
 import (
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// 迁移目录和生产启动门禁必须一致，避免完整迁移后被旧版本常量拒绝启动。
+func TestProductionMigrationVersionMatchesVersionedSchema(t *testing.T) {
+	files, err := filepath.Glob("../../migrations/versioned/*.up.sql")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	var latest uint64
+	for _, file := range files {
+		prefix, _, found := strings.Cut(filepath.Base(file), "_")
+		require.True(t, found, file)
+		version, err := strconv.ParseUint(prefix, 10, 64)
+		require.NoError(t, err, file)
+		latest = max(latest, version)
+	}
+	require.Equal(t, uint(latest), MinimumProductionMigrationVersion)
+	require.NoError(t, ValidateProductionMigrationState("standard", "release", "postgres", uint(latest), false, true))
+}
 
 func TestValidateSystemAESKeyForStartup(t *testing.T) {
 	tests := []struct {

@@ -810,7 +810,7 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	}
 
 	// 公司预置模型协调不是 schema migration，必须在生产 AUTO_MIGRATE=false
-	// 时照常执行。生产先通过 87 clean 门禁，再严格验证清单中的每个模型；
+	// 时照常执行。生产先通过当前版本的 clean 迁移门禁，再严格验证清单中的每个模型；
 	// 开发环境保留缺少可选文件时告警后继续的兼容行为。
 	if isStandardProduction {
 		if err := types.LoadBuiltinModelsConfigStrict(context.Background(), db, config.ConfigDir()); err != nil {
