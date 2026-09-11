@@ -3,6 +3,8 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,7 +16,55 @@ import (
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 	"github.com/Tencent/WeKnora/cli/internal/secrets"
 	sdk "github.com/Tencent/WeKnora/client"
+	"github.com/stretchr/testify/require"
 )
+
+// 只跳过鉴权已成功后的明确版本读取权限不足，不按错误正文猜测状态。
+func TestDoctorVersionPermissionDeniedDoesNotFailAuthenticatedKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want Status
+	}{
+		{"明确403", &sdk.APIError{StatusCode: http.StatusForbidden}, StatusSkip},
+		{"包装403", fmt.Errorf("upstream: %w", &sdk.APIError{StatusCode: http.StatusForbidden}), StatusSkip},
+		{"401仍失败", &sdk.APIError{StatusCode: http.StatusUnauthorized}, StatusFail},
+		{"500仍失败", &sdk.APIError{StatusCode: http.StatusInternalServerError}, StatusFail},
+		{"网络超时仍失败", context.DeadlineExceeded, StatusFail},
+		{"正文包含403不算权限不足", errors.New("connection failed: HTTP error 403"), StatusFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			withCredStoreFactory(t, func() (secrets.Store, error) { return secrets.NewMemStore(), nil })
+			svc := &fakeServices{userResp: goodUserResp(), systemErr: tc.err}
+			r := runChecks(context.Background(), &Options{NoCache: true}, svc, "1.0.0")
+			require.Equal(t, StatusOK, r.Checks[1].Status)
+			require.Equal(t, tc.want, r.Checks[2].Status)
+			require.Equal(t, int32(1), svc.systemInfoHits.Load())
+			require.False(t, r.Summary.AllPassed, "跳过版本检查不能声称完整验收通过")
+			if tc.want == StatusSkip {
+				require.Equal(t, 3, r.Summary.Passed)
+				require.Zero(t, r.Summary.Failed)
+				require.Equal(t, 1, r.Summary.Skipped)
+				require.Contains(t, r.Checks[2].Details, "版本兼容性未验证")
+			} else {
+				require.Equal(t, 1, r.Summary.Failed)
+				require.Zero(t, r.Summary.Skipped)
+			}
+		})
+	}
+}
+
+func TestDoctorAuthentication403RemainsFailure(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withCredStoreFactory(t, func() (secrets.Store, error) { return secrets.NewMemStore(), nil })
+	svc := &fakeServices{userErr: &sdk.APIError{StatusCode: http.StatusForbidden}}
+	r := runChecks(context.Background(), &Options{NoCache: true}, svc, "1.0.0")
+	require.Equal(t, StatusFail, r.Checks[1].Status)
+	require.Equal(t, StatusSkip, r.Checks[2].Status)
+	require.Equal(t, 1, r.Summary.Failed)
+	require.Zero(t, svc.systemInfoHits.Load())
+}
 
 // withCredStoreFactory swaps the package-level credStoreFactory hook for the
 // duration of t. Tests that assert the credential_storage outcome use this

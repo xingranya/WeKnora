@@ -92,7 +92,7 @@ async function download() {
     const blob = await getDown(`${endpoint}/extension`)
     if (!alive) return
     const url = URL.createObjectURL(blob), link = document.createElement('a')
-    link.href = url; link.download = 'browser-skill-weknora.zip'; link.click()
+    link.href = url; link.download = '见外浏览器连接.zip'; link.click()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (e: any) { if (alive) error.value = e?.message || t('localBrowser.failed') }
   finally { if (alive) downloading.value = false }

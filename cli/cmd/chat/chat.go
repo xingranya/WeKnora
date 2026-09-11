@@ -70,7 +70,7 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   `chat "<text>"`,
 		Short: "Ask a streaming RAG question against a knowledge base",
-		Long: `Send a query to the WeKnora knowledge-chat endpoint and stream the
+		Long: `Send a query to the 见外 knowledge-chat endpoint and stream the
 answer back. By default a fresh session is created on first invocation; pass
 --session to continue an existing conversation.
 
@@ -146,7 +146,7 @@ func runChat(ctx context.Context, opts *Options, fopts *cmdutil.FormatOptions, s
 	sessionID := opts.SessionID
 	autoCreated := false
 	if sessionID == "" {
-		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora chat"})
+		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 CLI 对话"})
 		if err != nil {
 			// Ctrl-C during session creation: classify as cancelled so the
 			// hint nudges the user toward retry-with-signal-clean, not

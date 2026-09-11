@@ -1040,11 +1040,11 @@ services:
       - WEKNORA_API_KEY=${WEKNORA_API_KEY:-}
       # HTTP/SSE 传输必填：mcp-server 启动时若缺少此项会拒绝启动（客户端以 Authorization: Bearer 携带）
       - MCP_SERVER_AUTH_TOKEN=${MCP_SERVER_AUTH_TOKEN:-}
-      # 调用 WeKnora REST 的读超时（秒，默认 300）
+      # 聊天 SSE 的读取超时（秒，默认 300）；不控制普通 REST 请求。
       - WEKNORA_CHAT_TIMEOUT=${WEKNORA_CHAT_TIMEOUT:-300}
       # 是否校验 WeKnora 后端 TLS 证书（默认 true；自签证书可设 false）
       - WEKNORA_VERIFY_SSL=${WEKNORA_VERIFY_SSL:-true}
-      # 允许上传的目录白名单（逗号分隔；留空禁用文件上传工具）
+      # 允许上传的目录白名单（逗号分隔；留空仅允许 MCP 工作目录）。
       - MCP_ALLOWED_UPLOAD_DIRS=${MCP_ALLOWED_UPLOAD_DIRS:-}
     depends_on:
       app:

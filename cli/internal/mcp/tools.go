@@ -158,7 +158,7 @@ type kbListOutput struct {
 func addKBList(server *mcpsdk.Server, svc knowledgeBaseService) {
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name:        "kb_list",
-		Description: "List all knowledge bases visible to the active WeKnora tenant. No arguments. Returns items[]: each item carries id, name, description, knowledge_count, is_pinned, updated_at - useful for selecting a kb_id to pass to other tools.",
+		Description: "List all knowledge bases visible to the active 见外 tenant. No arguments. Returns items[]: each item carries id, name, description, knowledge_count, is_pinned, updated_at - useful for selecting a kb_id to pass to other tools.",
 		Annotations: &mcpsdk.ToolAnnotations{
 			Title:           "List Knowledge Bases",
 			DestructiveHint: bptr(false),
@@ -480,7 +480,7 @@ func addChat(server *mcpsdk.Server, svc chatService) {
 		}
 		sessionID := in.SessionID
 		if sessionID == "" {
-			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora mcp chat"})
+			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 MCP 对话"})
 			if err != nil {
 				return toolErrorResult(cmdutil.WrapHTTP(err, "create chat session")), nil, nil
 			}
@@ -598,7 +598,7 @@ func addSessionAsk(server *mcpsdk.Server, svc sessionAskService) {
 		// agnostic at creation (verified against server source).
 		sessionID := in.SessionID
 		if sessionID == "" {
-			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora mcp session_ask"})
+			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 MCP 智能体对话"})
 			if err != nil {
 				return toolErrorResult(cmdutil.WrapHTTP(err, "create chat session")), nil, nil
 			}

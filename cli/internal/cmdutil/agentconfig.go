@@ -106,7 +106,7 @@ func MergeAgentConfig(base *sdk.AgentConfig, ov AgentConfigFlags) *sdk.AgentConf
 // `agent create --generate-skeleton` so users get a ready-to-edit
 // starting point without authoring the full schema from memory.
 func GenerateAgentSkeleton(w io.Writer) error {
-	const skeleton = `# WeKnora AgentConfig YAML skeleton
+	const skeleton = `# 见外 AgentConfig YAML 配置模板
 # Edit this file and pass it to:
 #   weknora agent create "My Agent" --model <id> --config-file <this-file>
 # Hot-path flags on the create command override values set here.

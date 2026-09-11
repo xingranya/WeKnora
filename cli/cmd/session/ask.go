@@ -125,7 +125,7 @@ func runAsk(ctx context.Context, opts *AskOptions, fopts *cmdutil.FormatOptions,
 	sessionID := opts.SessionID
 	autoCreated := false
 	if sessionID == "" {
-		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora session ask"})
+		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外智能体对话"})
 		if err != nil {
 			if cmdutil.IsCancelled(ctx, err) {
 				return cmdutil.Wrapf(cmdutil.CodeOperationCancelled, err, "session ask cancelled")

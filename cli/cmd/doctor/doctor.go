@@ -6,7 +6,7 @@
 //	warn - soft problem; non-blocking (e.g. server minor older than CLI,
 //	       keychain unavailable so falling back to file store)
 //	fail - failed; "hint" actionable
-//	skip - cascade-skipped (prereq failed) or --offline mode
+//	skip - 前置检查失败、--offline 模式，或已鉴权但无系统版本读取权限
 //
 // JSON output emits the Result object directly (bare data). Exit-code
 // signal:
@@ -21,6 +21,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -198,8 +199,14 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string) 
 	if !cascade(&checks[2], opts.Offline, &checks[1]) {
 		info, fromCache, err := loadOrProbeServerInfo(ctx, opts, svc)
 		if err != nil {
-			checks[2].Status = StatusFail
-			checks[2].Details = err.Error()
+			var apiErr *sdk.APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+				checks[2].Status = StatusSkip
+				checks[2].Details = "当前 Key 无系统版本读取权限（HTTP 403）；鉴权已通过，核心 CLI 命令仍可在已有权限内使用，版本兼容性未验证"
+			} else {
+				checks[2].Status = StatusFail
+				checks[2].Details = err.Error()
+			}
 		} else {
 			fillVersionCheck(&checks[2], info, cliVer, fromCache)
 		}

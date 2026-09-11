@@ -845,7 +845,7 @@ const handleExport = async () => {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = 'weknora-memories.json'
+    link.download = '见外记忆.json'
     link.click()
     URL.revokeObjectURL(url)
   } catch (error: any) {

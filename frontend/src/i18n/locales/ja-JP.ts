@@ -87,7 +87,7 @@ export default {
     "copyAgain": "再コピー",
     "connectionNote": "同じスペースの会話で接続を共有します。サーバー再起動後は自動再接続します。",
     "resumeNote": "中断したタスクは再接続後も一時停止します。会話のプレビューから再開してください。",
-    "privacyNote": "タスクは専用タブグループを使用します。既存タブには許可が必要です。ページと画像は WeKnora に送信されます。",
+    "privacyNote": "タスクは専用タブグループを使用します。既存タブには許可が必要です。ページと画像は 见外 に送信されます。",
     "installHelp": "インストールと使い方",
     "installSteps": "拡張を解凍し、Chrome の拡張機能ページでデベロッパーモードを有効にして読み込んでください。接続後、会話でタスクを伝え、プレビューをクリックするとタスクタブに移動できます。",
     "running": "実行中",
@@ -1266,7 +1266,7 @@ export default {
       dockerDisabledAlert: 'このデプロイではDockerサンドボックスが有効になっていません',
       dockerDisabledHint: 'ローカルのdocker.sockはホスト上のroot権限に相当します。単一マシンのプライベート環境では、システム管理者が「設定 → システム設定 → ネットワークセキュリティ」から有効化できます。',
       dockerDisabledCard: 'このデプロイではDockerサンドボックスが無効です。この設定ではコンテナは作成されません',
-      dockerHostRisk: '空欄またはunix://を指定するとWeKnoraホストのDockerデーモンを使用します。これはそのマシンのroot権限に相当します。単一ノードのプライベート環境でのみ使用してください。複数のワークスペースがホストを共有する場合はCubeまたはE2Bを推奨します。リモートのtcp://エンドポイントにはTLS証明書ディレクトリが必要です。',
+      dockerHostRisk: '空欄またはunix://を指定すると见外ホストのDockerデーモンを使用します。これはそのマシンのroot権限に相当します。単一ノードのプライベート環境でのみ使用してください。複数のワークスペースがホストを共有する場合はCubeまたはE2Bを推奨します。リモートのtcp://エンドポイントにはTLS証明書ディレクトリが必要です。',
       addConfig: 'サンドボックスを追加',
       viewClusterGuide: 'クラスタ構築ガイド',
       configName: '設定名',
@@ -1391,11 +1391,11 @@ export default {
       templateUntaggedHint: "ビルドは完了しましたが、デフォルトタグが付いたものがないため、サンドボックス作成時にこのテンプレートを解決できません。E2Bで削除して更新すると、见外传媒知识库が再構築します。",
       templateFailedReason: 'ビルドに失敗しました: {reason}',
       noTemplates: 'このクラスタからテンプレートが返されませんでした。',
-      weknoraStandardTemplate: 'WeKnora標準テンプレート',
+      weknoraStandardTemplate: '见外標準テンプレート',
       createStandardTemplate: '作成',
       createStandardTemplateHint: 'DNSを含む現在の接続設定でビルドされます。設定を変更した場合は、カードから再構築してください。',
       replaceStandardTemplate: '再構築',
-      replaceStandardTemplateConfirm: 'DNSを含む現在の設定でWeKnora標準テンプレートを再構築します。既存の起動可能なテンプレートは、新しいテンプレートの準備が整うまで削除されません。',
+      replaceStandardTemplateConfirm: 'DNSを含む現在の設定で见外標準テンプレートを再構築します。既存の起動可能なテンプレートは、新しいテンプレートの準備が整うまで削除されません。',
       templateLockedBySkills: 'このサンドボックスにはすでにスキルがあります。スキル環境は現在のスナップショットに紐づいているため、ランタイムテンプレートの変更や再構築はできません。新しいサンドボックスを作成し、新しいテンプレートからスキルをインストールしてください。',
       templateLockedByInFlight: 'スキルのインストールまたは削除が進行中です。完了するまでランタイムテンプレートの変更や再構築はできません。',
       templateUnnamed: '無題のテンプレート',
@@ -1425,7 +1425,7 @@ export default {
       cubeApiKeyOptional: '任意。認証なしのセルフホストCubeSandboxでは空欄のままにしてください',
       cubeApiKeyWhere: 'セルフホストクラスタで認証を有効にする方法',
       cubeDnsServers: 'DNSサーバ',
-      cubeDnsServersHelp: '任意。WeKnora標準テンプレートに書き込まれるネームサーバのIPです。空欄の場合はクラスタのデフォルト（通常は119.29.29.29）を使用します。パブリックリゾルバへのUDP/53がブロックされている場合は、Cubeホストの/etc/resolv.confから到達可能なアドレス（10/8、172.16/12、192.168/16を除く）を指定してください。既存の標準テンプレートには、テンプレートカードで「再構築」を実行した後にのみ反映されます。',
+      cubeDnsServersHelp: '任意。见外標準テンプレートに書き込まれるネームサーバのIPです。空欄の場合はクラスタのデフォルト（通常は119.29.29.29）を使用します。パブリックリゾルバへのUDP/53がブロックされている場合は、Cubeホストの/etc/resolv.confから到達可能なアドレス（10/8、172.16/12、192.168/16を除く）を指定してください。既存の標準テンプレートには、テンプレートカードで「再構築」を実行した後にのみ反映されます。',
       cubeDnsServersPlaceholder: '例: 8.8.8.8（Enterで追加）',
       e2bApiKeyHelp: 'E2BダッシュボードのAPI Keysページで作成します。通常はe2b_で始まります。',
       e2bApiKeyWhere: 'E2BダッシュボードでAPIキーを取得',
@@ -1455,9 +1455,9 @@ export default {
       dockerHost: 'Dockerデーモンのエンドポイント',
       dockerHostHelp: '空欄の場合はローカルのdocker CLI（DOCKER_HOSTまたは現在のdockerコンテキスト）に従うため、/var/run/docker.sockを入力する必要はありません。リモートデーモンを使う場合はtcp://host:2376を指定してTLS証明書ディレクトリを入力し、RFC1918アドレスでは「プライベートエンドポイントを許可」を有効にしてください。',
       dockerTlsCertPath: 'TLS証明書ディレクトリ',
-      dockerTlsCertPathHelp: 'WeKnoraホスト上でca.pem、cert.pem、key.pemを格納しているディレクトリです。リモートデーモンでは必須です。証明書はデプロイ側でマウントされ、ここには保存されません。',
+      dockerTlsCertPathHelp: '见外ホスト上でca.pem、cert.pem、key.pemを格納しているディレクトリです。リモートデーモンでは必須です。証明書はデプロイ側でマウントされ、ここには保存されません。',
       dockerIdleTtl: 'アイドル回収（秒）',
-      dockerIdleTtlHelp: 'Dockerデーモン自体にはアイドルタイムアウトがありません。この時間コマンドが実行されなかったコンテナはWeKnoraが回収し、セッションが続く場合は再作成します。空欄の場合は1800秒です。',
+      dockerIdleTtlHelp: 'Dockerデーモン自体にはアイドルタイムアウトがありません。この時間コマンドが実行されなかったコンテナは见外が回収し、セッションが続く場合は再作成します。空欄の場合は1800秒です。',
       dockerCpuLimit: 'CPUコア数の上限',
       dockerCpuLimitHelp: 'サンドボックス1つが使用できるCPUコア数です。0の場合は組み込みのデフォルトを使用します。',
       dockerMemoryLimit: 'メモリ上限（MB）',
@@ -1698,37 +1698,37 @@ export default {
     },
     capabilityUnavailable: 'この機能は現在のデプロイでは利用できません。利用可能なページに戻りました。',
     weknoraCloud: {
-      title: 'WeKnora Cloud',
-      description: 'WeKnora CloudのAPPIDとAPPSECRETを設定します。この認証情報はモデルサービスとドキュメント解析エンジンで使用されます。',
+      title: '公式クラウドサービス',
+      description: '公式クラウドサービスのAPPIDとAPPSECRETを設定します。この認証情報はモデルサービスとドキュメント解析エンジンで使用されます。',
       viewDocs: 'ドキュメントを表示',
       unconfigured: '認証情報が未設定です。APPIDとAPPSECRETを入力してください。',
       configured: '認証情報は設定済みで、正常に動作しています。',
-      expired: 'WeKnora Cloudの認証情報が無効になりました',
+      expired: '公式クラウドサービスの認証情報が無効になりました',
       expiredDefault: 'サービス再起動後に暗号化キーが変更されました。保存済みの認証情報を復号できません。認証情報を再入力してください。',
       reconfigure: '再設定',
       appIdLabel: 'APPID',
-      appIdDesc: 'WeKnora CloudのアプリケーションID',
+      appIdDesc: '公式クラウドサービスのアプリケーションID',
       appIdPlaceholder: 'APPIDを入力',
       appSecretLabel: 'APPSECRET',
-      appSecretDesc: 'WeKnora Cloudのアプリケーションシークレット',
+      appSecretDesc: '公式クラウドサービスのアプリケーションシークレット',
       appSecretPlaceholder: 'APPSECRETを入力',
       saveHint: '認証情報は検証・暗号化されたうえで保存されます。',
       saveBtn: '認証情報を保存',
       usageTitle: '利用ガイド',
-      usageSteps: '1. APPIDとAPPSECRETを保存\\\n2. 下の「クラウドモデル」でチャット、埋め込み、リランク、vlmを登録\\\n3. 解析エンジン: ナレッジベース設定 → 解析エンジン → WeKnora Cloud',
+      usageSteps: '1. APPIDとAPPSECRETを保存\\\n2. 下の「クラウドモデル」でチャット、埋め込み、リランク、vlmを登録\\\n3. 解析エンジン: ナレッジベース設定 → 解析エンジン → 公式クラウドサービス',
       fillRequired: 'APPIDとAPPSECRETを入力してください',
       saveSuccess: '認証情報を保存しました',
       saveFailed: '認証情報の保存に失敗しました',
-      credentialConfigured: 'WeKnoraCloudの認証情報は設定済みです。',
+      credentialConfigured: '公式クラウドサービスの認証情報は設定済みです。',
       credentialExpired: '認証情報が無効になりました。再設定してください。',
-      credentialUnconfigured: 'WeKnoraCloudの認証情報が未設定です。先にAPPIDとAPPSECRETを設定してください。',
+      credentialUnconfigured: '公式クラウドサービスの認証情報が未設定です。先にAPPIDとAPPSECRETを設定してください。',
       checkingStatus: '認証情報のステータスを確認中...',
       goToSettings: '設定へ移動',
-      modelHintConfigured: 'WeKnoraCloudの認証情報は設定済みです。対応モデルは以下を参照してください:',
+      modelHintConfigured: '公式クラウドサービスの認証情報は設定済みです。対応モデルは以下を参照してください:',
       modelHintDocsLink: 'APIドキュメント',
       modelsSection: {
         title: 'クラウドモデル',
-        descReady: 'チャット、検索、リランク、画像理解（VLM）の4種類のWeKnora Cloud標準モデルを登録します。',
+        descReady: 'チャット、検索、リランク、画像理解（VLM）の4種類の公式クラウドサービス標準モデルを登録します。',
         descPending: 'クラウドモデルを追加する前に、上の認証情報を保存してください。',
         statusAdded: '追加済み',
         statusPending: '認証情報が必要',
@@ -1744,10 +1744,10 @@ export default {
       addModelsFailed: 'モデルの追加に失敗しました',
       addModelsEmbeddingFailed: '埋め込みモデルの接続テストに失敗し、ベクトルの次元数を検出できませんでした',
       addModelsDisplayName: {
-        chat: 'WeKnoraCloud Chat',
-        embedding: 'WeKnoraCloud Embedding',
-        rerank: 'WeKnoraCloud ReRank',
-        vllm: 'WeKnoraCloud Vision'
+        chat: '公式クラウドサービス Chat',
+        embedding: '公式クラウドサービス Embedding',
+        rerank: '公式クラウドサービス ReRank',
+        vllm: '公式クラウドサービス Vision'
       }
     },
     system: 'システム設定',
@@ -1869,8 +1869,8 @@ export default {
       needsConfig: '設定が必要',
       configurable: '設定可能',
       pathPrefix: 'パスのプレフィックス（任意）',
-      pathPrefixPlaceholder: '例: weknora/images',
-      prefixPlaceholder: '例: weknora',
+      pathPrefixPlaceholder: '例: jiwai/images',
+      prefixPlaceholder: '例: jiwai',
       bucketName: 'バケット名',
       bucketPlaceholder: 'バケット名',
       minioDesc: 'S3互換のセルフホスト型オブジェクトストレージです。プライベートネットワークやプライベートクラウドでのデプロイに適しています。',
@@ -2136,7 +2136,7 @@ export default {
   },
   envVarSettings: {
     title: 'サンドボックスのシークレット',
-    description: 'スキルとサンドボックスで使う個人用のキーです。WeKnoraのシステム設定やデプロイ設定ではありません。',
+    description: 'スキルとサンドボックスで使う個人用のキーです。见外のシステム設定やデプロイ設定ではありません。',
     helpAria: 'サンドボックスのシークレットについて',
     introPersonalTitle: 'あなただけのもの',
     introPersonalBody: 'あなた自身のチャットや実行にのみ注入されます。他のメンバーからは見えず、他のメンバーの値があなたの値を上書きすることもありません。',
@@ -4604,6 +4604,10 @@ export default {
       providerLabel: 'プロバイダ',
       providerPlaceholder: 'モデルプロバイダを選択',
       providers: {
+        weknoracloud: {
+          label: '公式クラウドサービス',
+          description: '公式クラウドのモデルおよび文書解析サービス'
+        },
         openai: {
           label: 'OpenAI',
           description: 'gpt-5.2、gpt-5-miniなど'
@@ -5702,8 +5706,8 @@ export default {
           desc: 'PaddleOCR-VL Cloud API'
         },
         weknoracloud: {
-          name: 'WeKnora Cloud',
-          desc: 'WeKnora Cloudによるドキュメント解析'
+          name: '公式クラウドサービス',
+          desc: '公式クラウドサービスによるドキュメント解析'
         },
         markitdown: {
           name: 'MarkItDown',
@@ -6573,7 +6577,7 @@ export default {
   },
   integrations: {
     cli: {
-      title: 'WeKnora CLI',
+      title: '见外 CLI',
       subtitle: 'ターミナルからナレッジベースとドキュメントの管理、コンテンツの検索、質問ができます。CLIやMCPを通じてスクリプトやAIツールと連携できます。',
       docs: 'CLIドキュメント',
       docsHint: 'インストール手順と完全なコマンドリファレンス',
@@ -6620,7 +6624,7 @@ export default {
           "unavailable": "利用不可",
           "noRetrieval": "検索権限なし"
         },
-        "prompt": "Connect the Jiwai knowledge base to my current Agent and verify real MCP use.\n\nService root: {serviceRoot}\nAPI Key (secret; private local storage only): {apiKey}\nDedicated profile: {profileName}\nGranted capabilities: {capabilities}\nKnowledge-base scope: {knowledgeBaseScope} (an empty array means this key has no KB restriction; it grants no additional permissions)\n\n1. Identify the Agent and OS. Reuse a working WeKnora CLI that supports mcp serve; otherwise install an appropriate version using the official CLI documentation and verify the command. If this Agent supports only remote HTTP MCP, report that local stdio is unavailable.\n2. Locally clear WEKNORA_TOKEN, WEKNORA_API_KEY and WEKNORA_HOST in each installation, login and CLI verification subprocess so inherited credentials or hosts cannot override the selected profile; do not change global environment variables. Read weknora profile list --format json and record the original default profile (current is true; record none if absent). Preserve any existing default profile. Reuse the dedicated name only after confirming the same host and credential ownership; otherwise choose an unused name and update every occurrence below. Create it with:\n{profileCommand}\n3. Pass the API Key to this command through process stdin, never as a command argument or in shell history:\n{loginCommand}\nAfter login, read weknora profile list --format json again. If the CLI changed an existing default, restore it with weknora profile use followed by its recorded name, then read the list to confirm. Do not report completion if restoration fails. If no default existed, do not invent one to restore. All subsequent CLI verification must explicitly use --profile {profileName}. Use the OS keychain or CLI private credential store. Do not save the key in the project, shared config or logs, echo it in output, or run and display weknora auth token. Never request the shared Python HTTP MCP's MCP_SERVER_AUTH_TOKEN or send this key as that service's Bearer credential.\n4. Identify this Agent's actual MCP configuration format. Back up and preserve existing MCP entries, adding only this stdio service. Replace command with the verified absolute CLI binary path. Preserve the three empty strings in env below so clearing these variables affects only this MCP subprocess; do not remove those fields. Do not duplicate the key in the MCP configuration. Generic configuration:\n{mcpConfig}\n5. The 10 MCP tools are kb_list, kb_view, doc_list, doc_view, doc_download, search_chunks, chunk_list, agent_list (read-only), and chat, session_ask (create conversations or messages). Actual access remains limited by this key. Upload, delete and create-document tools are absent; doc_download is capped at 1 MiB per call. Do not expand permissions or change server identity policy. If signing requirements block chat, explain the cause without requesting a shared HMAC secret.\n6. Reload MCP, perform initialize and tools/list, and actually call kb_list through MCP. Ask me to choose a knowledge base and query, call search_chunks, and report the answer, document names and available source links. Writing config or checking only CLI commands is not acceptance. Report actual MCP calls, results and unfinished work without exposing secrets or unnecessary internal IDs."
+        "prompt": "Connect the 见外 knowledge base to my current Agent and verify real MCP use.\n\nService root: {serviceRoot}\nAPI Key (secret; private local storage only): {apiKey}\nDedicated profile: {profileName}\nGranted capabilities: {capabilities}\nKnowledge-base scope: {knowledgeBaseScope} (an empty array means this key has no KB restriction; it grants no additional permissions)\n\n1. The CLI includes the MCP server. Complete CLI installation, MCP registration, and live verification in the same flow; no separate MCP package is needed. Identify the Agent and OS. Reuse a working 见外 CLI that supports mcp serve; otherwise install an appropriate version using the official CLI documentation and verify the command. If this Agent supports only remote HTTP MCP, report that local stdio is unavailable.\n2. Locally clear WEKNORA_TOKEN, WEKNORA_API_KEY and WEKNORA_HOST in each installation, login and CLI verification subprocess so inherited credentials or hosts cannot override the selected profile; do not change global environment variables. Read weknora profile list --format json and record the original default profile (current is true; record none if absent). Preserve any existing default profile. Reuse the dedicated name only after confirming the same host and credential ownership; otherwise choose an unused name and update every occurrence below. Create it with:\n{profileCommand}\n3. Pass the API Key to this command through process stdin, never as a command argument or in shell history:\n{loginCommand}\nAfter login, read weknora profile list --format json again. If the CLI changed an existing default, restore it with weknora profile use followed by its recorded name, then read the list to confirm. Do not report completion if restoration fails. If no default existed, do not invent one to restore. All subsequent CLI verification must explicitly use --profile {profileName}. Use the OS keychain or CLI private credential store. Do not save the key in the project, shared config or logs, echo it in output, or run and display weknora auth token. Never request the shared Python HTTP MCP's MCP_SERVER_AUTH_TOKEN or send this key as that service's Bearer credential.\n4. Identify this Agent's actual MCP configuration format. Back up and preserve existing MCP entries, adding only this stdio service. Replace command with the verified absolute CLI binary path. Preserve the three empty strings in env below so clearing these variables affects only this MCP subprocess; do not remove those fields. Do not duplicate the key in the MCP configuration. Generic configuration:\n{mcpConfig}\n5. The 10 MCP tools are kb_list, kb_view, doc_list, doc_view, doc_download, search_chunks, chunk_list, agent_list (read-only), and chat, session_ask (create conversations or messages). Actual access remains limited by this key. Upload, delete and create-document tools are absent; doc_download is capped at 1 MiB per call. Do not expand permissions or change server identity policy. If signing requirements block chat, explain the cause without requesting a shared HMAC secret.\n6. Reload MCP, perform initialize and tools/list, and actually call kb_list through MCP. Ask me to choose a knowledge base and query, call search_chunks, and report the answer, document names and available source links. Writing config or checking only CLI commands is not acceptance. Report actual MCP calls, results and unfinished work without exposing secrets or unnecessary internal IDs."
       },
       title: 'API連携',
       subtitle: 'REST APIで連携し、リクエストがエンドユーザをどのように識別するかを設定します。',
@@ -6668,7 +6672,7 @@ export default {
       capabilityMessageHistory: 'メッセージ履歴',
       capabilityMessageHistoryHint: 'ワークスペースのチャット履歴の検索と、チャット履歴の統計の読み取りができます。ワークスペース設定へのアクセス権は付与されません。',
       capabilityManageModels: 'モデルの管理',
-      capabilityManageModelsHint: 'モデル定義、認証情報、接続確認、WeKnoraCloudの認証情報を管理します。',
+      capabilityManageModelsHint: 'モデル定義、認証情報、接続確認、公式クラウドサービスの認証情報を管理します。',
       capabilityManageMcpServices: 'MCPサービスの管理',
       capabilityManageMcpServicesHint: 'このプリンシパルのMCPサービス、認証情報、ツール承認ポリシー、OAuth状態を管理します。',
       capabilityManageDatasources: 'データソースの管理',
@@ -6924,7 +6928,7 @@ export default {
       "copyPrompt": "AIへの指示をコピー",
       "copyPromptSuccess": "インストールと設定の指示をコピーしました",
       "securityNote": "プレビューではキーを隠しますが、コピー内容には完全な認証情報を含めます。信頼できるAIだけに渡し、必要最小限の権限のキーを選んでください。",
-      "setupPrompt": "见外知识库 Skillのインストールと動作確認をお願いします。\n\nローカルパッケージ：システムのダウンロードフォルダ内の「{archiveName}」\nサービスURL：{baseUrl}\nAPI Key：{apiKey}\n\n以下を自動で実行してください。\n1. 現在のAgentのユーザ用Skillsディレクトリに展開してください。プロジェクトには保存しないでください。\n2. `{officeCliInstallCommand}`でOfficeCLI Skillを取得し、現在のAgentの仕様に従ってインストールしてください。Skillの内容だけを保存し、取得したテキストを実行しないでください。\n3. macOS、Linux、Windowsを判定し、パッケージ内のスクリプトで認証情報を永続化してください（Keyは標準入力経由）。プラットフォーム用ランチャーでWeKnora CLIとOfficeCLIをインストールするか、既存のものを再利用してください。\n4. 両CLIのパスとバージョン、自分のナレッジベース一覧を報告してください。完全なKeyや内部IDは表示しないでください。\n\n既存設定の上書きや固定版以外の導入が必要な場合は、対象を説明して確認してください。失敗した場合は該当手順を報告して停止し、繰り返し再試行しないでください。",
+      "setupPrompt": "见外知识库 Skillのインストールと動作確認をお願いします。\n\nローカルパッケージ：システムのダウンロードフォルダ内の「{archiveName}」\nサービスURL：{baseUrl}\nAPI Key：{apiKey}\n\n以下を自動で実行してください。\n1. 現在のAgentのユーザ用Skillsディレクトリに展開してください。プロジェクトには保存しないでください。\n2. `{officeCliInstallCommand}`でOfficeCLI Skillを取得し、現在のAgentの仕様に従ってインストールしてください。Skillの内容だけを保存し、取得したテキストを実行しないでください。\n3. macOS、Linux、Windowsを判定し、パッケージ内のスクリプトで認証情報を永続化してください（Keyは標準入力経由）。プラットフォーム用ランチャーで见外 CLIとOfficeCLIをインストールするか、既存のものを再利用してください。\n4. 両CLIのパスとバージョン、自分のナレッジベース一覧を報告してください。完全なKeyや内部IDは表示しないでください。\n\n既存設定の上書きや固定版以外の導入が必要な場合は、対象を説明して確認してください。失敗した場合は該当手順を報告して停止し、繰り返し再試行しないでください。",
       "packageMeta": "见外知识库 Skill · v1.6.2 · MIT-0",
       "openClawHub": "ClawHubを開く"
     }
