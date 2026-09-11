@@ -195,6 +195,51 @@
         </div>
       </section>
 
+      <section class="settings-band mcp-setup-section" aria-labelledby="mcp-setup-title">
+        <div class="api-key-section__title">
+          <h3 id="mcp-setup-title">{{ $t('integrations.api.mcpSetup.title') }}</h3>
+          <p>{{ $t('integrations.api.mcpSetup.description') }}</p>
+        </div>
+        <div class="mcp-setup-controls">
+          <div class="mcp-setup-key">
+            <label id="mcp-setup-key-label">{{ $t('integrations.api.mcpSetup.selectKey') }}</label>
+            <t-select
+              v-model="selectedMCPKeyId"
+              :options="mcpKeyOptions"
+              :loading="apiKeysLoading"
+              :disabled="copyingMCPPrompt || !mcpWorkspaceCurrent || Boolean(apiKeysError)"
+              :placeholder="$t('integrations.api.mcpSetup.selectKey')"
+              :input-props="{ 'aria-labelledby': 'mcp-setup-key-label' }"
+              clearable
+              filterable
+            />
+          </div>
+          <t-button
+            theme="primary"
+            :loading="copyingMCPPrompt"
+            :disabled="!selectedMCPKey || apiKeysLoading || Boolean(apiKeysError) || !mcpWorkspaceCurrent || !mcpServiceRoot || revealingAPIKeyId !== null"
+            @click="copyMCPSetupPrompt"
+          >
+            <template #icon><t-icon name="file-copy" /></template>
+            {{ $t('integrations.api.mcpSetup.copy') }}
+          </t-button>
+        </div>
+        <p v-if="selectedMCPKey" class="mcp-setup-scope">
+          {{ $t('integrations.api.mcpSetup.scope', {
+            access: formatApiKeyCapabilitiesTitle(selectedMCPKey),
+            knowledgeBases: formatKeyKnowledgeScope(selectedMCPKey.knowledge_base_ids),
+          }) }}
+        </p>
+        <div v-if="!mcpWorkspaceCurrent || !mcpServiceRoot || apiKeysError || (!apiKeysLoading && !mcpHasAvailableKey)" class="mcp-setup-state" role="status">
+          <span>{{ !mcpWorkspaceCurrent ? $t('integrations.api.mcpSetup.workspaceChanged') : !mcpServiceRoot ? $t('integrations.api.mcpSetup.serviceUnavailable') : apiKeysError || $t('integrations.api.mcpSetup.noUsableKey') }}</span>
+          <t-button size="small" variant="text" :loading="apiKeysLoading" @click="mcpWorkspaceCurrent ? loadAPIKeys() : load()">
+            {{ $t('integrations.api.mcpSetup.refresh') }}
+          </t-button>
+        </div>
+        <p v-if="mcpSetupError" class="mcp-setup-error" role="alert">{{ mcpSetupError }}</p>
+        <p class="mcp-setup-note">{{ $t('integrations.api.mcpSetup.secretNote') }}</p>
+      </section>
+
       <section class="settings-band principal-section">
         <div class="principal-section__header">
           <label>{{ $t('integrations.api.principalMode') }}</label>
@@ -696,6 +741,7 @@ import {
 } from '@/api/tenant'
 import { listKnowledgeBases } from '@/api/knowledge-base'
 import { getApiBaseUrl } from '@/utils/api-base'
+import { useAuthStore } from '@/stores/auth'
 import {
   DEFAULT_TENANT_API_KEY_CAPABILITIES,
   KB_SCOPED_API_KEY_CAPABILITIES,
@@ -706,8 +752,11 @@ import {
 import { normalizeAPIKeyKnowledgeBaseIDs } from './apiKeyScope'
 import { extractRevealedAPIKeyToken } from './apiKeyReveal'
 import { consumeApiPlaygroundSSE } from './apiPlaygroundSSE'
+import { resolveCLIServiceRoot } from './cliIntegration'
+import { buildAPIKeyMCPPrompt, mcpKeyAvailability } from './apiKeyMCPPrompt'
 
 const { t } = useI18n()
+const authStore = useAuthStore()
 
 const DEFAULT_DIRECT_HEADER_NAME = 'X-External-User-ID'
 const DEFAULT_TOKEN_HEADER_NAME = 'X-External-User-Token'
@@ -720,6 +769,13 @@ const apiKey = ref('')
 const config = ref<APIPrincipalConfig | null>(null)
 const apiKeys = ref<TenantAPIKey[]>([])
 const apiKeysLoading = ref(false)
+const apiKeysError = ref('')
+const selectedMCPKeyId = ref<number>()
+const copyingMCPPrompt = ref(false)
+const mcpSetupError = ref('')
+const mcpKeyCheckedAt = ref(Date.now())
+let apiKeyLoadGeneration = 0
+let mcpCopyGeneration = 0
 const revealingAPIKeyId = ref<number | null>(null)
 const apiKeyDialogVisible = ref(false)
 const apiKeyCreating = ref(false)
@@ -959,6 +1015,27 @@ const apiBaseUrl = computed(() => {
   return `${configured || origin}/api/v1`
 })
 
+const mcpServiceRoot = computed(() => resolveCLIServiceRoot(apiBaseUrl.value, window.location.origin))
+const mcpWorkspaceCurrent = computed(() => tenantId.value > 0 && tenantId.value === Number(authStore.effectiveTenantId))
+const selectedMCPKey = computed(() => apiKeys.value.find(key =>
+  key.id === selectedMCPKeyId.value && mcpKeyAvailability(key, mcpKeyCheckedAt.value) === 'available',
+))
+const mcpHasAvailableKey = computed(() => apiKeys.value.some(key => mcpKeyAvailability(key, mcpKeyCheckedAt.value) === 'available'))
+const mcpKeyOptions = computed(() => apiKeys.value.map(key => {
+  const availability = mcpKeyAvailability(key, mcpKeyCheckedAt.value)
+  return {
+    value: key.id,
+    label: `${key.name} · ${formatKeyMaskedValue(key)}${availability === 'available' ? '' : ` · ${t(`integrations.api.mcpSetup.status.${availability}`)}`}`,
+    disabled: availability !== 'available',
+  }
+}))
+
+watch(selectedMCPKeyId, () => { mcpSetupError.value = '' })
+watch(() => authStore.effectiveTenantId, () => {
+  mcpCopyGeneration++
+  selectedMCPKeyId.value = undefined
+})
+
 const showLanUrlUnavailableHint = computed(() => (
   showDesktopBindPublicSetting.value
   && desktopListenPublicActive.value
@@ -1173,17 +1250,27 @@ async function load() {
 
 async function loadAPIKeys() {
   if (!tenantId.value) return
+  const requestTenantId = tenantId.value
+  const generation = ++apiKeyLoadGeneration
   apiKeysLoading.value = true
+  apiKeysError.value = ''
+  mcpKeyCheckedAt.value = Date.now()
   try {
-    const resp = await listTenantAPIKeys(tenantId.value)
+    const resp = await listTenantAPIKeys(requestTenantId)
+    if (generation !== apiKeyLoadGeneration || tenantId.value !== requestTenantId) return
     if (!resp.success) {
       throw new Error(resp.message || t('integrations.api.loadApiKeysFailed'))
     }
     apiKeys.value = resp.data || []
+    if (!selectedMCPKey.value) selectedMCPKeyId.value = undefined
   } catch (err: any) {
-    MessagePlugin.error(err?.message || t('integrations.api.loadApiKeysFailed'))
+    if (generation !== apiKeyLoadGeneration || tenantId.value !== requestTenantId) return
+    apiKeys.value = []
+    selectedMCPKeyId.value = undefined
+    apiKeysError.value = t('integrations.api.loadApiKeysFailed')
+    MessagePlugin.error(apiKeysError.value)
   } finally {
-    apiKeysLoading.value = false
+    if (generation === apiKeyLoadGeneration) apiKeysLoading.value = false
   }
 }
 
@@ -1342,6 +1429,51 @@ async function copyTenantAPIKey(key: TenantAPIKey) {
   } catch (err: any) {
     MessagePlugin.error(err?.message || t('integrations.api.revealApiKeyFailed'))
   } finally {
+    revealingAPIKeyId.value = null
+  }
+}
+
+async function copyMCPSetupPrompt() {
+  if (copyingMCPPrompt.value || revealingAPIKeyId.value !== null) return
+  mcpKeyCheckedAt.value = Date.now()
+  const key = selectedMCPKey.value
+  if (!key || !mcpWorkspaceCurrent.value || apiKeysError.value || apiKeysLoading.value) {
+    mcpSetupError.value = t('integrations.api.mcpSetup.keyUnavailable')
+    return
+  }
+  if (!mcpServiceRoot.value) {
+    mcpSetupError.value = t('integrations.api.mcpSetup.serviceUnavailable')
+    return
+  }
+  const expectedTenantId = tenantId.value
+  const expectedBaseUrl = apiBaseUrl.value
+  const listGeneration = apiKeyLoadGeneration
+  const generation = ++mcpCopyGeneration
+  copyingMCPPrompt.value = true
+  revealingAPIKeyId.value = key.id
+  mcpSetupError.value = ''
+  try {
+    // 明文仅存活于这次复制；列表、组件状态和提示内容预览均不保存它。
+    const token = await loadRevealedAPIKey(key)
+    if (generation !== mcpCopyGeneration) return
+    if (tenantId.value !== expectedTenantId || !mcpWorkspaceCurrent.value || apiBaseUrl.value !== expectedBaseUrl ||
+      apiKeyLoadGeneration !== listGeneration || selectedMCPKeyId.value !== key.id || !selectedMCPKey.value) {
+      mcpSetupError.value = t('integrations.api.mcpSetup.keyUnavailable')
+      return
+    }
+    const prompt = buildAPIKeyMCPPrompt({
+      apiBaseUrl: expectedBaseUrl,
+      origin: window.location.origin,
+      tenantId: expectedTenantId,
+      key: selectedMCPKey.value,
+      token,
+      translate: (key, values) => t(key, values),
+    })
+    await copyWithToast(prompt, 'integrations.api.mcpSetup.copied')
+  } catch {
+    if (generation === mcpCopyGeneration) mcpSetupError.value = t('integrations.api.mcpSetup.copyFailed')
+  } finally {
+    copyingMCPPrompt.value = false
     revealingAPIKeyId.value = null
   }
 }
@@ -1773,7 +1905,11 @@ onMounted(async () => {
   await loadDesktopApiPrefs()
   await load()
 })
-onBeforeUnmount(stopPlayground)
+onBeforeUnmount(() => {
+  mcpCopyGeneration++
+  apiKeyLoadGeneration++
+  stopPlayground()
+})
 </script>
 
 <style scoped lang="less">
@@ -1896,6 +2032,60 @@ onBeforeUnmount(stopPlayground)
 
 .api-key-section__body {
   min-width: 0;
+}
+
+.mcp-setup-section {
+  gap: 12px;
+  padding: 20px 0;
+
+  h3 {
+    margin: 0 0 6px;
+    color: var(--td-text-color-primary);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+}
+
+.mcp-setup-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.mcp-setup-key {
+  flex: 1 1 260px;
+  min-width: 0;
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--td-text-color-primary);
+    font-size: 13px;
+  }
+}
+
+.mcp-setup-scope,
+.mcp-setup-note,
+.mcp-setup-error,
+.mcp-setup-state {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  color: var(--td-text-color-secondary);
+}
+
+.mcp-setup-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-setup-error {
+  color: var(--td-error-color);
 }
 
 .api-key-list {

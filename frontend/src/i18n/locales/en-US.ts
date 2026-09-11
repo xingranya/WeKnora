@@ -6569,6 +6569,27 @@ export default {
       claw: '见外知识库'
     },
     api: {
+      mcpSetup: {
+        "title": "Use the knowledge base in your Agent (MCP)",
+        "description": "Choose an API key and copy the prompt to your Agent to configure a local connection and verify retrieval.",
+        "selectKey": "Choose an API key for MCP",
+        "copy": "Copy MCP setup prompt",
+        "copied": "MCP setup prompt copied. Share it only with an Agent you trust.",
+        "scope": "Permissions: {access}; knowledge bases: {knowledgeBases}",
+        "secretNote": "The copied prompt contains the full API key. Share it only with a trusted Agent. The page never displays the secret, and existing key permissions still apply.",
+        "noUsableKey": "No active key with retrieval access. Create or update a key above, then refresh the list.",
+        "refresh": "Refresh keys",
+        "workspaceChanged": "The workspace changed. Reload this page before copying.",
+        "keyUnavailable": "The selected key changed, was revoked or expired. Refresh the list and choose again.",
+        "serviceUnavailable": "The service address is not ready. Reload this page and retry.",
+        "copyFailed": "Could not retrieve a complete key or build the prompt. Refresh the list and confirm the key is active and you are still the workspace owner.",
+        "status": {
+          "expired": "Expired",
+          "unavailable": "Unavailable",
+          "noRetrieval": "No retrieval access"
+        },
+        "prompt": "Connect the Jiwai knowledge base to my current Agent and verify real MCP use.\n\nService root: {serviceRoot}\nAPI Key (secret; private local storage only): {apiKey}\nDedicated profile: {profileName}\nGranted capabilities: {capabilities}\nKnowledge-base scope: {knowledgeBaseScope} (an empty array means this key has no KB restriction; it grants no additional permissions)\n\n1. Identify the Agent and OS. Reuse a working WeKnora CLI that supports mcp serve; otherwise install an appropriate version using the official CLI documentation and verify the command. If this Agent supports only remote HTTP MCP, report that local stdio is unavailable.\n2. Locally clear WEKNORA_TOKEN, WEKNORA_API_KEY and WEKNORA_HOST in each installation, login and CLI verification subprocess so inherited credentials or hosts cannot override the selected profile; do not change global environment variables. Read weknora profile list --format json and record the original default profile (current is true; record none if absent). Preserve any existing default profile. Reuse the dedicated name only after confirming the same host and credential ownership; otherwise choose an unused name and update every occurrence below. Create it with:\n{profileCommand}\n3. Pass the API Key to this command through process stdin, never as a command argument or in shell history:\n{loginCommand}\nAfter login, read weknora profile list --format json again. If the CLI changed an existing default, restore it with weknora profile use followed by its recorded name, then read the list to confirm. Do not report completion if restoration fails. If no default existed, do not invent one to restore. All subsequent CLI verification must explicitly use --profile {profileName}. Use the OS keychain or CLI private credential store. Do not save the key in the project, shared config or logs, echo it in output, or run and display weknora auth token. Never request the shared Python HTTP MCP's MCP_SERVER_AUTH_TOKEN or send this key as that service's Bearer credential.\n4. Identify this Agent's actual MCP configuration format. Back up and preserve existing MCP entries, adding only this stdio service. Replace command with the verified absolute CLI binary path. Preserve the three empty strings in env below so clearing these variables affects only this MCP subprocess; do not remove those fields. Do not duplicate the key in the MCP configuration. Generic configuration:\n{mcpConfig}\n5. The 10 MCP tools are kb_list, kb_view, doc_list, doc_view, doc_download, search_chunks, chunk_list, agent_list (read-only), and chat, session_ask (create conversations or messages). Actual access remains limited by this key. Upload, delete and create-document tools are absent; doc_download is capped at 1 MiB per call. Do not expand permissions or change server identity policy. If signing requirements block chat, explain the cause without requesting a shared HMAC secret.\n6. Reload MCP, perform initialize and tools/list, and actually call kb_list through MCP. Ask me to choose a knowledge base and query, call search_chunks, and report the answer, document names and available source links. Writing config or checking only CLI commands is not acceptance. Report actual MCP calls, results and unfinished work without exposing secrets or unnecessary internal IDs."
+      },
       title: 'API Integration',
       subtitle: 'Integrate via REST API and configure how requests identify end users.',
       loading: 'Loading API integration settings...',

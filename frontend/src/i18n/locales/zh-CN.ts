@@ -526,6 +526,27 @@ export default {
       title: '已接入的 IM'
     },
     api: {
+      mcpSetup: {
+        "title": "让 Agent 使用知识库（MCP）",
+        "description": "选择一把 API Key，复制提示词交给你的 Agent，即可让它完成本机连接配置与检索验证。",
+        "selectKey": "选择用于 MCP 的 API Key",
+        "copy": "复制 MCP 配置提示词",
+        "copied": "已复制 MCP 配置提示词，请交给你信任的 Agent",
+        "scope": "权限：{access}；知识库：{knowledgeBases}",
+        "secretNote": "复制内容包含完整 API Key，只交给你信任的 Agent；页面不会显示密钥。权限以所选 Key 为准。",
+        "noUsableKey": "暂无可用于检索的有效 Key。请在上方创建或调整 API Key，然后刷新列表。",
+        "refresh": "刷新列表",
+        "workspaceChanged": "当前空间已切换，请重新加载本页后再复制。",
+        "keyUnavailable": "所选 Key 已变更、撤销或过期，请刷新列表并重新选择。",
+        "serviceUnavailable": "当前服务地址尚未就绪，请重新加载页面后重试。",
+        "copyFailed": "无法读取完整 Key 或生成提示词。请刷新列表，确认 Key 有效且当前账号仍为空间所有者。",
+        "status": {
+          "expired": "已过期",
+          "unavailable": "不可用",
+          "noRetrieval": "无检索权限"
+        },
+        "prompt": "请把见外知识库接入我当前使用的 Agent，并实际通过 MCP 使用。\n\n服务根地址：{serviceRoot}\nAPI Key（机密，仅供本机私有保存）：{apiKey}\n独立连接配置名：{profileName}\n此 Key 的能力：{capabilities}\n知识库范围：{knowledgeBaseScope}（空数组表示此 Key 未限制知识库；不增加账号或 Key 的权限）\n\n1. 识别当前 Agent 和操作系统，先检查已有 WeKnora CLI 是否支持 mcp serve。可用则复用；否则按官方 CLI 文档安装适配当前系统的版本并验证命令。不要把仅支持远程 HTTP MCP 的平台说成本机 stdio 已接入。\n2. 在安装、登录和验证 CLI 的各个子进程中，局部清空 WEKNORA_TOKEN、WEKNORA_API_KEY、WEKNORA_HOST，避免继承的凭据或地址覆盖所选配置；不要修改全局环境变量。用 weknora profile list --format json 读取并记录原默认 profile（current 为 true；原本没有则记为无）。使用上面的独立名称，保留已有默认配置。同名配置只有确认服务地址和凭据归属一致时才可复用；否则选一个未占用名称并同步替换下面所有位置。创建命令：\n{profileCommand}\n3. 将上面的 API Key 通过进程标准输入传给以下命令，禁止把 Key 写入命令参数或 shell 历史：\n{loginCommand}\n登录后再次读取 weknora profile list --format json。若已有默认配置被 CLI 切换，执行 weknora profile use 加上记录的原名称来恢复，再读列表确认；恢复失败不能报告完成。原本没有默认配置时，无需虚构或恢复一个。之后的 CLI 验证均显式指定 --profile {profileName}。使用系统钥匙串或 CLI 私有凭据存储，不把 Key 放入项目、共享配置或日志。不要在输出中回显 Key，不运行并展示 weknora auth token。不要索取或使用共享 Python HTTP MCP 的 MCP_SERVER_AUTH_TOKEN，也不要把此 Key 当成那个服务的 Bearer 凭据。\n4. 识别当前 Agent 的实际 MCP 配置格式，备份并保留已有配置，只添加下面这个 stdio 服务。command 改为已验证的 CLI 二进制绝对路径；保留下面 env 中三个空字符串，使清空环境变量仅影响这个 MCP 子进程，不要删除这些字段。不要在 MCP 配置中再写一份 Key。通用配置：\n{mcpConfig}\n5. 该 MCP 暴露 10 个工具。kb_list、kb_view、doc_list、doc_view、doc_download、search_chunks、chunk_list、agent_list 为只读；chat、session_ask 会创建会话或消息，使用时遵守此 Key 的权限。没有上传、删除或新建知识条目工具；doc_download 单次上限为 1 MiB。不得扩大 Key 权限或改变服务器的用户身份策略，若身份签名要求阻止问答，说明原因，不索取共享 HMAC 密钥。\n6. 重新加载 MCP，完成实际 initialize 和 tools/list，并通过 MCP 调用 kb_list。让我选择知识库和检索问题后，实际调用 search_chunks，给出答案、文档名称和可用来源链接。只写配置或仅运行 CLI 不算验收通过。最后报告实际工具调用、结果及未完成项，不显示密钥和不必要的内部 ID。"
+      },
       title: 'API 集成',
       subtitle: '通过 REST API 接入服务，并配置请求如何携带终端用户身份。',
       loading: '正在加载 API 集成设置...',

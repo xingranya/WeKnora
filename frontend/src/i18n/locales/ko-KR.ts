@@ -526,6 +526,27 @@ export default {
       title: '연결된 IM'
     },
     api: {
+      mcpSetup: {
+        "title": "Agent에서 지식 베이스 사용 (MCP)",
+        "description": "API 키를 선택하고 안내문을 Agent에 복사하여 로컬 연결 설정과 검색 검증을 진행하세요.",
+        "selectKey": "MCP용 API 키 선택",
+        "copy": "MCP 설정 안내문 복사",
+        "copied": "MCP 설정 안내문을 복사했습니다. 신뢰하는 Agent에만 전달하세요.",
+        "scope": "권한: {access}; 지식 베이스: {knowledgeBases}",
+        "secretNote": "복사 내용에는 전체 API 키가 포함됩니다. 신뢰하는 Agent에만 전달하세요. 화면에는 비밀 값을 표시하지 않으며 기존 키 권한이 적용됩니다.",
+        "noUsableKey": "검색 권한이 있는 유효한 키가 없습니다. 위에서 키를 생성하거나 수정한 후 목록을 새로고침하세요.",
+        "refresh": "목록 새로고침",
+        "workspaceChanged": "작업 공간이 변경되었습니다. 복사 전에 페이지를 새로고침하세요.",
+        "keyUnavailable": "선택한 키가 변경, 폐기 또는 만료되었습니다. 목록을 새로고침하고 다시 선택하세요.",
+        "serviceUnavailable": "서비스 주소가 준비되지 않았습니다. 페이지를 새로고침하세요.",
+        "copyFailed": "전체 키를 가져오거나 안내문을 생성하지 못했습니다. 목록을 새로고침하고 키의 유효성과 작업 공간 소유자 권한을 확인하세요.",
+        "status": {
+          "expired": "만료됨",
+          "unavailable": "사용 불가",
+          "noRetrieval": "검색 권한 없음"
+        },
+        "prompt": "Connect the Jiwai knowledge base to my current Agent and verify real MCP use.\n\nService root: {serviceRoot}\nAPI Key (secret; private local storage only): {apiKey}\nDedicated profile: {profileName}\nGranted capabilities: {capabilities}\nKnowledge-base scope: {knowledgeBaseScope} (an empty array means this key has no KB restriction; it grants no additional permissions)\n\n1. Identify the Agent and OS. Reuse a working WeKnora CLI that supports mcp serve; otherwise install an appropriate version using the official CLI documentation and verify the command. If this Agent supports only remote HTTP MCP, report that local stdio is unavailable.\n2. Locally clear WEKNORA_TOKEN, WEKNORA_API_KEY and WEKNORA_HOST in each installation, login and CLI verification subprocess so inherited credentials or hosts cannot override the selected profile; do not change global environment variables. Read weknora profile list --format json and record the original default profile (current is true; record none if absent). Preserve any existing default profile. Reuse the dedicated name only after confirming the same host and credential ownership; otherwise choose an unused name and update every occurrence below. Create it with:\n{profileCommand}\n3. Pass the API Key to this command through process stdin, never as a command argument or in shell history:\n{loginCommand}\nAfter login, read weknora profile list --format json again. If the CLI changed an existing default, restore it with weknora profile use followed by its recorded name, then read the list to confirm. Do not report completion if restoration fails. If no default existed, do not invent one to restore. All subsequent CLI verification must explicitly use --profile {profileName}. Use the OS keychain or CLI private credential store. Do not save the key in the project, shared config or logs, echo it in output, or run and display weknora auth token. Never request the shared Python HTTP MCP's MCP_SERVER_AUTH_TOKEN or send this key as that service's Bearer credential.\n4. Identify this Agent's actual MCP configuration format. Back up and preserve existing MCP entries, adding only this stdio service. Replace command with the verified absolute CLI binary path. Preserve the three empty strings in env below so clearing these variables affects only this MCP subprocess; do not remove those fields. Do not duplicate the key in the MCP configuration. Generic configuration:\n{mcpConfig}\n5. The 10 MCP tools are kb_list, kb_view, doc_list, doc_view, doc_download, search_chunks, chunk_list, agent_list (read-only), and chat, session_ask (create conversations or messages). Actual access remains limited by this key. Upload, delete and create-document tools are absent; doc_download is capped at 1 MiB per call. Do not expand permissions or change server identity policy. If signing requirements block chat, explain the cause without requesting a shared HMAC secret.\n6. Reload MCP, perform initialize and tools/list, and actually call kb_list through MCP. Ask me to choose a knowledge base and query, call search_chunks, and report the answer, document names and available source links. Writing config or checking only CLI commands is not acceptance. Report actual MCP calls, results and unfinished work without exposing secrets or unnecessary internal IDs."
+      },
       title: 'API 연동',
       subtitle: 'REST API로 서비스를 연동하고, 요청이 최종 사용자를 식별하는 방식을 설정합니다.',
       loading: 'API 통합 설정을 불러오는 중...',
