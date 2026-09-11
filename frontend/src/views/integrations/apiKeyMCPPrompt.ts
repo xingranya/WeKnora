@@ -1,6 +1,6 @@
 import type { TenantAPIKey } from '@/api/tenant'
 import { extractRevealedAPIKeyToken } from './apiKeyReveal'
-import { resolveCLIServiceRoot } from './cliIntegration'
+import { JIWAI_CLI_RELEASE, resolveCLIServiceRoot } from './cliIntegration'
 
 export type MCPKeyAvailability = 'available' | 'expired' | 'unavailable' | 'noRetrieval'
 
@@ -53,6 +53,12 @@ export function buildAPIKeyMCPPrompt(options: {
     profileCommand,
     loginCommand,
     mcpConfig,
+    cliVersion: JIWAI_CLI_RELEASE.version,
+    cliSourceUrl: JIWAI_CLI_RELEASE.sourceUrl,
+    cliUpstreamCommit: JIWAI_CLI_RELEASE.upstreamCommit,
+    cliPatchUrl: JIWAI_CLI_RELEASE.patchUrl,
+    cliPatchSHA256: JIWAI_CLI_RELEASE.patchSHA256,
+    cliBuildFlags: JIWAI_CLI_RELEASE.buildFlags,
     capabilities: key.full_access ? 'full_access' : (key.capabilities || []).join(', '),
     knowledgeBaseScope: JSON.stringify(key.knowledge_base_ids || []),
   })

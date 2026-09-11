@@ -1,0 +1,408 @@
+diff --git a/cli/cmd/api/api.go b/cli/cmd/api/api.go
+index 538e33f7..7f2208ee 100644
+--- a/cli/cmd/api/api.go
++++ b/cli/cmd/api/api.go
+@@ -55,7 +55,7 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
+ 	opts := &Options{}
+ 	cmd := &cobra.Command{
+ 		Use:   "api <path>",
+-		Short: "Make a raw API request to the WeKnora server",
++		Short: "Make a raw API request to the 见外 server",
+ 		Long: `Raw HTTP API access. JSON body via -d/--data (inline) or --input <file>/- (stdin).
+ 
+ The default method is GET; supplying a body (-d or --input) auto-promotes it
+diff --git a/cli/cmd/auth/login.go b/cli/cmd/auth/login.go
+index ffa556e7..2c64bd8c 100644
+--- a/cli/cmd/auth/login.go
++++ b/cli/cmd/auth/login.go
+@@ -71,7 +71,7 @@ func NewCmdLogin(f *cmdutil.Factory, runF func(context.Context, *LoginOptions, *
+ 	opts := &LoginOptions{}
+ 	cmd := &cobra.Command{
+ 		Use:   "login",
+-		Short: "Authenticate the active profile against its WeKnora server",
++		Short: "Authenticate the active profile against its 见外 server",
+ 		Long: `Authenticate the active profile by email + password (interactive prompt) or
+ pipe an API key with --with-token.
+ 
+diff --git a/cli/cmd/chat/chat.go b/cli/cmd/chat/chat.go
+index 68dc2b39..08ca27af 100644
+--- a/cli/cmd/chat/chat.go
++++ b/cli/cmd/chat/chat.go
+@@ -70,7 +70,7 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
+ 	cmd := &cobra.Command{
+ 		Use:   `chat "<text>"`,
+ 		Short: "Ask a streaming RAG question against a knowledge base",
+-		Long: `Send a query to the WeKnora knowledge-chat endpoint and stream the
++		Long: `Send a query to the 见外 knowledge-chat endpoint and stream the
+ answer back. By default a fresh session is created on first invocation; pass
+ --session to continue an existing conversation.
+ 
+@@ -146,7 +146,7 @@ func runChat(ctx context.Context, opts *Options, fopts *cmdutil.FormatOptions, s
+ 	sessionID := opts.SessionID
+ 	autoCreated := false
+ 	if sessionID == "" {
+-		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora chat"})
++		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 CLI 对话"})
+ 		if err != nil {
+ 			// Ctrl-C during session creation: classify as cancelled so the
+ 			// hint nudges the user toward retry-with-signal-clean, not
+diff --git a/cli/cmd/chunk/view.go b/cli/cmd/chunk/view.go
+index 1d2aa69b..e6168d78 100644
+--- a/cli/cmd/chunk/view.go
++++ b/cli/cmd/chunk/view.go
+@@ -37,7 +37,7 @@ const chunkViewLong = `Show a single chunk with all SDK fields.
+ 
+ Text output is a key-value block; pass --format json for the bare 23-field SDK
+ Chunk object. Content renders verbatim regardless of size — pipe to
+-less or use --format json for large chunks. WeKnora chunks are typically bounded
++less or use --format json for large chunks. 见外 chunks are typically bounded
+ by the ingest pipeline (~1000 tokens / a few KB), so unconditional full
+ rendering is reasonable.
+ 
+diff --git a/cli/cmd/doctor/doctor.go b/cli/cmd/doctor/doctor.go
+index b699b5e1..6ca1940a 100644
+--- a/cli/cmd/doctor/doctor.go
++++ b/cli/cmd/doctor/doctor.go
+@@ -6,7 +6,7 @@
+ //	warn - soft problem; non-blocking (e.g. server minor older than CLI,
+ //	       keychain unavailable so falling back to file store)
+ //	fail - failed; "hint" actionable
+-//	skip - cascade-skipped (prereq failed) or --offline mode
++//	skip - 前置检查失败、--offline 模式，或已鉴权但无系统版本读取权限
+ //
+ // JSON output emits the Result object directly (bare data). Exit-code
+ // signal:
+@@ -21,6 +21,7 @@ package doctor
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"os"
+@@ -198,8 +199,14 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string)
+ 	if !cascade(&checks[2], opts.Offline, &checks[1]) {
+ 		info, fromCache, err := loadOrProbeServerInfo(ctx, opts, svc)
+ 		if err != nil {
+-			checks[2].Status = StatusFail
+-			checks[2].Details = err.Error()
++			var apiErr *sdk.APIError
++			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
++				checks[2].Status = StatusSkip
++				checks[2].Details = "当前 Key 无系统版本读取权限（HTTP 403）；鉴权已通过，核心 CLI 命令仍可在已有权限内使用，版本兼容性未验证"
++			} else {
++				checks[2].Status = StatusFail
++				checks[2].Details = err.Error()
++			}
+ 		} else {
+ 			fillVersionCheck(&checks[2], info, cliVer, fromCache)
+ 		}
+diff --git a/cli/cmd/doctor/doctor_test.go b/cli/cmd/doctor/doctor_test.go
+index 3e56f1cc..ead45113 100644
+--- a/cli/cmd/doctor/doctor_test.go
++++ b/cli/cmd/doctor/doctor_test.go
+@@ -3,6 +3,8 @@ package doctor
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
++	"net/http"
+ 	"strings"
+ 	"sync/atomic"
+ 	"testing"
+@@ -14,8 +16,56 @@ import (
+ 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+ 	"github.com/Tencent/WeKnora/cli/internal/secrets"
+ 	sdk "github.com/Tencent/WeKnora/client"
++	"github.com/stretchr/testify/require"
+ )
+ 
++// 只跳过鉴权已成功后的明确版本读取权限不足，不按错误正文猜测状态。
++func TestDoctorVersionPermissionDeniedDoesNotFailAuthenticatedKey(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		err  error
++		want Status
++	}{
++		{"明确403", &sdk.APIError{StatusCode: http.StatusForbidden}, StatusSkip},
++		{"包装403", fmt.Errorf("upstream: %w", &sdk.APIError{StatusCode: http.StatusForbidden}), StatusSkip},
++		{"401仍失败", &sdk.APIError{StatusCode: http.StatusUnauthorized}, StatusFail},
++		{"500仍失败", &sdk.APIError{StatusCode: http.StatusInternalServerError}, StatusFail},
++		{"网络超时仍失败", context.DeadlineExceeded, StatusFail},
++		{"正文包含403不算权限不足", errors.New("connection failed: HTTP error 403"), StatusFail},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Setenv("XDG_CACHE_HOME", t.TempDir())
++			withCredStoreFactory(t, func() (secrets.Store, error) { return secrets.NewMemStore(), nil })
++			svc := &fakeServices{userResp: goodUserResp(), systemErr: tc.err}
++			r := runChecks(context.Background(), &Options{NoCache: true}, svc, "1.0.0")
++			require.Equal(t, StatusOK, r.Checks[1].Status)
++			require.Equal(t, tc.want, r.Checks[2].Status)
++			require.Equal(t, int32(1), svc.systemInfoHits.Load())
++			require.False(t, r.Summary.AllPassed, "跳过版本检查不能声称完整验收通过")
++			if tc.want == StatusSkip {
++				require.Equal(t, 3, r.Summary.Passed)
++				require.Zero(t, r.Summary.Failed)
++				require.Equal(t, 1, r.Summary.Skipped)
++				require.Contains(t, r.Checks[2].Details, "版本兼容性未验证")
++			} else {
++				require.Equal(t, 1, r.Summary.Failed)
++				require.Zero(t, r.Summary.Skipped)
++			}
++		})
++	}
++}
++
++func TestDoctorAuthentication403RemainsFailure(t *testing.T) {
++	t.Setenv("XDG_CACHE_HOME", t.TempDir())
++	withCredStoreFactory(t, func() (secrets.Store, error) { return secrets.NewMemStore(), nil })
++	svc := &fakeServices{userErr: &sdk.APIError{StatusCode: http.StatusForbidden}}
++	r := runChecks(context.Background(), &Options{NoCache: true}, svc, "1.0.0")
++	require.Equal(t, StatusFail, r.Checks[1].Status)
++	require.Equal(t, StatusSkip, r.Checks[2].Status)
++	require.Equal(t, 1, r.Summary.Failed)
++	require.Zero(t, svc.systemInfoHits.Load())
++}
++
+ // withCredStoreFactory swaps the package-level credStoreFactory hook for the
+ // duration of t. Tests that assert the credential_storage outcome use this
+ // rather than touching the real OS keyring (which is environment-dependent
+diff --git a/cli/cmd/root.go b/cli/cmd/root.go
+index b65b2579..73ea1a2b 100644
+--- a/cli/cmd/root.go
++++ b/cli/cmd/root.go
+@@ -135,8 +135,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
+ 	v, commit, date := build.Info()
+ 	cmd := &cobra.Command{
+ 		Use:   "weknora",
+-		Short: "WeKnora CLI",
+-		Long: `Command-line client for the WeKnora RAG server. Manage knowledge bases
++		Short: "见外 CLI",
++		Long: `Command-line client for the 见外 RAG server. Manage knowledge bases
+ and documents, run hybrid search, chat with grounded answers, or expose
+ a curated read-only MCP tool surface for AI agents.`,
+ 		Example: `  weknora profile add prod --host=https://kb.example.com --use
+diff --git a/cli/cmd/session/ask.go b/cli/cmd/session/ask.go
+index b2d4493c..7520ec9e 100644
+--- a/cli/cmd/session/ask.go
++++ b/cli/cmd/session/ask.go
+@@ -125,7 +125,7 @@ func runAsk(ctx context.Context, opts *AskOptions, fopts *cmdutil.FormatOptions,
+ 	sessionID := opts.SessionID
+ 	autoCreated := false
+ 	if sessionID == "" {
+-		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora session ask"})
++		sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外智能体对话"})
+ 		if err != nil {
+ 			if cmdutil.IsCancelled(ctx, err) {
+ 				return cmdutil.Wrapf(cmdutil.CodeOperationCancelled, err, "session ask cancelled")
+diff --git a/cli/internal/cmdutil/agentconfig.go b/cli/internal/cmdutil/agentconfig.go
+index 7ba07886..425d5dcd 100644
+--- a/cli/internal/cmdutil/agentconfig.go
++++ b/cli/internal/cmdutil/agentconfig.go
+@@ -106,7 +106,7 @@ func MergeAgentConfig(base *sdk.AgentConfig, ov AgentConfigFlags) *sdk.AgentConf
+ // `agent create --generate-skeleton` so users get a ready-to-edit
+ // starting point without authoring the full schema from memory.
+ func GenerateAgentSkeleton(w io.Writer) error {
+-	const skeleton = `# WeKnora AgentConfig YAML skeleton
++	const skeleton = `# 见外 AgentConfig YAML 配置模板
+ # Edit this file and pass it to:
+ #   weknora agent create "My Agent" --model <id> --config-file <this-file>
+ # Hot-path flags on the create command override values set here.
+diff --git a/cli/internal/mcp/tools.go b/cli/internal/mcp/tools.go
+index 72f2a49a..a81cbcfb 100644
+--- a/cli/internal/mcp/tools.go
++++ b/cli/internal/mcp/tools.go
+@@ -158,7 +158,7 @@ type kbListOutput struct {
+ func addKBList(server *mcpsdk.Server, svc knowledgeBaseService) {
+ 	mcpsdk.AddTool(server, &mcpsdk.Tool{
+ 		Name:        "kb_list",
+-		Description: "List all knowledge bases visible to the active WeKnora tenant. No arguments. Returns items[]: each item carries id, name, description, knowledge_count, is_pinned, updated_at - useful for selecting a kb_id to pass to other tools.",
++		Description: "List all knowledge bases visible to the active 见外 tenant. No arguments. Returns items[]: each item carries id, name, description, knowledge_count, is_pinned, updated_at - useful for selecting a kb_id to pass to other tools.",
+ 		Annotations: &mcpsdk.ToolAnnotations{
+ 			Title:           "List Knowledge Bases",
+ 			DestructiveHint: bptr(false),
+@@ -480,7 +480,7 @@ func addChat(server *mcpsdk.Server, svc chatService) {
+ 		}
+ 		sessionID := in.SessionID
+ 		if sessionID == "" {
+-			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora mcp chat"})
++			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 MCP 对话"})
+ 			if err != nil {
+ 				return toolErrorResult(cmdutil.WrapHTTP(err, "create chat session")), nil, nil
+ 			}
+@@ -598,7 +598,7 @@ func addSessionAsk(server *mcpsdk.Server, svc sessionAskService) {
+ 		// agnostic at creation (verified against server source).
+ 		sessionID := in.SessionID
+ 		if sessionID == "" {
+-			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "weknora mcp session_ask"})
++			sess, err := svc.CreateSession(ctx, &sdk.CreateSessionRequest{Title: "见外 MCP 智能体对话"})
+ 			if err != nil {
+ 				return toolErrorResult(cmdutil.WrapHTTP(err, "create chat session")), nil, nil
+ 			}
+diff --git a/client/knowledge.go b/client/knowledge.go
+index 1c6efe16..52efc02f 100644
+--- a/client/knowledge.go
++++ b/client/knowledge.go
+@@ -815,9 +815,16 @@ type UpdateManualKnowledgeRequest struct {
+ 	Content string `json:"content,omitempty"`
+ }
+ 
+-// BatchUpdateKnowledgeTagsRequest contains the mapping of knowledge IDs to tag IDs.
++// BatchUpdateKnowledgeTagsRequest 保留旧版“每条知识最多一个标签”的请求类型。
++// Deprecated: 请改用 BatchReplaceKnowledgeTagsRequest。
+ type BatchUpdateKnowledgeTagsRequest struct {
+-	Updates map[string]*string `json:"updates"` // knowledge_id -> tag_id (nil to clear)
++	Updates map[string]*string `json:"updates"`
++}
++
++// BatchReplaceKnowledgeTagsRequest 保存知识 ID 到标签 ID 列表的映射。
++// 空数组表示清空该知识的全部标签。
++type BatchReplaceKnowledgeTagsRequest struct {
++	Updates map[string][]string `json:"updates"`
+ }
+ 
+ // CreateManualKnowledge creates a knowledge entry from manual Markdown content.
+@@ -959,10 +966,18 @@ func (c *Client) PreviewKnowledgeFile(ctx context.Context, knowledgeID string) (
+ 	return c.doRequest(ctx, http.MethodGet, path, nil, nil)
+ }
+ 
+-// BatchUpdateKnowledgeTags batch updates knowledge tags.
+-// The updates map contains knowledge_id -> tag_id mappings. Set tag_id to nil to clear the tag.
+-func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[string]*string) error {
+-	request := &BatchUpdateKnowledgeTagsRequest{Updates: updates}
++// BatchReplaceKnowledgeTags 批量整体替换知识标签。
++// updates 的键为 knowledge_id，值为多个 tag_id；空数组表示精确清空全部标签。
++func (c *Client) BatchReplaceKnowledgeTags(ctx context.Context, updates map[string][]string) error {
++	normalized := make(map[string][]string, len(updates))
++	for knowledgeID, tagIDs := range updates {
++		if len(tagIDs) == 0 {
++			normalized[knowledgeID] = []string{}
++			continue
++		}
++		normalized[knowledgeID] = append([]string(nil), tagIDs...)
++	}
++	request := &BatchReplaceKnowledgeTagsRequest{Updates: normalized}
+ 	resp, err := c.doRequest(ctx, http.MethodPut, "/api/v1/knowledge/tags", request, nil)
+ 	if err != nil {
+ 		return err
+@@ -975,3 +990,17 @@ func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[strin
+ 
+ 	return parseResponse(resp, &batchResponse)
+ }
++
++// BatchUpdateKnowledgeTags 兼容旧版“每条知识最多一个标签”的调用契约。
++// Deprecated: 请改用 BatchReplaceKnowledgeTags；nil 或空字符串会转换为空数组。
++func (c *Client) BatchUpdateKnowledgeTags(ctx context.Context, updates map[string]*string) error {
++	normalized := make(map[string][]string, len(updates))
++	for knowledgeID, tagID := range updates {
++		if tagID == nil || *tagID == "" {
++			normalized[knowledgeID] = []string{}
++			continue
++		}
++		normalized[knowledgeID] = []string{*tagID}
++	}
++	return c.BatchReplaceKnowledgeTags(ctx, normalized)
++}
+diff --git a/client/knowledge_tags_test.go b/client/knowledge_tags_test.go
+new file mode 100644
+index 00000000..98a8a41e
+--- /dev/null
++++ b/client/knowledge_tags_test.go
+@@ -0,0 +1,97 @@
++package client
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"reflect"
++	"testing"
++)
++
++func newKnowledgeTagsRequestServer(t *testing.T, requestBody chan<- []byte) *httptest.Server {
++	t.Helper()
++	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPut {
++			t.Errorf("method = %s, want PUT", r.Method)
++		}
++		if r.URL.Path != "/api/v1/knowledge/tags" {
++			t.Errorf("path = %s, want /api/v1/knowledge/tags", r.URL.Path)
++		}
++		raw, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Errorf("read request body: %v", err)
++		}
++		requestBody <- raw
++		w.Header().Set("Content-Type", "application/json")
++		if err := json.NewEncoder(w).Encode(map[string]any{"success": true}); err != nil {
++			t.Errorf("encode response: %v", err)
++		}
++	}))
++}
++
++func TestBatchReplaceKnowledgeTagsSendsMultipleTagsAndExactEmptyArray(t *testing.T) {
++	requestBody := make(chan []byte, 1)
++	server := newKnowledgeTagsRequestServer(t, requestBody)
++	defer server.Close()
++
++	client := NewClient(server.URL, WithAPIKey("sk-test"))
++	err := client.BatchReplaceKnowledgeTags(context.Background(), map[string][]string{
++		"knowledge-multiple": {"tag-a", "tag-b"},
++		"knowledge-clear":    {},
++		"knowledge-nil":      nil,
++	})
++	if err != nil {
++		t.Fatalf("BatchReplaceKnowledgeTags() error = %v", err)
++	}
++
++	var request struct {
++		Updates map[string]json.RawMessage `json:"updates"`
++	}
++	if err := json.Unmarshal(<-requestBody, &request); err != nil {
++		t.Fatalf("decode request: %v", err)
++	}
++	if got := string(request.Updates["knowledge-multiple"]); got != `["tag-a","tag-b"]` {
++		t.Errorf("multiple tags = %s, want [\"tag-a\",\"tag-b\"]", got)
++	}
++	if got := string(request.Updates["knowledge-clear"]); got != `[]` {
++		t.Errorf("clear tags = %s, want []", got)
++	}
++	if got := string(request.Updates["knowledge-nil"]); got != `[]` {
++		t.Errorf("nil tags = %s, want []", got)
++	}
++}
++
++func TestBatchUpdateKnowledgeTagsPreservesLegacySignatureAndSendsArrayContract(t *testing.T) {
++	requestBody := make(chan []byte, 1)
++	server := newKnowledgeTagsRequestServer(t, requestBody)
++	defer server.Close()
++
++	tagID := "tag-a"
++	emptyTagID := ""
++	client := NewClient(server.URL, WithAPIKey("sk-test"))
++	legacyRequest := BatchUpdateKnowledgeTagsRequest{Updates: map[string]*string{
++		"knowledge-single": &tagID,
++		"knowledge-clear":  nil,
++		"knowledge-empty":  &emptyTagID,
++	}}
++	err := client.BatchUpdateKnowledgeTags(context.Background(), legacyRequest.Updates)
++	if err != nil {
++		t.Fatalf("BatchUpdateKnowledgeTags() error = %v", err)
++	}
++
++	var request BatchReplaceKnowledgeTagsRequest
++	if err := json.Unmarshal(<-requestBody, &request); err != nil {
++		t.Fatalf("decode request: %v", err)
++	}
++	if got := request.Updates["knowledge-single"]; !reflect.DeepEqual(got, []string{"tag-a"}) {
++		t.Errorf("single tags = %#v, want []string{\"tag-a\"}", got)
++	}
++	if got := request.Updates["knowledge-clear"]; got == nil || len(got) != 0 {
++		t.Errorf("clear tags = %#v, want non-nil empty slice", got)
++	}
++	if got := request.Updates["knowledge-empty"]; got == nil || len(got) != 0 {
++		t.Errorf("empty tag = %#v, want non-nil empty slice", got)
++	}
++}

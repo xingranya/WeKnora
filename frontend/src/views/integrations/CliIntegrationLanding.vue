@@ -75,13 +75,13 @@ import { useApiBaseUrlDisplay } from '@/composables/useApiBaseUrlDisplay'
 import { copyWithToast } from '@/utils/clipboard'
 import IntegrationLandingLayout from './IntegrationLandingLayout.vue'
 import IntegrationExternalCta from './IntegrationExternalCta.vue'
-import { buildCLIConnectCommand } from './cliIntegration'
+import { buildCLIConnectCommand, buildCLIInstallCommand } from './cliIntegration'
 
 const { apiBaseUrlDisplay } = useApiBaseUrlDisplay()
 const steps = computed(() => [
   {
     key: 'install',
-    command: 'git clone https://github.com/Tencent/WeKnora.git\ncd WeKnora/cli\ngo build -o weknora .\nexport PATH="$PWD:$PATH"',
+    command: buildCLIInstallCommand(),
   },
   { key: 'connect', command: buildCLIConnectCommand(apiBaseUrlDisplay.value, window.location.origin) },
   { key: 'verify', command: 'weknora doctor\nweknora kb list' },

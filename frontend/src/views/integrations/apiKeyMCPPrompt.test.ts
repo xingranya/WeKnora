@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildAPIKeyMCPPrompt, mcpKeyAvailability } from './apiKeyMCPPrompt'
-import { resolveCLIServiceRoot } from './cliIntegration'
+import { JIWAI_CLI_RELEASE, resolveCLIServiceRoot } from './cliIntegration'
 import type { TenantAPIKey } from '@/api/tenant'
 import zhCN from '@/i18n/locales/zh-CN'
 import enUS from '@/i18n/locales/en-US'
@@ -32,6 +32,11 @@ test('MCP 使用真实服务根地址并保留反向代理前缀', () => {
   assert.doesNotMatch(prompt, /sk-abcd\.\.\.wxyz/)
   assert.match(prompt, /"args": \[\s*"--profile",\s*"jiwai-mcp-7-12",\s*"mcp",\s*"serve"/)
   assert.match(prompt, /kb-approved/)
+  assert.ok(prompt.includes(JIWAI_CLI_RELEASE.version))
+  assert.ok(prompt.includes(JIWAI_CLI_RELEASE.upstreamCommit))
+  assert.ok(prompt.includes(JIWAI_CLI_RELEASE.patchUrl))
+  assert.ok(prompt.includes(JIWAI_CLI_RELEASE.patchSHA256))
+  assert.ok(prompt.includes(JIWAI_CLI_RELEASE.buildFlags))
 })
 
 test('MCP 子进程清空环境凭据和地址，使用所选 profile 且不复制密钥到配置', () => {
@@ -75,7 +80,7 @@ test('过期、撤销列表值、平台 Key 与无检索能力均不可选，完
 test('所有语言的提示词保留十工具范围、凭据与真实 MCP 验收要求', () => {
   for (const locale of [zhCN, enUS, jaJP, koKR, ruRU]) {
     const prompt = locale.integrations.api.mcpSetup.prompt
-    for (const field of ['serviceRoot', 'apiKey', 'profileName', 'profileCommand', 'loginCommand', 'mcpConfig', 'capabilities', 'knowledgeBaseScope']) {
+    for (const field of ['serviceRoot', 'apiKey', 'profileName', 'profileCommand', 'loginCommand', 'mcpConfig', 'capabilities', 'knowledgeBaseScope', 'cliVersion', 'cliSourceUrl', 'cliUpstreamCommit', 'cliPatchUrl', 'cliPatchSHA256', 'cliBuildFlags']) {
       assert.ok(prompt.includes(`{${field}}`), `missing ${field}`)
     }
     for (const tool of ['kb_list', 'kb_view', 'doc_list', 'doc_view', 'doc_download', 'search_chunks', 'chunk_list', 'agent_list', 'chat', 'session_ask']) {
@@ -93,5 +98,10 @@ test('所有语言的提示词保留十工具范围、凭据与真实 MCP 验收
     }
     assert.match(prompt, /恢复失败不能报告完成|Do not report completion if restoration fails/)
     assert.match(prompt, /不要修改全局环境变量|do not change global environment variables/)
+    assert.match(prompt, /Get-FileHash -Algorithm SHA256/)
+    assert.match(prompt, /git apply --check/)
+    assert.match(prompt, /LOCALAPPDATA\/Programs\/JiwaiCLI/)
+    assert.match(prompt, /先备份目标位置已有程序|Back up an existing target binary/)
+    assert.match(prompt, /最终二进制的绝对路径|final absolute binary path/)
   }
 })

@@ -374,7 +374,7 @@ export default {
       docsHint: '安装说明与完整命令参考',
       quickstart: '快速开始',
       installTitle: '安装 CLI',
-      installDesc: '目前支持源码构建，需要 Git 和 Go 1.26+。以下示例适用于 macOS / Linux，PATH 设置仅在当前终端生效；长期使用请将二进制放入 PATH 目录。',
+      installDesc: '安装与当前服务匹配的见外公司版本，已内置 MCP。需要 Git、Go 1.26+ 和 curl。以下 macOS / Linux 命令固定源码版本、校验补丁后编译，备份已有程序并安装到 ~/.local/bin；PATH 只在当前终端生效，不修改个人连接或 shell 配置。',
       connectTitle: '连接当前服务',
       connectDesc: '创建并启用名为 weknora 的连接配置，然后使用邮箱和密码登录。如果已有同名配置，请更换名称，并同步修改 MCP 示例中的配置名。',
       verifyTitle: '验证连接',
@@ -382,7 +382,7 @@ export default {
       commandsTitle: '常用命令',
       commandsDesc: '将 KB_ID 替换为知识库 ID，按需替换文件路径、检索词和问题。上传后的文档需解析完成才能检索。',
       mcpTitle: '接入 MCP 客户端',
-      mcpDesc: '完成登录后，将以下配置添加到支持 stdio 的 MCP 客户端。若客户端无法找到 weknora，请将 command 改为二进制的绝对路径。',
+      mcpDesc: '完成登录后，将以下配置添加到支持 stdio 的 MCP 客户端。command 必须替换为已安装程序在持久用户目录中的完整绝对路径，不使用临时源码目录或未展开的 ~。',
       copy: '复制',
       copied: '已复制',
     },
@@ -556,7 +556,7 @@ export default {
           "unavailable": "不可用",
           "noRetrieval": "无检索权限"
         },
-        "prompt": "请把见外知识库接入我当前使用的 Agent，并实际通过 MCP 使用。\n\n服务根地址：{serviceRoot}\nAPI Key（机密，仅供本机私有保存）：{apiKey}\n独立连接配置名：{profileName}\n此 Key 的能力：{capabilities}\n知识库范围：{knowledgeBaseScope}（空数组表示此 Key 未限制知识库；不增加账号或 Key 的权限）\n\n1. CLI 已内置 MCP 服务，无需单独安装另一套 MCP。请在同一流程完成 CLI 安装、MCP 配置和实际验证。识别当前 Agent 和操作系统，先检查已有见外 CLI 是否支持 mcp serve。可用则复用；否则按官方 CLI 文档安装适配当前系统的版本并验证命令。不要把仅支持远程 HTTP MCP 的平台说成本机 stdio 已接入。\n2. 在安装、登录和验证 CLI 的各个子进程中，局部清空 WEKNORA_TOKEN、WEKNORA_API_KEY、WEKNORA_HOST，避免继承的凭据或地址覆盖所选配置；不要修改全局环境变量。用 weknora profile list --format json 读取并记录原默认 profile（current 为 true；原本没有则记为无）。使用上面的独立名称，保留已有默认配置。同名配置只有确认服务地址和凭据归属一致时才可复用；否则选一个未占用名称并同步替换下面所有位置。创建命令：\n{profileCommand}\n3. 将上面的 API Key 通过进程标准输入传给以下命令，禁止把 Key 写入命令参数或 shell 历史：\n{loginCommand}\n登录后再次读取 weknora profile list --format json。若已有默认配置被 CLI 切换，执行 weknora profile use 加上记录的原名称来恢复，再读列表确认；恢复失败不能报告完成。原本没有默认配置时，无需虚构或恢复一个。之后的 CLI 验证均显式指定 --profile {profileName}。使用系统钥匙串或 CLI 私有凭据存储，不把 Key 放入项目、共享配置或日志。不要在输出中回显 Key，不运行并展示 weknora auth token。不要索取或使用共享 Python HTTP MCP 的 MCP_SERVER_AUTH_TOKEN，也不要把此 Key 当成那个服务的 Bearer 凭据。\n4. 识别当前 Agent 的实际 MCP 配置格式，备份并保留已有配置，只添加下面这个 stdio 服务。command 改为已验证的 CLI 二进制绝对路径；保留下面 env 中三个空字符串，使清空环境变量仅影响这个 MCP 子进程，不要删除这些字段。不要在 MCP 配置中再写一份 Key。通用配置：\n{mcpConfig}\n5. 该 MCP 暴露 10 个工具。kb_list、kb_view、doc_list、doc_view、doc_download、search_chunks、chunk_list、agent_list 为只读；chat、session_ask 会创建会话或消息，使用时遵守此 Key 的权限。没有上传、删除或新建知识条目工具；doc_download 单次上限为 1 MiB。不得扩大 Key 权限或改变服务器的用户身份策略，若身份签名要求阻止问答，说明原因，不索取共享 HMAC 密钥。\n6. 重新加载 MCP，完成实际 initialize 和 tools/list，并通过 MCP 调用 kb_list。让我选择知识库和检索问题后，实际调用 search_chunks，给出答案、文档名称和可用来源链接。只写配置或仅运行 CLI 不算验收通过。最后报告实际工具调用、结果及未完成项，不显示密钥和不必要的内部 ID。"
+        "prompt": "请把见外知识库接入我当前使用的 Agent，并实际通过 MCP 使用。\n\n服务根地址：{serviceRoot}\nAPI Key（机密，仅供本机私有保存）：{apiKey}\n独立连接配置名：{profileName}\n此 Key 的能力：{capabilities}\n知识库范围：{knowledgeBaseScope}（空数组表示此 Key 未限制知识库；不增加账号或 Key 的权限）\n\n指定公司版本：{cliVersion}\n官方源码：{cliSourceUrl}\n固定源码提交：{cliUpstreamCommit}\n见外补丁：{cliPatchUrl}\n补丁 SHA-256：{cliPatchSHA256}\n编译参数：-ldflags \"{cliBuildFlags}\"\n\n1. CLI 已内置 MCP 服务，无需单独安装另一套 MCP。请在同一流程完成 CLI 安装、MCP 配置和实际验证。识别当前 Agent 和操作系统，先执行已有 weknora --version 并检查 weknora mcp serve --help；只有版本准确为 {cliVersion} 且支持该 MCP 命令时才复用。否则检查 Git 和 Go 1.26+，在独立源码目录获取上述官方仓库并 checkout --detach 到固定提交，下载见外补丁，macOS / Linux 用 shasum -a 256 或 sha256sum、Windows 用 Get-FileHash -Algorithm SHA256 核对上述哈希。校验不符立即停止；一致后先 git apply --check，再 git apply。进入 cli 目录，使用上述编译参数执行 go build，macOS / Linux 输出 weknora，Windows 输出 weknora.exe。将程序安装到持久的用户目录，例如已有 PATH 中的用户可写目录、~/.local/bin 或 Windows 的 LOCALAPPDATA/Programs/JiwaiCLI；先备份目标位置已有程序，再通过同目录临时文件原子替换。保留连接配置，不覆盖 shell 配置；本次可临时设置 PATH，说明最终二进制的绝对路径。不要把 MCP 指向会被清理的临时源码目录。安装后再次核对公司版本和 MCP 命令；不要把仅支持远程 HTTP MCP 的平台说成本机 stdio 已接入。\n2. 在安装、登录和验证 CLI 的各个子进程中，局部清空 WEKNORA_TOKEN、WEKNORA_API_KEY、WEKNORA_HOST，避免继承的凭据或地址覆盖所选配置；不要修改全局环境变量。用 weknora profile list --format json 读取并记录原默认 profile（current 为 true；原本没有则记为无）。使用上面的独立名称，保留已有默认配置。同名配置只有确认服务地址和凭据归属一致时才可复用；否则选一个未占用名称并同步替换下面所有位置。创建命令：\n{profileCommand}\n3. 将上面的 API Key 通过进程标准输入传给以下命令，禁止把 Key 写入命令参数或 shell 历史：\n{loginCommand}\n登录后再次读取 weknora profile list --format json。若已有默认配置被 CLI 切换，执行 weknora profile use 加上记录的原名称来恢复，再读列表确认；恢复失败不能报告完成。原本没有默认配置时，无需虚构或恢复一个。之后的 CLI 验证均显式指定 --profile {profileName}。使用系统钥匙串或 CLI 私有凭据存储，不把 Key 放入项目、共享配置或日志。不要在输出中回显 Key，不运行并展示 weknora auth token。不要索取或使用共享 Python HTTP MCP 的 MCP_SERVER_AUTH_TOKEN，也不要把此 Key 当成那个服务的 Bearer 凭据。\n4. 识别当前 Agent 的实际 MCP 配置格式，备份并保留已有配置，只添加下面这个 stdio 服务。command 改为已验证的 CLI 二进制绝对路径；保留下面 env 中三个空字符串，使清空环境变量仅影响这个 MCP 子进程，不要删除这些字段。不要在 MCP 配置中再写一份 Key。通用配置：\n{mcpConfig}\n5. 该 MCP 暴露 10 个工具。kb_list、kb_view、doc_list、doc_view、doc_download、search_chunks、chunk_list、agent_list 为只读；chat、session_ask 会创建会话或消息，使用时遵守此 Key 的权限。没有上传、删除或新建知识条目工具；doc_download 单次上限为 1 MiB。不得扩大 Key 权限或改变服务器的用户身份策略，若身份签名要求阻止问答，说明原因，不索取共享 HMAC 密钥。\n6. 重新加载 MCP，完成实际 initialize 和 tools/list，并通过 MCP 调用 kb_list。让我选择知识库和检索问题后，实际调用 search_chunks，给出答案、文档名称和可用来源链接。只写配置或仅运行 CLI 不算验收通过。最后报告实际工具调用、结果及未完成项，不显示密钥和不必要的内部 ID。"
       },
       title: 'API 集成',
       subtitle: '通过 REST API 接入服务，并配置请求如何携带终端用户身份。',
