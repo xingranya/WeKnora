@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"html"
+
 	"github.com/Tencent/WeKnora/internal/models/chat"
 )
 
@@ -20,28 +22,32 @@ func SanitizeMessages(messages []chat.Message) []chat.Message {
 	for i, msg := range messages {
 		// Skip empty non-system messages (some providers reject these)
 		if msg.Content == "" && msg.Role != "system" &&
-			msg.Role != "tool" && len(msg.ToolCalls) == 0 {
+			msg.Role != "tool" && len(msg.ToolCalls) == 0 && len(msg.Images) == 0 {
 			continue
-		}
-
-		// Prevent consecutive same-role messages (except tool results)
-		if len(result) > 0 && msg.Role != "tool" {
-			prev := result[len(result)-1]
-			if prev.Role == msg.Role && prev.Role != "tool" {
-				// Merge with previous message
-				result[len(result)-1].Content += "\n\n" + msg.Content
-				continue
-			}
 		}
 
 		// Verify tool result messages reference a valid tool call
 		if msg.Role == "tool" && msg.ToolCallID != "" {
 			if !hasMatchingToolCall(messages[:i], msg.ToolCallID) {
-				// Orphaned tool result — convert to system message
-				msg.Role = "system"
-				msg.Content = "[Tool result for " + msg.Name + "]: " + msg.Content
+				// Preserve recoverable data without promoting external output to policy.
+				msg.Role = "user"
+				msg.Content = "<untrusted_tool_result name=\"" + html.EscapeString(msg.Name) +
+					"\">\n" + html.EscapeString(msg.Content) + "\n</untrusted_tool_result>"
 				msg.ToolCallID = ""
 				msg.Name = ""
+			}
+		}
+
+		// 孤立工具结果转换后也参与同角色合并，并保留用户追加的图片。
+		if len(result) > 0 && msg.Role != "tool" {
+			prev := result[len(result)-1]
+			if prev.Role == msg.Role && prev.Role != "tool" {
+				result[len(result)-1].Content += "\n\n" + msg.Content
+				if len(msg.Images) > 0 {
+					images := append([]string(nil), prev.Images...)
+					result[len(result)-1].Images = append(images, msg.Images...)
+				}
+				continue
 			}
 		}
 

@@ -132,6 +132,40 @@ func (r *userRepository) UpdateUser(ctx context.Context, user *types.User) error
 	return r.db.WithContext(ctx).Save(user).Error
 }
 
+// UpdateUserPreferences 与工作区切换锁定同一用户行，避免旧用户快照覆盖已提交的偏好。
+func (r *userRepository) UpdateUserPreferences(
+	ctx context.Context, userID string, patch types.UserPreferences,
+) (types.UserPreferences, error) {
+	var preferences types.UserPreferences
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user types.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", userID).First(&user).Error; err != nil {
+			return err
+		}
+		preferences = user.Preferences
+		if patch.BrowserSearchInstructions != nil {
+			preferences.BrowserSearchInstructions = nil
+			if value := *patch.BrowserSearchInstructions; value != "" {
+				preferences.BrowserSearchInstructions = &value
+			}
+		}
+		if patch.LastActiveTenantID != nil {
+			preferences.LastActiveTenantID = nil
+			if value := *patch.LastActiveTenantID; value != 0 {
+				preferences.LastActiveTenantID = &value
+			}
+		}
+		return tx.Model(&user).Update("preferences", preferences).Error
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return types.UserPreferences{}, ErrUserNotFound
+	}
+	if err != nil {
+		return types.UserPreferences{}, err
+	}
+	return preferences, nil
+}
+
 // DeleteUser deletes a user
 func (r *userRepository) DeleteUser(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&types.User{}).Error

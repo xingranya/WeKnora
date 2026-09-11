@@ -25,7 +25,7 @@ try {
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
   });
   const worker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker');
-  const taskWindow = process.env.BROWSERSKILL_TEST_TASK_WINDOW === '1';
+  const taskWindow = process.env.BROWSERSKILL_TEST_TASK_WINDOW !== '0';
   const popup = await browser.newPage();
   await popup.goto(new URL('popup.html', worker.url()).href);
   await popup.locator('details summary').click();
@@ -33,8 +33,13 @@ try {
   await popup.locator('details button').first().click();
   await popup.waitForFunction(() => document.querySelector('#remote-pairing')?.value === '' || document.querySelector('details [role=alert]'));
   if (await popup.locator('details [role=alert]').count()) throw new Error('Extension authorization failed before browser tests');
-  if (taskWindow) {
-    await popup.locator('#bsk-task-window-mode').selectOption('window');
+  if (!taskWindow) {
+    await popup.locator('#bsk-task-window-mode').selectOption('tabs');
+    await popup.waitForFunction(() => {
+      const select = document.querySelector('#bsk-task-window-mode');
+      return select?.value === 'tabs' && !select.disabled;
+    });
+  } else {
     await popup.waitForFunction(() => {
       const select = document.querySelector('#bsk-task-window-mode');
       return select?.value === 'window' && !select.disabled;
@@ -98,7 +103,7 @@ try {
         const tabs=await chrome.tabs.query({windowId:window.id,active:true});
         const windows=await chrome.windows.getAll({windowTypes:['normal']});
         const groups=await chrome.tabGroups.query({windowId:window.id});
-        return {windowId:window.id,tabId:tabs[0].id,windowCount:windows.length,labeled:groups.some(g=>g.title?.startsWith('WeKnora'))};
+        return {windowId:window.id,tabId:tabs[0].id,windowCount:windows.length,labeled:groups.some(g=>g.title?.startsWith('见外'))};
       });
       const background = current.windowId === initial.windowId && current.tabId === initial.tabId && current.windowCount === 1 && current.labeled;
       process.stdout.write(JSON.stringify(background ? {background} : {background, initial, current}) + '\n');

@@ -37,6 +37,31 @@ func (r *switchTenantUserRepo) UpdateUser(_ context.Context, user *types.User) e
 	return nil
 }
 
+func (r *switchTenantUserRepo) UpdateUserPreferences(
+	ctx context.Context, userID string, patch types.UserPreferences,
+) (types.UserPreferences, error) {
+	user, err := r.GetUserByID(ctx, userID)
+	if err != nil {
+		return types.UserPreferences{}, err
+	}
+	if patch.BrowserSearchInstructions != nil {
+		user.Preferences.BrowserSearchInstructions = nil
+		if value := *patch.BrowserSearchInstructions; value != "" {
+			user.Preferences.BrowserSearchInstructions = &value
+		}
+	}
+	if patch.LastActiveTenantID != nil {
+		user.Preferences.LastActiveTenantID = nil
+		if value := *patch.LastActiveTenantID; value != 0 {
+			user.Preferences.LastActiveTenantID = &value
+		}
+	}
+	if err := r.UpdateUser(ctx, user); err != nil {
+		return types.UserPreferences{}, err
+	}
+	return user.Preferences, nil
+}
+
 type countingAuthTokenRepo struct {
 	stubAuthTokenRepo
 	createCalls int

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
@@ -118,7 +119,7 @@ func (m *Manager) AuthorizeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).
 		Encode(map[string]any{
-			"device_id": record.ID, "service_name": "WeKnora",
+			"device_id": record.ID, "service_name": "见外",
 			"expires_at": record.ExpiresAt, "renew_after": record.RenewAfter,
 		})
 }
@@ -241,6 +242,6 @@ func (m *Manager) DownloadExtension(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="browser-skill-weknora.zip"`)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "见外浏览器连接.zip"}))
 	http.ServeFile(w, r, p)
 }

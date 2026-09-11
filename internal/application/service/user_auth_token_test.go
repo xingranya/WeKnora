@@ -100,6 +100,9 @@ func (s *stubUserRepoForAuth) UpdateUser(context.Context, *types.User) error {
 	s.updateCalls++
 	return nil
 }
+func (s *stubUserRepoForAuth) UpdateUserPreferences(context.Context, string, types.UserPreferences) (types.UserPreferences, error) {
+	return types.UserPreferences{}, errors.New("此认证桩不处理偏好更新")
+}
 func (s *stubUserRepoForAuth) DeleteUser(context.Context, string) error { return nil }
 func (s *stubUserRepoForAuth) ListUsers(context.Context, int, int) ([]*types.User, error) {
 	return nil, nil

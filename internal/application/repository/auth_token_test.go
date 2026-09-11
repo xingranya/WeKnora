@@ -176,8 +176,9 @@ func TestSwitchTenantSessionCommitsPreferenceAndTokensAtomically(t *testing.T) {
 			require.NoError(t, db.AutoMigrate(&types.User{}))
 			home := uint64(7)
 			oidc := true
+			browser := "Use my search engine"
 			user := &types.User{ID: "alice", Username: "alice", Email: "alice@example.test",
-				Preferences: types.UserPreferences{LastActiveTenantID: &home, OidcOnlyLogin: &oidc}}
+				Preferences: types.UserPreferences{LastActiveTenantID: &home, OidcOnlyLogin: &oidc, BrowserSearchInstructions: &browser}}
 			require.NoError(t, db.Create(user).Error)
 			repo := NewAuthTokenRepository(db)
 			ctx := context.Background()
@@ -202,6 +203,7 @@ func TestSwitchTenantSessionCommitsPreferenceAndTokensAtomically(t *testing.T) {
 			var count int64
 			require.NoError(t, db.Model(&types.AuthToken{}).Count(&count).Error)
 			require.True(t, *storedUser.Preferences.OidcOnlyLogin)
+			require.Equal(t, browser, storedUser.Preferences.EffectiveBrowserSearchInstructions())
 			if scenario == "成功" {
 				require.NoError(t, err)
 				require.Equal(t, uint64(42), *preferences.LastActiveTenantID)

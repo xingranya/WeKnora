@@ -928,7 +928,7 @@ func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *
 	})
 
 	state := &types.AgentState{}
-	err := engine.streamFinalAnswerToEventBus(context.Background(), "test query", state, "sess-1")
+	err := engine.streamFinalAnswerToEventBus(context.Background(), "test query", state, "sess-1", emptyMessages())
 
 	require.NoError(t, err)
 	require.Len(t, finalAnswerEvents, 2)

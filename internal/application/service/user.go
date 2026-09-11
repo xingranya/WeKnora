@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -620,31 +621,21 @@ func (s *userService) UpdateUserPreferences(
 	userID string,
 	patch types.UserPreferences,
 ) (types.UserPreferences, error) {
-	user, err := s.userRepo.GetUserByID(ctx, userID)
-	if err != nil {
-		return types.UserPreferences{}, err
-	}
-
-	merged := user.Preferences
-	if patch.LastActiveTenantID != nil {
-		// *0 = "forget my preference, fall back to home on next login";
-		// any positive value = set/replace. We do not validate membership
-		// here — invalid values get culled on the next login via
-		// resolveLoginTenantID, keeping this endpoint cheap.
-		if *patch.LastActiveTenantID == 0 {
-			merged.LastActiveTenantID = nil
-		} else {
-			v := *patch.LastActiveTenantID
-			merged.LastActiveTenantID = &v
+	if patch.BrowserSearchInstructions != nil {
+		value := strings.TrimSpace(*patch.BrowserSearchInstructions)
+		if utf8.RuneCountInString(value) > types.MaxBrowserSearchInstructionsLength {
+			return types.UserPreferences{}, fmt.Errorf(
+				"browser search instructions must not exceed %d characters",
+				types.MaxBrowserSearchInstructionsLength,
+			)
 		}
+		if value == types.DefaultBrowserSearchInstructions {
+			value = ""
+		}
+		patch.BrowserSearchInstructions = &value
 	}
-
-	user.Preferences = merged
-	user.UpdatedAt = time.Now()
-	if err := s.userRepo.UpdateUser(ctx, user); err != nil {
-		return types.UserPreferences{}, err
-	}
-	return merged, nil
+	// 只传本次修改的字段，由仓储在事务锁内读取并合并最新偏好。
+	return s.userRepo.UpdateUserPreferences(ctx, userID, patch)
 }
 
 // DeleteUser deletes a user

@@ -293,6 +293,9 @@ func (r *cleanupUserRepo) UpdateUser(_ context.Context, user *types.User) error 
 	return nil
 }
 func (r *cleanupUserRepo) DeleteUser(context.Context, string) error { return nil }
+func (r *cleanupUserRepo) UpdateUserPreferences(context.Context, string, types.UserPreferences) (types.UserPreferences, error) {
+	return types.UserPreferences{}, errors.New("此成员清理桩不处理偏好更新")
+}
 func (r *cleanupUserRepo) ListUsers(context.Context, int, int) ([]*types.User, error) {
 	return nil, nil
 }

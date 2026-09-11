@@ -841,7 +841,7 @@ definitions:
       context_template_id:
         description: |-
           ContextTemplateID references a template ID in prompt_templates/ YAML files.
-          If set and ContextTemplate is empty, the template content will be resolved at startup.
+          If set and ContextTemplate is empty, the template content is resolved at request time for saved agents.
         type: string
       data_analysis_enabled:
         description: |-
@@ -1042,7 +1042,7 @@ definitions:
       system_prompt_id:
         description: |-
           SystemPromptID references a template ID in prompt_templates/ YAML files.
-          If set and SystemPrompt is empty, the template content will be resolved at startup.
+          If set and SystemPrompt is empty, the template content is resolved at request time for saved agents.
         type: string
       temperature:
         description: Temperature for LLM (0-1)
@@ -4236,6 +4236,10 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.UserPreferences:
     properties:
+      browser_search_instructions:
+        description: BrowserSearchInstructions customizes browser search for this
+          user. Nil/empty uses the platform default.
+        type: string
       last_active_tenant_id:
         description: |-
           LastActiveTenantID remembers the last workspace the user actively
@@ -6348,6 +6352,9 @@ definitions:
     type: object
   internal_handler.updateMyPreferencesRequest:
     properties:
+      browser_search_instructions:
+        maxLength: 4000
+        type: string
       last_active_tenant_id:
         description: |-
           LastActiveTenantID lets clients persist "after a fresh login,
@@ -6583,9 +6590,9 @@ info:
   contact:
     name: WeKnora Github
     url: https://github.com/Tencent/WeKnora
-  description: WeKnora 知识库管理系统 API 文档
+  description: 见外知识库管理系统 API 文档
   termsOfService: http://swagger.io/terms/
-  title: WeKnora API
+  title: 见外知识库 API
   version: "1.0"
 paths:
   /agent-chat/{session_id}:
