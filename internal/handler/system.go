@@ -1693,7 +1693,7 @@ func (h *SystemHandler) CreateSystemUser(c *gin.Context) {
 				"idempotent":         true,
 			})
 			c.JSON(http.StatusOK, CreateSystemUserResponse{User: user.ToUserInfo()})
-		case errors.Is(err, service.ErrPasswordPolicy):
+		case errors.Is(err, service.ErrPasswordPolicy), errors.Is(err, service.ErrRegistrationEmailDomain):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		case errors.Is(err, service.ErrUserIdentityConflict):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

@@ -179,6 +179,7 @@
             <h2 class="form-title">{{ $t('auth.login') }}</h2>
             <p class="form-welcome">{{ $t('auth.subtitle') }}</p>
             <p v-if="registrationEnabled" class="form-hint">{{ $t('auth.loginHint') }}</p>
+            <p class="form-hint">{{ $t('auth.emailDomainHint') }}</p>
           </div>
 
           <div class="form-content">
@@ -476,7 +477,8 @@ const registerRules = computed(() => ({
   ],
   email: [
     { required: true, message: t('auth.emailRequired'), type: 'error' },
-    { email: true, message: t('auth.emailInvalid'), type: 'error' }
+    { email: true, message: t('auth.emailInvalid'), type: 'error' },
+    { pattern: /^[^@\s]+@seeway\.co$/i, message: t('auth.registrationEmailDomain'), type: 'error' }
   ],
   password: newPasswordRules(t, complexPasswordEnabled.value),
   confirmPassword: [

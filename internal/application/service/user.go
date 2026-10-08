@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"strings"
@@ -41,6 +42,9 @@ var (
 	// ErrUserUsernameExists is returned by Register when the target entity's
 	// username already exists.
 	ErrUserUsernameExists = errors.New("user with this username already exists")
+
+	// 新账号统一使用公司邮箱；已有账号的认证不受此注册规则影响。
+	ErrRegistrationEmailDomain = errors.New("新账号仅支持使用 @seeway.co 邮箱注册")
 
 	// ErrUserIdentityConflict is returned by AdminCreateUser when only part
 	// of the requested identity (email or username) collides with an existing
@@ -146,6 +150,12 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	existingUser, _ = s.userRepo.GetUserByUsername(ctx, req.Username)
 	if existingUser != nil {
 		return nil, ErrUserUsernameExists
+	}
+
+	address, err := mail.ParseAddress(req.Email)
+	if err != nil || address.Address != req.Email ||
+		!strings.EqualFold(address.Address[strings.LastIndex(address.Address, "@")+1:], "seeway.co") {
+		return nil, ErrRegistrationEmailDomain
 	}
 
 	// Hash password

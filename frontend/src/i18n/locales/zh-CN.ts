@@ -4922,6 +4922,8 @@ export default {
     haveAccount: '已有账户？',
     backToLogin: '返回登录',
     loginHint: '登录以继续使用；首次使用请在下方创建账户。',
+    emailDomainHint: '新账号仅支持 {\'@\'}seeway.co 邮箱；已注册账号可继续使用原邮箱登录。',
+    registrationEmailDomain: '请使用 {\'@\'}seeway.co 邮箱注册',
     firstTime: '首次使用见外传媒知识库？',
     registerSuccess: '注册成功，请登录',
     registerFailed: '注册失败',

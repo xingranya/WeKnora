@@ -2337,6 +2337,8 @@ export default {
     haveAccount: 'Already have an account?',
     backToLogin: 'Back to Login',
     loginHint: 'Sign in to continue, or create an account below if this is your first time.',
+    emailDomainHint: 'New accounts require an {\'@\'}seeway.co email. Existing accounts can still sign in with their original email.',
+    registrationEmailDomain: 'Use an {\'@\'}seeway.co email to register',
     firstTime: 'New to 见外传媒知识库?',
     registerSuccess: 'Registration successful. Please sign in',
     registerFailed: 'Registration failed',

@@ -231,6 +231,17 @@ func TestCreateSystemUserMapsPasswordPolicyTo400(t *testing.T) {
 	}
 }
 
+func TestCreateSystemUserMapsEmailDomainTo400(t *testing.T) {
+	users := &createUserService{err: service.ErrRegistrationEmailDomain}
+	h := &SystemHandler{userSvc: users}
+	w := performCreateSystemUser(t, createSystemUserRouter(h, "admin-user"), map[string]string{
+		"username": "alice", "email": "alice@example.com", "password": "SecurePass9",
+	})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "@seeway.co") {
+		t.Fatalf("邮箱后缀错误未正确返回：status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestCreateSystemUserDuplicateIdentityReturnsExistingUser(t *testing.T) {
 	// Idempotent contract: when the identity already exists the service
 	// returns the existing user with ErrUserEmailExists/ErrUserUsernameExists,

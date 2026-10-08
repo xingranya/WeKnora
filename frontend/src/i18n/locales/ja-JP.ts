@@ -2369,6 +2369,8 @@ export default {
     haveAccount: 'すでにアカウントをお持ちですか？',
     backToLogin: 'ログインに戻る',
     loginHint: 'ログインして続行してください。初めての方は下からアカウントを作成できます。',
+    emailDomainHint: '新規アカウントには {\'@\'}seeway.co のメールが必要です。登録済みの方は元のメールでログインできます。',
+    registrationEmailDomain: '{\'@\'}seeway.co のメールで登録してください',
     firstTime: "见外传媒知识库は初めてですか？",
     registerSuccess: '登録が完了しました。ログインしてください',
     registerFailed: '登録に失敗しました',

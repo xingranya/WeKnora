@@ -63,7 +63,7 @@ func TestUserServiceRegisterTenantlessSkipsTenantCreation(t *testing.T) {
 
 	user, err := svc.Register(context.Background(), &types.RegisterRequest{
 		Username:           "alice",
-		Email:              "alice@example.com",
+		Email:              "alice@seeway.co",
 		Password:           "supersecret",
 		TenantProvisioning: types.TenantProvisioningTenantless,
 	})

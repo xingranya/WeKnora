@@ -901,9 +901,13 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 		return
 	}
 
-	const defaultEmail = "admin@weknora.local"
+	const defaultEmail = "admin@seeway.co"
 
-	user, _ := h.userService.GetUserByEmail(ctx, defaultEmail)
+	// 优先复用旧桌面版账号，新安装才使用符合公司邮箱规则的默认账号。
+	user, _ := h.userService.GetUserByEmail(ctx, "admin@weknora.local")
+	if user == nil {
+		user, _ = h.userService.GetUserByEmail(ctx, defaultEmail)
+	}
 	if user == nil {
 		logger.Info(ctx, "Auto-setup: creating default user and tenant for lite edition")
 
