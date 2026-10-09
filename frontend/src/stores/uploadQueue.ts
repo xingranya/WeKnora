@@ -147,6 +147,8 @@ export const createUploadQueueStore = (
   getters: {
     activeCount: state => state.tasks.filter(task => ['queued', 'uploading', 'completing', 'waiting_parse', 'parsing', 'status_unknown', 'cancel_requested'].includes(task.status)).length,
     unfinishedCount: state => state.tasks.filter(task => !['completed', 'cancelled'].includes(task.status)).length,
+    completedCount: state => state.tasks.filter(task => task.status === 'completed').length,
+    failedCount: state => state.tasks.filter(task => task.status === 'failed').length,
   },
   actions: {
     hydrate() {
@@ -166,7 +168,7 @@ export const createUploadQueueStore = (
         const rows = JSON.parse(localStorage.getItem(queueStorageKey()) || '[]') as UploadQueueTask[]
         this.tasks = rows.map(task => ({
           ...task,
-          status: ['completed', 'cancelled'].includes(task.status)
+          status: ['completed', 'cancelled', 'failed'].includes(task.status)
             ? task.status
             : task.status === 'cancel_requested' ? 'cancel_requested'
             : task.knowledgeId
@@ -238,7 +240,12 @@ export const createUploadQueueStore = (
     async ensureSession(task: UploadQueueTask): Promise<KnowledgeUploadSession> {
       if (task.uploadId) {
         const response: any = await dependencies.getKnowledgeUpload(task.kbId, task.uploadId)
-        return response.data as KnowledgeUploadSession
+        const session = response.data as KnowledgeUploadSession
+        if (!['expired', 'expired_cleanup_pending'].includes(session.status)) return session
+        const current = this.tasks.find(item => item.id === task.id)
+        if (!current || ['paused', 'cancel_requested', 'cancelled'].includes(current.status)) return session
+        // 过期会话无法续传，保留原文件和上传配置，用新会话重新上传。
+        this.patch(task.id, { uploadId: undefined, chunkSize: undefined, confirmedBytes: 0, displayBytes: 0 })
       }
       const response: any = await dependencies.initializeKnowledgeUpload(task.kbId, {
         file_name: task.fileName,
@@ -312,7 +319,7 @@ export const createUploadQueueStore = (
       const controller = new AbortController()
       this.controllers.set(id, controller)
       const startedAt = dependencies.now()
-      const startingBytes = task.confirmedBytes
+      let startingBytes = task.confirmedBytes
       try {
         let session = await this.ensureSession(task)
         const afterSession = this.tasks.find(item => item.id === id)
@@ -320,7 +327,7 @@ export const createUploadQueueStore = (
           try { await dependencies.cancelKnowledgeUpload(task.kbId, session.id) } catch { /* 服务端会话可能已被取消 */ }
           return
         }
-        if (afterSession.status === 'paused') return
+        if (afterSession.status === 'paused' || afterSession.status === 'cancel_requested') return
         if (session.status === 'completed' && session.knowledge_id) {
           await this.trackKnowledge(id, task, session.knowledge_id)
           return
@@ -342,6 +349,7 @@ export const createUploadQueueStore = (
           return
         }
         await verifyConfirmedFileParts(task, session, controller.signal, dependencies.hashBlob)
+        startingBytes = session.received_bytes
         let offset = session.received_bytes
         const chunkSize = session.chunk_size
         this.patch(id, { status: 'uploading', confirmedBytes: offset, displayBytes: offset, error: undefined })
@@ -445,6 +453,10 @@ export const createUploadQueueStore = (
       }
       if (task.knowledgeId && !file && task.status === 'failed') {
         void this.retryParsing(id, task.knowledgeId)
+        return
+      }
+      if (!file && !task.file) {
+        this.patch(id, { status: 'needs_file', error: undefined })
         return
       }
       this.patch(id, { file: file || task.file, status: 'queued', error: undefined })
@@ -596,6 +608,25 @@ export const createUploadQueueStore = (
     remove(id: string) {
       this.tasks = this.tasks.filter(task => task.id !== id)
       this.persist()
+    },
+    clearCompleted() {
+      this.hydrate()
+      const count = this.completedCount
+      this.tasks = this.tasks.filter(task => task.status !== 'completed')
+      this.persist()
+      return count
+    },
+    retryFailed() {
+      this.hydrate()
+      const ids = this.tasks.filter(task => task.status === 'failed').map(task => task.id)
+      let retried = 0
+      let needsFile = 0
+      for (const id of ids) {
+        this.resume(id)
+        if (this.tasks.find(task => task.id === id)?.status === 'needs_file') needsFile++
+        else retried++
+      }
+      return { retried, needsFile }
     },
   },
 })

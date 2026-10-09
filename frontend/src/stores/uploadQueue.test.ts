@@ -147,6 +147,144 @@ const eventually = async (condition: () => boolean, timeoutMs = 300) => {
   }
 }
 
+test('批量清空只移除成功记录并持久化，保留失败、取消和状态未知任务', () => {
+  storage.clear()
+  storage.setItem('weknora_user', JSON.stringify({ id: 'bulk-user' }))
+  storage.setItem('weknora_selected_tenant_id', '10000')
+  const otherOwner = 'weknora.uploadQueue.v1:another-user:10000'
+  storage.setItem(otherOwner, '[{"id":"other-record"}]')
+  let cancelCalls = 0
+  const dependencies = createDependencies({
+    cancelKnowledgeUpload: async () => { cancelCalls++; return { success: true } },
+    cancelKnowledgeParse: async () => { cancelCalls++; return { success: true } },
+  })
+  const store = createStore(dependencies)
+  store.hydrate()
+  store.tasks = [
+    baseTask({ id: 'success-1', status: 'completed' }),
+    baseTask({ id: 'success-2', status: 'completed' }),
+    baseTask({ id: 'failed', status: 'failed' }),
+    baseTask({ id: 'cancelled', status: 'cancelled' }),
+    baseTask({ id: 'unknown', status: 'status_unknown' }),
+  ]
+
+  assert.equal(store.clearCompleted(), 2)
+  assert.equal(store.completedCount, 0)
+  assert.equal(store.failedCount, 1)
+  assert.deepEqual(store.tasks.map(task => task.id), ['failed', 'cancelled', 'unknown'])
+  const saved = JSON.parse(storage.getItem('weknora.uploadQueue.v1:bulk-user:10000')!)
+  assert.deepEqual(saved.map((task: UploadQueueTask) => task.id), ['failed', 'cancelled', 'unknown'])
+  assert.equal(storage.getItem(otherOwner), '[{"id":"other-record"}]')
+  assert.equal(cancelCalls, 0)
+  assert.equal(store.clearCompleted(), 0)
+  storage.clear()
+})
+
+test('一键重试只处理失败任务，缺失原文件时可继续选择，重复点击不重复提交', async () => {
+  let resolveDetails!: (value: any) => void
+  const details = new Promise(resolve => { resolveDetails = resolve })
+  let parseChecks = 0
+  const dependencies = createDependencies({
+    getKnowledgeDetails: async () => { parseChecks++; return details },
+  })
+  const store = createStore(dependencies)
+  store.activeTaskId = 'running'
+  store.tasks = [
+    baseTask({ id: 'failed-parse', status: 'failed' }),
+    baseTask({ id: 'failed-upload', status: 'failed', knowledgeId: undefined, file: new File(['abc'], 'report.txt') }),
+    baseTask({ id: 'missing-file', status: 'failed', knowledgeId: undefined }),
+    baseTask({ id: 'paused', status: 'paused' }),
+    baseTask({ id: 'completed', status: 'completed' }),
+    baseTask({ id: 'unknown', status: 'status_unknown' }),
+  ]
+  const result = store.retryFailed()
+  assert.equal(result.retried, 2)
+  assert.equal(result.needsFile, 1)
+  assert.equal(store.tasks.find(task => task.id === 'failed-parse')?.status, 'waiting_parse')
+  assert.equal(store.tasks.find(task => task.id === 'failed-upload')?.status, 'queued')
+  assert.equal(store.tasks.find(task => task.id === 'missing-file')?.status, 'needs_file')
+  assert.equal(store.tasks.find(task => task.id === 'paused')?.status, 'paused')
+  assert.equal(store.tasks.find(task => task.id === 'unknown')?.status, 'status_unknown')
+  assert.equal(store.tasks.find(task => task.id === 'completed')?.status, 'completed')
+  assert.equal(store.retryFailed().retried, 0)
+  assert.equal(parseChecks, 1)
+  resolveDetails({ data: { parse_status: 'completed' } })
+  await eventually(() => store.tasks.find(task => task.id === 'failed-parse')?.status === 'completed')
+})
+
+test('刷新后保留失败分类，重试时缺失原文件不会卡在无人执行的排队状态', () => {
+  storage.clear()
+  storage.setItem('weknora_user', JSON.stringify({ id: 'restore-user' }))
+  storage.setItem('weknora_selected_tenant_id', '10000')
+  storage.setItem('weknora.uploadQueue.v1:restore-user:10000', JSON.stringify([
+    baseTask({ status: 'failed', knowledgeId: undefined, uploadId: undefined, error: '网络断开' }),
+  ]))
+  const store = createStore(createDependencies())
+  store.hydrate()
+  assert.equal(store.failedCount, 1)
+  assert.equal(store.tasks[0].status, 'failed')
+  assert.equal(store.retryFailed().needsFile, 1)
+  assert.equal(store.tasks[0].status, 'needs_file')
+  storage.clear()
+})
+
+for (const status of ['expired', 'expired_cleanup_pending']) {
+  test(`过期会话 ${status} 重试时新建会话，从头上传并保留目录与标签`, async () => {
+    let initialized: any
+    const uploads: Array<{ session: string; offset: number }> = []
+    const dependencies = createDependencies({
+      getKnowledgeUpload: async () => ({ data: {
+        ...(await createDependencies().getKnowledgeUpload('kb-1', 'expired-upload')).data,
+        status, knowledge_id: undefined,
+      } }),
+      initializeKnowledgeUpload: async (_kbId, payload) => {
+        initialized = payload
+        return { data: {
+          ...(await createDependencies().initializeKnowledgeUpload('kb-1', payload)).data,
+          id: 'new-upload', chunk_size: 2,
+        } }
+      },
+      uploadKnowledgePart: async (_kbId, session, _part, _blob, offset) => {
+        uploads.push({ session, offset })
+        return { success: true }
+      },
+    })
+    const store = createStore(dependencies)
+    store.tasks = [baseTask({
+      status: 'queued', knowledgeId: undefined, uploadId: 'expired-upload',
+      file: new File(['abc'], 'report.txt', { type: 'text/plain', lastModified: 1 }),
+      targetFolder: '资料/开发', tagIds: ['tag-1'],
+    })]
+    await store.runTask('task-1')
+    await eventually(() => store.tasks[0].status === 'completed')
+    assert.equal(initialized.folder_path, '资料/开发')
+    assert.deepEqual(initialized.tag_ids, ['tag-1'])
+    assert.deepEqual(uploads, [{ session: 'new-upload', offset: 0 }, { session: 'new-upload', offset: 2 }])
+    assert.equal(store.tasks[0].uploadId, 'new-upload')
+  })
+}
+
+test('过期会话查询返回前已取消时不创建新的上传会话', async () => {
+  let resolveSession!: (value: any) => void
+  const response = new Promise(resolve => { resolveSession = resolve })
+  let initializeCalls = 0
+  const dependencies = createDependencies({
+    getKnowledgeUpload: async () => response,
+    initializeKnowledgeUpload: async (_kbId, payload) => {
+      initializeCalls++
+      return createDependencies().initializeKnowledgeUpload('kb-1', payload)
+    },
+  })
+  const store = createStore(dependencies)
+  store.tasks = [baseTask({ status: 'queued', knowledgeId: undefined, file: new File(['abc'], 'report.txt') })]
+  const running = store.runTask('task-1')
+  await store.cancel('task-1')
+  resolveSession({ data: { id: 'expired-upload', status: 'expired' } })
+  await running
+  assert.equal(store.tasks[0].status, 'cancelled')
+  assert.equal(initializeCalls, 0)
+})
+
 test('解析状态查询短暂失败后保持状态未知并继续跟踪服务端终态', async () => {
   let calls = 0
   const dependencies = createDependencies({

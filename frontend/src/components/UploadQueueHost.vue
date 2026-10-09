@@ -22,6 +22,25 @@
         </button>
       </header>
 
+      <div class="upload-queue-toolbar">
+        <div class="upload-queue-filters" role="group" :aria-label="t('knowledgeBase.uploadQueue.filterLabel')">
+          <button v-for="filter in statusFilters" :key="filter.value" type="button" class="queue-filter-btn"
+            :aria-pressed="statusFilter === filter.value" @click="statusFilter = filter.value">
+            {{ t(`knowledgeBase.uploadQueue.filters.${filter.value}`) }}
+            <span class="queue-filter-count">{{ filter.count }}</span>
+          </button>
+        </div>
+        <div class="upload-queue-bulk-actions">
+          <button type="button" class="queue-bulk-btn" :disabled="!completedCount"
+            :title="t('knowledgeBase.uploadQueue.clearCompletedHint')" @click="clearCompleted">
+            <t-icon name="delete" aria-hidden="true" />{{ t('knowledgeBase.uploadQueue.clearCompleted') }}
+          </button>
+          <button type="button" class="queue-bulk-btn" :disabled="!failedCount" @click="retryFailed">
+            <t-icon name="refresh" aria-hidden="true" />{{ t('knowledgeBase.uploadQueue.retryFailed') }}
+          </button>
+        </div>
+      </div>
+
       <div class="upload-queue-list">
         <article v-for="task in orderedTasks" :key="task.id" class="upload-queue-item"
           :aria-labelledby="`upload-task-${task.id}`">
@@ -82,14 +101,16 @@
             </div>
           </div>
         </article>
-        <div v-if="!tasks.length" class="upload-queue-empty">{{ t('knowledgeBase.uploadQueue.empty') }}</div>
+        <div v-if="!orderedTasks.length" class="upload-queue-empty" role="status">
+          {{ emptyMessage }}
+        </div>
       </div>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { MessagePlugin } from 'tdesign-vue-next'
@@ -107,8 +128,19 @@ const { t } = useI18n()
 const authStore = useAuthStore()
 const route = useRoute()
 const queue = useUploadQueueStore()
-const { tasks, activeCount, unfinishedCount } = storeToRefs(queue)
-const orderedTasks = computed(() => [...tasks.value].sort((a, b) => b.createdAt - a.createdAt))
+const { tasks, activeCount, unfinishedCount, completedCount, failedCount } = storeToRefs(queue)
+const statusFilter = ref<'all' | 'completed' | 'failed'>('all')
+const statusFilters = computed(() => [
+  { value: 'all' as const, count: tasks.value.length },
+  { value: 'completed' as const, count: completedCount.value },
+  { value: 'failed' as const, count: failedCount.value },
+])
+const orderedTasks = computed(() => tasks.value
+  .filter(task => statusFilter.value === 'all' || task.status === statusFilter.value)
+  .sort((a, b) => b.createdAt - a.createdAt))
+const emptyMessage = computed(() => t(`knowledgeBase.uploadQueue.${{
+  all: 'empty', completed: 'emptyCompleted', failed: 'emptyFailed',
+}[statusFilter.value]}`))
 const fileInputs = new Map<string, HTMLInputElement>()
 
 watch([() => authStore.isLoggedIn, () => authStore.effectiveTenantId], ([loggedIn]) => {
@@ -139,6 +171,21 @@ const resume = (id: string) => {
   try { queue.resume(id) } catch (error: any) { MessagePlugin.error(error?.message) }
 }
 
+const clearCompleted = () => {
+  const count = queue.clearCompleted()
+  if (count) MessagePlugin.success(t('knowledgeBase.uploadQueue.clearedCompleted', { count }))
+}
+
+const retryFailed = () => {
+  const { retried, needsFile } = queue.retryFailed()
+  if (needsFile) {
+    statusFilter.value = 'all'
+    MessagePlugin.warning(t('knowledgeBase.uploadQueue.retryNeedsFile', { count: retried, needsFile }))
+  } else if (retried) {
+    MessagePlugin.success(t('knowledgeBase.uploadQueue.retryStarted', { count: retried }))
+  }
+}
+
 const setFileInput = (id: string, element: unknown) => {
   if (element instanceof HTMLInputElement) fileInputs.set(id, element)
   else fileInputs.delete(id)
@@ -164,6 +211,17 @@ const selectFile = (id: string, event: Event) => {
 .upload-queue-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--td-component-stroke); }
 .upload-queue-header div { display: flex; flex-direction: column; gap: 2px; }
 .upload-queue-header span { color: var(--td-text-color-placeholder); font-size: 12px; }
+.upload-queue-header, .upload-queue-toolbar { flex-shrink: 0; }
+.upload-queue-toolbar { padding: 10px 16px; border-bottom: 1px solid var(--td-component-stroke); }
+.upload-queue-filters, .upload-queue-bulk-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.upload-queue-bulk-actions { margin-top: 10px; }
+.queue-filter-btn, .queue-bulk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--td-component-stroke); border-radius: 4px; background: var(--td-bg-color-container); color: var(--td-text-color-primary); font: inherit; font-size: 14px; cursor: pointer; }
+.queue-filter-btn[aria-pressed="true"] { border-color: var(--td-brand-color); background: var(--td-brand-color-light); font-weight: 600; }
+.queue-filter-count { font-variant-numeric: tabular-nums; font-size: 12px; }
+.queue-bulk-btn { flex: 1 0 auto; }
+.queue-filter-btn:hover, .queue-bulk-btn:not(:disabled):hover { background: var(--td-bg-color-container-hover); }
+.queue-bulk-btn:disabled { color: var(--td-text-color-disabled); cursor: not-allowed; }
+.queue-filter-btn:focus-visible, .queue-bulk-btn:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
 .upload-queue-list { overflow-y: auto; padding: 8px; }
 .upload-queue-item { padding: 10px; border-bottom: 1px solid var(--td-component-stroke); }
 .upload-item-main { display: grid; grid-template-columns: 24px minmax(0,1fr) 42px; align-items: center; gap: 8px; }
